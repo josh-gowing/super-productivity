@@ -51,10 +51,41 @@
       margin-bottom: var(--s-half);
       gap: var(--header-nav-button-gap);
     }
+
+    // Play button: kill the horizontal margin so the 48px mini-fab fits
+    // the 48px rail instead of overflowing and getting side-clipped.
+    play-button .play-btn-wrapper {
+      margin: 0;
+    }
+
+    // Current-task title: render as a flyout label to the LEFT of the
+    // strip instead of being clipped by the strip's overflow. position:
+    // fixed takes it out of the strip's scroll/clip (the strip has no
+    // transform/filter so it is not a containing block for fixed kids).
+    // Vertically aligned to the play button — always the first item.
+    play-button .current-task-title {
+      position: fixed;
+      right: var(--vertical-action-bar-width);
+      left: auto;
+      top: calc(var(--s-half) + var(--mat-mini-fab-size) / 2);
+      margin: 0;
+      padding: calc(var(--s-half) * 0.75) var(--s);
+      max-width: 320px;
+      z-index: var(--z-vertical-action-bar);
+    }
   }
 
   body.isMac.isElectron > nav.action-nav-right.action-nav-right--teleported {
     padding-top: var(--mac-title-bar-padding);
+  }
+
+  // Keep the flyout aligned to the play button when the strip is pushed
+  // down by the mac title bar.
+  body.isMac.isElectron
+    > nav.action-nav-right.action-nav-right--teleported
+    play-button
+    .current-task-title {
+    top: calc(var(--mac-title-bar-padding) + var(--mat-mini-fab-size) / 2);
   }
 
   body.isNoMac.isObsidianStyleHeader.isElectron
@@ -62,10 +93,26 @@
     padding-top: 40px;
   }
 
+  body.isNoMac.isObsidianStyleHeader.isElectron
+    > nav.action-nav-right.action-nav-right--teleported
+    play-button
+    .current-task-title {
+    top: calc(40px + var(--mat-mini-fab-size) / 2);
+  }
+
   [dir='rtl'] > nav.action-nav-right.action-nav-right--teleported {
     inset: 0 auto 0 0;
     border-left: none;
     border-right: 1px solid var(--separator-color);
+  }
+
+  // RTL: strip is on the left edge, so the flyout opens to its right.
+  [dir='rtl']
+    > nav.action-nav-right.action-nav-right--teleported
+    play-button
+    .current-task-title {
+    right: auto;
+    left: var(--vertical-action-bar-width);
   }
 }
 
