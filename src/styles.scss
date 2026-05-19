@@ -62,6 +62,27 @@
       gap: var(--header-nav-button-gap);
     }
 
+    // These wrapper custom-elements have no box of their own (height 0),
+    // so as direct flex children the strip's `gap` lands on a collapsed
+    // wrapper instead of the button(s) inside — the visible icons end up
+    // unevenly spaced next to real buttons (e.g. the add button). Make
+    // each wrapper a column flex item that stacks its button(s) with the
+    // same gap, and drop truly-empty wrappers so they don't reserve a
+    // phantom gap slot.
+    > plugin-header-btns,
+    > plugin-side-panel-btns,
+    > desktop-panel-buttons,
+    > user-profile-button {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: var(--header-nav-button-gap);
+
+      &:empty {
+        display: none;
+      }
+    }
+
     // Center the mini-fab in the rail; no extra margin so the play button
     // is spaced from the focus button by the same gap as every other pair.
     play-button .play-btn-wrapper {
