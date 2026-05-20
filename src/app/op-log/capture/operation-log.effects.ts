@@ -31,6 +31,10 @@ import { getDeferredActions, isDeferredAction } from './operation-capture.meta-r
 import { ClientIdService } from '../../core/util/client-id.service';
 import { SuperSyncStatusService } from '../sync/super-sync-status.service';
 
+interface WriteOperationOptions {
+  callerHoldsOperationLogLock?: boolean;
+}
+
 /**
  * NgRx Effects for persisting application state changes as operations to the
  * `OperationLogStoreService`. It listens for specific NgRx actions marked
@@ -97,6 +101,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
   private async writeOperation(
     action: PersistentAction,
     skipDequeue = false,
+    options: WriteOperationOptions = {},
   ): Promise<void> {
     const operationTimestamp = Date.now();
     // Always read from ClientIdService (which has its own in-memory cache).
@@ -154,15 +159,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
     }
 
     try {
-      // CRITICAL: Acquire lock BEFORE dequeuing to prevent race condition with flushPendingWrites().
-      // Previously, dequeue happened before lock acquisition, which caused a race:
-      // 1. dequeue() runs, queue becomes 0
-      // 2. flushPendingWrites() polls, sees queue = 0, tries to acquire lock
-      // 3. If flush wins the lock, it returns before this effect writes to IndexedDB
-      // 4. Sync uploads with "No pending operations" even though operations were dispatched
-      //
-      // By acquiring the lock first, flushPendingWrites() must wait for us to finish writing.
-      await this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
+      const writeInsideOperationLogLock = async (): Promise<void> => {
         // MULTI-TAB SAFETY: Clear vector clock cache to ensure fresh read after other tabs
         // may have written while we were waiting for the lock. Each tab has its own in-memory
         // cache, so Tab B's cache could be stale if Tab A wrote while Tab B was waiting.
@@ -278,7 +275,24 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
           // Counter is reset in compaction service on success
           this.triggerCompaction();
         }
-      });
+      };
+
+      if (options.callerHoldsOperationLogLock) {
+        await writeInsideOperationLogLock();
+      } else {
+        // CRITICAL: Acquire lock BEFORE dequeuing to prevent race condition with flushPendingWrites().
+        // Previously, dequeue happened before lock acquisition, which caused a race:
+        // 1. dequeue() runs, queue becomes 0
+        // 2. flushPendingWrites() polls, sees queue = 0, tries to acquire lock
+        // 3. If flush wins the lock, it returns before this effect writes to IndexedDB
+        // 4. Sync uploads with "No pending operations" even though operations were dispatched
+        //
+        // By acquiring the lock first, flushPendingWrites() must wait for us to finish writing.
+        await this.lockService.request(
+          LOCK_NAMES.OPERATION_LOG,
+          writeInsideOperationLogLock,
+        );
+      }
     } catch (e) {
       // 4.1.1 Error Handling for Optimistic Updates
       OpLog.err('OperationLogEffects: Failed to persist operation', e);
@@ -290,7 +304,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
           );
           this.notifyUserAndTriggerRollback();
         } else {
-          await this.handleQuotaExceeded(action, skipDequeue);
+          await this.handleQuotaExceeded(action, skipDequeue, options);
         }
       } else {
         this.notifyUserAndTriggerRollback();
@@ -417,6 +431,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
   private async handleQuotaExceeded(
     action: PersistentAction,
     skipDequeue = false,
+    options: WriteOperationOptions = {},
   ): Promise<void> {
     OpLog.err(
       'OperationLogEffects: Storage quota exceeded, attempting emergency compaction',
@@ -424,6 +439,14 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
 
     // Use lock for cross-tab coordination - only one tab handles quota at a time
     await this.lockService.request('sp_quota_exceeded', async () => {
+      if (options.callerHoldsOperationLogLock) {
+        OpLog.err(
+          'OperationLogEffects: Skipping emergency compaction because operation-log lock is already held',
+        );
+        this.showStorageQuotaExceededError();
+        return;
+      }
+
       const compactionSucceeded = await this.compactionService.emergencyCompact();
 
       if (compactionSucceeded) {
@@ -431,7 +454,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
           // Set circuit breaker before retry to prevent recursive handling
           this.isHandlingQuotaExceeded = true;
           // Retry the failed operation after compaction freed space
-          await this.writeOperation(action, skipDequeue);
+          await this.writeOperation(action, skipDequeue, options);
           this.snackService.open({
             type: 'SUCCESS',
             msg: T.F.SYNC.S.STORAGE_RECOVERED_AFTER_COMPACTION,
@@ -448,14 +471,18 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
       }
 
       // Compaction failed or retry failed - show error with action
-      this.snackService.open({
-        type: 'ERROR',
-        msg: T.F.SYNC.S.STORAGE_QUOTA_EXCEEDED,
-        actionStr: T.PS.RELOAD,
-        actionFn: (): void => {
-          window.location.reload();
-        },
-      });
+      this.showStorageQuotaExceededError();
+    });
+  }
+
+  private showStorageQuotaExceededError(): void {
+    this.snackService.open({
+      type: 'ERROR',
+      msg: T.F.SYNC.S.STORAGE_QUOTA_EXCEEDED,
+      actionStr: T.PS.RELOAD,
+      actionFn: (): void => {
+        window.location.reload();
+      },
     });
   }
 
@@ -478,9 +505,9 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
    * Includes retry logic with exponential backoff to handle transient failures
    * (e.g., IndexedDB quota temporarily exceeded).
    *
-   * Called by OperationApplierService after sync operations are applied.
+   * Called after sync operations are applied and remote op bookkeeping is complete.
    */
-  async processDeferredActions(): Promise<void> {
+  async processDeferredActions(options: WriteOperationOptions = {}): Promise<void> {
     const deferredActions = getDeferredActions();
     if (deferredActions.length === 0) {
       return;
@@ -501,7 +528,7 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         try {
           // skipDequeue=true: deferred actions were buffered, not enqueued
-          await this.writeOperation(action, true);
+          await this.writeOperation(action, true, options);
           success = true;
           break;
         } catch (e) {

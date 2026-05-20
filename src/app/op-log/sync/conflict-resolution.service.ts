@@ -1,4 +1,4 @@
-import { inject, Injectable } from '@angular/core';
+import { inject, Injectable, Injector } from '@angular/core';
 import {
   adjustForClockCorruption as adjustForClockCorruptionCore,
   buildEntityFrontier,
@@ -52,11 +52,16 @@ import { ENTITY_REGISTRY, isSingletonEntityId } from '../core/entity-registry';
 import { uuidv7 } from '../../util/uuid-v7';
 import { CURRENT_SCHEMA_VERSION } from '../persistence/schema-migration.service';
 import { SYNC_LOGGER } from '../core/sync-logger.adapter';
+import { OperationLogEffects } from '../capture/operation-log.effects';
 
 /**
  * Represents the result of LWW (Last-Write-Wins) conflict resolution.
  */
 type LWWResolution = LwwResolvedConflict<Operation, EntityConflict>;
+
+interface AutoResolveConflictsLwwOptions {
+  callerHoldsOperationLogLock?: boolean;
+}
 
 /**
  * Handles sync conflicts using Last-Write-Wins (LWW) automatic resolution.
@@ -95,6 +100,7 @@ export class ConflictResolutionService {
   private clientIdProvider = inject(CLIENT_ID_PROVIDER);
   private syncLogger = inject(SYNC_LOGGER);
   private entityRegistry = inject(ENTITY_REGISTRY);
+  private injector = inject(Injector);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LWW OPERATION FACTORY METHODS
@@ -252,11 +258,14 @@ export class ConflictResolutionService {
    *
    * @param conflicts - Entity conflicts to auto-resolve
    * @param nonConflictingOps - Remote ops that don't conflict (batched for dependency sorting)
+   * @param options - Lock context for deferred local actions flushed after
+   *                  remote clocks and local-win ops are recorded.
    * @returns Promise resolving when all resolutions are applied
    */
   async autoResolveConflictsLWW(
     conflicts: EntityConflict[],
     nonConflictingOps: Operation[] = [],
+    options: AutoResolveConflictsLwwOptions = {},
   ): Promise<{ localWinOpsCreated: number }> {
     if (conflicts.length === 0 && nonConflictingOps.length === 0) {
       return { localWinOpsCreated: 0 };
@@ -391,13 +400,17 @@ export class ConflictResolutionService {
     // ─────────────────────────────────────────────────────────────────────────
     // STEP 5: Apply ALL remote operations in a single batch
     // ─────────────────────────────────────────────────────────────────────────
+    let shouldProcessDeferredActions = false;
     if (allOpsToApply.length > 0) {
       OpLog.normal(
         `ConflictResolutionService: Applying ${allOpsToApply.length} ops in single batch`,
       );
+      shouldProcessDeferredActions = true;
 
       const opIdToSeq = new Map(allStoredOps.map((o) => [o.id, o.seq]));
-      const applyResult = await this.operationApplier.applyOperations(allOpsToApply);
+      const applyResult = await this.operationApplier.applyOperations(allOpsToApply, {
+        skipDeferredLocalActions: true,
+      });
 
       const appliedSeqs = applyResult.appliedOps
         .map((op) => opIdToSeq.get(op.id))
@@ -445,6 +458,9 @@ export class ConflictResolutionService {
         // FIX #6571: Throw on apply failure (parity with applyNonConflictingOps).
         // Previously, apply failures during LWW resolution were logged but not
         // thrown, causing sync to report IN_SYNC despite lost operations.
+        await this._processDeferredActionsAfterRemoteApply(
+          options.callerHoldsOperationLogLock ?? false,
+        );
         throw applyResult.failedOp.error;
       }
     }
@@ -457,6 +473,12 @@ export class ConflictResolutionService {
       await this.opLogStore.appendWithVectorClockUpdate(op, 'local');
       OpLog.normal(
         `ConflictResolutionService: Appended local-win update op ${op.id} for ${op.entityType}:${op.entityId}`,
+      );
+    }
+
+    if (shouldProcessDeferredActions) {
+      await this._processDeferredActionsAfterRemoteApply(
+        options.callerHoldsOperationLogLock ?? false,
       );
     }
 
@@ -482,6 +504,19 @@ export class ConflictResolutionService {
     if (!isValid) this.sessionValidation.setFailed();
 
     return { localWinOpsCreated: newLocalWinOps.length };
+  }
+
+  private async _processDeferredActionsAfterRemoteApply(
+    callerHoldsOperationLogLock: boolean,
+  ): Promise<void> {
+    const operationLogEffects = this.injector.get(OperationLogEffects);
+    if (callerHoldsOperationLogLock) {
+      await operationLogEffects.processDeferredActions({
+        callerHoldsOperationLogLock: true,
+      });
+      return;
+    }
+    await operationLogEffects.processDeferredActions();
   }
 
   /**

@@ -1,4 +1,4 @@
-import { inject, Injectable } from '@angular/core';
+import { inject, Injectable, Injector } from '@angular/core';
 import { applyRemoteOperations } from '@sp/sync-core';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import {
@@ -26,6 +26,7 @@ import { LockService } from './lock.service';
 import { OperationLogCompactionService } from '../persistence/operation-log-compaction.service';
 import { SyncImportFilterService } from './sync-import-filter.service';
 import { OperationWriteFlushService } from './operation-write-flush.service';
+import { OperationLogEffects } from '../capture/operation-log.effects';
 
 /**
  * Handles the core pipeline for processing remote operations.
@@ -56,6 +57,7 @@ export class RemoteOpsProcessingService {
   private compactionService = inject(OperationLogCompactionService);
   private syncImportFilterService = inject(SyncImportFilterService);
   private writeFlushService = inject(OperationWriteFlushService);
+  private injector = inject(Injector);
 
   /** Flag to show newer version warning only once per session */
   private _hasWarnedNewerVersionThisSession = false;
@@ -345,6 +347,7 @@ export class RemoteOpsProcessingService {
         const lwwResult = await this.conflictResolutionService.autoResolveConflictsLWW(
           conflicts,
           nonConflicting,
+          { callerHoldsOperationLogLock: true },
         );
         localWinOpsCreated = lwwResult.localWinOpsCreated;
         return;
@@ -378,8 +381,8 @@ export class RemoteOpsProcessingService {
    * If crash occurs between steps 2-3, ops may be re-applied (idempotent).
    *
    * @param ops - Non-conflicting operations to apply
-   * @param callerHoldsLock - If true, skip lock acquisition in repair operation.
-   *        Pass true when calling from within the sp_op_log lock.
+   * @param callerHoldsLock - If true, deferred local actions reuse the caller's
+   *        sp_op_log lock after remote clocks are merged.
    * @throws Re-throws if application fails (ops marked as failed first)
    */
   async applyNonConflictingOps(
@@ -393,9 +396,18 @@ export class RemoteOpsProcessingService {
     const result = await applyRemoteOperations({
       ops,
       store: this.opLogStore,
-      applier: this.operationApplier,
+      applier: {
+        applyOperations: (opsToApply) =>
+          this.operationApplier.applyOperations(opsToApply, {
+            skipDeferredLocalActions: true,
+          }),
+      },
       isFullStateOperation: this._isFullStateOperation,
     });
+
+    if (result.appendedOps.length > 0) {
+      await this._processDeferredActionsAfterRemoteApply(callerHoldsLock);
+    }
 
     if (result.skippedCount > 0) {
       OpLog.verbose(
@@ -445,6 +457,19 @@ export class RemoteOpsProcessingService {
       op.opType === OpType.BackupImport ||
       op.opType === OpType.Repair
     );
+  }
+
+  private async _processDeferredActionsAfterRemoteApply(
+    callerHoldsLock: boolean,
+  ): Promise<void> {
+    const operationLogEffects = this.injector.get(OperationLogEffects);
+    if (callerHoldsLock) {
+      await operationLogEffects.processDeferredActions({
+        callerHoldsOperationLogLock: true,
+      });
+      return;
+    }
+    await operationLogEffects.processDeferredActions();
   }
 
   /**

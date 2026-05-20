@@ -20,6 +20,7 @@ import {
 import { ClientIdService } from '../../core/util/client-id.service';
 import { OperationCaptureService } from './operation-capture.service';
 import { TaskSharedActions } from '../../root-store/meta/task-shared.actions';
+import { T } from '../../t.const';
 
 describe('OperationLogEffects', () => {
   let effects: OperationLogEffects;
@@ -724,6 +725,48 @@ describe('OperationLogEffects', () => {
       // Vector clock should be incremented from current value (includes remote ops)
       expect(operation.vectorClock['testClient']).toBe(101);
       expect(operation.vectorClock['otherClient']).toBe(50);
+    });
+
+    it('should not acquire nested lock when caller already holds operation log lock', async () => {
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(action);
+
+      await effects.processDeferredActions({ callerHoldsOperationLogLock: true });
+
+      expect(mockLockService.request).not.toHaveBeenCalled();
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledWith(
+        jasmine.objectContaining({
+          actionType: ActionType.TASK_SHARED_UPDATE,
+          clientId: 'testClient',
+        }),
+        'local',
+      );
+    });
+
+    it('should not run emergency compaction while caller already holds operation log lock', async () => {
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(action);
+      mockOpLogStore.appendWithVectorClockUpdate.and.rejectWith(
+        new DOMException('Quota exceeded', 'QuotaExceededError'),
+      );
+
+      await effects.processDeferredActions({ callerHoldsOperationLogLock: true });
+
+      expect(mockCompactionService.emergencyCompact).not.toHaveBeenCalled();
+      expect(mockLockService.request).not.toHaveBeenCalledWith(
+        'sp_op_log',
+        jasmine.any(Function),
+      );
+      expect(mockLockService.request).toHaveBeenCalledWith(
+        'sp_quota_exceeded',
+        jasmine.any(Function),
+      );
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({
+          type: 'ERROR',
+          msg: T.F.SYNC.S.STORAGE_QUOTA_EXCEEDED,
+        }),
+      );
     });
   });
 });

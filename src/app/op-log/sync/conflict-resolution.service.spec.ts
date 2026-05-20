@@ -11,6 +11,7 @@ import { VectorClock, VectorClockComparison } from '../../core/util/vector-clock
 import { CLIENT_ID_PROVIDER } from '../util/client-id.provider';
 import { MAX_VECTOR_CLOCK_SIZE } from '../core/operation-log.const';
 import { buildEntityRegistry, ENTITY_REGISTRY } from '../core/entity-registry';
+import { OperationLogEffects } from '../capture/operation-log.effects';
 
 describe('ConflictResolutionService', () => {
   let service: ConflictResolutionService;
@@ -21,6 +22,7 @@ describe('ConflictResolutionService', () => {
   let mockValidateStateService: jasmine.SpyObj<ValidateStateService>;
   let mockClientIdProvider: { loadClientId: jasmine.Spy };
   let mockEntityRegistry: ReturnType<typeof buildEntityRegistry>;
+  let mockOperationLogEffects: jasmine.SpyObj<OperationLogEffects>;
 
   const TEST_CLIENT_ID = 'test-client-123';
 
@@ -62,6 +64,9 @@ describe('ConflictResolutionService', () => {
     mockValidateStateService = jasmine.createSpyObj('ValidateStateService', [
       'validateAndRepairCurrentState',
     ]);
+    mockOperationLogEffects = jasmine.createSpyObj('OperationLogEffects', [
+      'processDeferredActions',
+    ]);
     mockClientIdProvider = {
       loadClientId: jasmine
         .createSpy('loadClientId')
@@ -77,6 +82,7 @@ describe('ConflictResolutionService', () => {
         { provide: OperationLogStoreService, useValue: mockOpLogStore },
         { provide: SnackService, useValue: mockSnackService },
         { provide: ValidateStateService, useValue: mockValidateStateService },
+        { provide: OperationLogEffects, useValue: mockOperationLogEffects },
         { provide: CLIENT_ID_PROVIDER, useValue: mockClientIdProvider },
         { provide: ENTITY_REGISTRY, useValue: mockEntityRegistry },
       ],
@@ -85,6 +91,7 @@ describe('ConflictResolutionService', () => {
 
     // Default mock behaviors
     mockOperationApplier.applyOperations.and.resolveTo({ appliedOps: [] });
+    mockOperationLogEffects.processDeferredActions.and.resolveTo();
     mockValidateStateService.validateAndRepairCurrentState.and.resolveTo(true);
     mockOpLogStore.getUnsyncedByEntity.and.resolveTo(new Map());
     // By default, appendBatchSkipDuplicates writes all ops (no duplicates)
@@ -1479,6 +1486,52 @@ describe('ConflictResolutionService', () => {
 
         // CRITICAL: mergeRemoteOpClocks must be called with applied remote ops
         expect(mockOpLogStore.mergeRemoteOpClocks).toHaveBeenCalledWith([remoteOp]);
+      });
+
+      it('should process deferred actions after merging remote clocks when caller holds lock', async () => {
+        const now = Date.now();
+        const remoteOp = createOpWithTimestamp('remote-1', 'client-b', now);
+        const conflicts: EntityConflict[] = [
+          createConflict(
+            'task-1',
+            [createOpWithTimestamp('local-1', 'client-a', now - 1000)],
+            [remoteOp],
+          ),
+        ];
+        const callOrder: string[] = [];
+
+        mockOpLogStore.hasOp.and.resolveTo(false);
+        mockOperationApplier.applyOperations.and.callFake(async () => {
+          callOrder.push('applyOperations');
+          return { appliedOps: [remoteOp] };
+        });
+        mockOpLogStore.markApplied.and.callFake(async () => {
+          callOrder.push('markApplied');
+        });
+        mockOpLogStore.mergeRemoteOpClocks.and.callFake(async () => {
+          callOrder.push('mergeRemoteOpClocks');
+        });
+        mockOpLogStore.markRejected.and.resolveTo(undefined);
+        mockOperationLogEffects.processDeferredActions.and.callFake(async () => {
+          callOrder.push('processDeferredActions');
+        });
+
+        await service.autoResolveConflictsLWW(conflicts, [], {
+          callerHoldsOperationLogLock: true,
+        });
+
+        expect(mockOperationApplier.applyOperations).toHaveBeenCalledWith([remoteOp], {
+          skipDeferredLocalActions: true,
+        });
+        expect(mockOperationLogEffects.processDeferredActions).toHaveBeenCalledWith({
+          callerHoldsOperationLogLock: true,
+        });
+        expect(callOrder).toEqual([
+          'applyOperations',
+          'markApplied',
+          'mergeRemoteOpClocks',
+          'processDeferredActions',
+        ]);
       });
 
       it('should call mergeRemoteOpClocks for non-conflicting ops piggybacked through conflict resolution', async () => {
