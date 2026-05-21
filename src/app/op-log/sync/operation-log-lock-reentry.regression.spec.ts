@@ -47,11 +47,11 @@ import { T } from '../../t.const';
 const SHORT_TIMEOUT_MS = 50;
 
 class ShortTimeoutLockService extends LockService {
-  override request(
+  override request<T>(
     name: string,
-    cb: () => Promise<void>,
+    cb: () => Promise<T>,
     timeoutMs: number = SHORT_TIMEOUT_MS,
-  ): Promise<void> {
+  ): Promise<T> {
     return super.request(name, cb, timeoutMs);
   }
 }

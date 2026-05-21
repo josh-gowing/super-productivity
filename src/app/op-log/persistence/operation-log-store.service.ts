@@ -199,6 +199,56 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       this._initPromise = undefined;
     });
     this._db = db;
+    void this._verifyStateCacheConsistencyOnBoot();
+  }
+
+  /**
+   * One-shot forensic check on first DB open: verify that
+   * `state_cache.lastAppliedOpSeq` references an op that actually exists in
+   * OPS. The atomic `runDestructiveStateReplacement` guarantees this
+   * invariant for any code path that writes via the helper — this check
+   * surfaces violations from older partial-state recoveries (pre-#7709
+   * data still on disk after upgrade) or from any future code path that
+   * bypasses the helper.
+   *
+   * Counts-only payload. Never blocks initialization — observability only.
+   */
+  private async _verifyStateCacheConsistencyOnBoot(): Promise<void> {
+    try {
+      const stateCache = await this.db.get(STORE_NAMES.STATE_CACHE, SINGLETON_KEY);
+      if (!stateCache || typeof stateCache.lastAppliedOpSeq !== 'number') {
+        return;
+      }
+      if (stateCache.lastAppliedOpSeq <= 0) {
+        return;
+      }
+      const referencedOp = await this.db.get(
+        STORE_NAMES.OPS,
+        stateCache.lastAppliedOpSeq,
+      );
+      if (referencedOp) {
+        return;
+      }
+      const opsCount = await this.db.count(STORE_NAMES.OPS);
+      const vcClock = await this.db.get(STORE_NAMES.VECTOR_CLOCK, SINGLETON_KEY);
+      Log.critical(
+        '[OpLogStore] state_cache.lastAppliedOpSeq references missing op — possible partial destructive write',
+        {
+          referencedSeq: stateCache.lastAppliedOpSeq,
+          opsCount,
+          stateCacheVectorClockSize: stateCache.vectorClock
+            ? Object.keys(stateCache.vectorClock).length
+            : 0,
+          vectorClockStoreSize: vcClock?.clock ? Object.keys(vcClock.clock).length : 0,
+          schemaVersion: stateCache.schemaVersion ?? null,
+        },
+      );
+    } catch (e) {
+      // Observability only — must not block init. Log and move on.
+      Log.warn('[OpLogStore] Boot-time state_cache consistency check failed to run', {
+        name: (e as Error | undefined)?.name,
+      });
+    }
   }
 
   /**

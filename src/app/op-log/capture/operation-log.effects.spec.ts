@@ -218,6 +218,44 @@ describe('OperationLogEffects', () => {
       });
     });
 
+    it('should capture the post-rotation clientId when a destructive replacement rotates it while this op is queued (#7709)', (done) => {
+      // Simulates the race the fix at operation-log.effects.ts:163-171 closes:
+      // a clean-slate / backup-import is already holding the operation-log lock
+      // and rotates the clientId via ClientIdService.withRotation. A queued op
+      // waiting behind that lock must read the rotated id, not the pre-rotation
+      // id captured before lock acquisition.
+      let persistedClientId = 'oldClient';
+
+      mockLockService.request.and.callFake(
+        async <T>(_name: string, fn: () => Promise<T>) => {
+          // The destructive replacement that we're racing has already mutated
+          // ClientIdService's persisted state by the time we acquire the lock.
+          persistedClientId = 'newClient';
+          return fn();
+        },
+      );
+      mockClientIdService.loadClientId.and.callFake(async () => persistedClientId);
+
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      actions$ = of(action);
+
+      effects.persistOperation$.subscribe({
+        complete: () => {
+          expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledWith(
+            jasmine.objectContaining({ clientId: 'newClient' }),
+            'local',
+          );
+          // Negative assertion: if clientId were read before lock acquisition,
+          // we'd see 'oldClient'. The fix prevents that.
+          expect(mockOpLogStore.appendWithVectorClockUpdate).not.toHaveBeenCalledWith(
+            jasmine.objectContaining({ clientId: 'oldClient' }),
+            jasmine.anything(),
+          );
+          done();
+        },
+      });
+    });
+
     it('should increment vector clock', (done) => {
       const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
       actions$ = of(action);
