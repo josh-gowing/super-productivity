@@ -3,10 +3,6 @@ import { uuidv7 } from '../../util/uuid-v7';
 import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { ClientIdService } from '../../core/util/client-id.service';
-import {
-  PreMigrationBackupService,
-  PreMigrationReason,
-} from './pre-migration-backup.service';
 import { OpLog } from '../../core/log';
 import { Operation, OpType, SyncImportReason } from '../core/operation.types';
 import { ActionType } from '../core/action-types.enum';
@@ -14,35 +10,28 @@ import { CURRENT_SCHEMA_VERSION } from '../persistence/schema-migration.service'
 import { extractEntityKeysFromState } from '../persistence/extract-entity-keys';
 
 /**
+ * Reason a clean-slate was triggered. Logged for diagnostic correlation
+ * (so a future sync-stuck incident can be tied to the cause without
+ * forensic recovery).
+ */
+export type CleanSlateReason = 'ENCRYPTION_CHANGE' | 'MANUAL';
+
+/**
  * Service for performing "clean slate" operations on the sync state.
  *
- * ## What is a Clean Slate?
- * A clean slate operation:
- * 1. Creates a pre-migration backup of current state (optional, placeholder for now)
- * 2. Generates a new client ID and fresh vector clock
- * 3. Creates a new SYNC_IMPORT operation with current state
- * 4. Clears all local operations (fresh start)
- * 5. Uploads the SYNC_IMPORT to server with `isCleanSlate=true` flag
- * 6. Server deletes ALL existing operations and accepts the new baseline
+ * Atomically replaces the local op-log + state_cache + vector_clock with a
+ * fresh baseline derived from current state. Used by encryption-password
+ * changes (which need a fresh sync baseline) and by user-initiated sync
+ * recovery.
  *
- * ## When to Use
- * - **Encryption password changes**: New password requires fresh sync baseline
- * - **Manual recovery**: User-initiated sync reset
- *
- * ## Benefits
- * - Prevents encrypted data from being mixed with unencrypted
- * - Avoids accumulation of old operations on server
- * - Provides clean recovery path for sync issues
- * - Simpler than defensive programming for edge cases
+ * Atomicity within `SUP_OPS` is guaranteed by
+ * `OperationLogStoreService.runDestructiveStateReplacement`; cross-DB
+ * rotation of the clientId (which lives in `pf`) is rolled back on failure
+ * — see issue #7709.
  *
  * @example
  * ```typescript
- * const cleanSlateService = inject(CleanSlateService);
- *
- * // Create clean slate for encryption change
- * await cleanSlateService.createCleanSlate('ENCRYPTION_CHANGE');
- *
- * // Now upload with the new encryption key
+ * await cleanSlateService.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED');
  * await syncService.triggerSync();
  * ```
  */
@@ -53,34 +42,25 @@ export class CleanSlateService {
   private stateSnapshotService = inject(StateSnapshotService);
   private opLogStore = inject(OperationLogStoreService);
   private clientIdService = inject(ClientIdService);
-  private preMigrationBackupService = inject(PreMigrationBackupService);
 
   /**
    * Creates a clean slate by resetting local operation log and preparing
    * a fresh SYNC_IMPORT operation for upload.
    *
-   * ## Process
-   * 1. Creates pre-migration backup (placeholder for now)
-   * 2. Gets current application state
-   * 3. Generates new client ID (fresh start)
-   * 4. Creates fresh vector clock
-   * 5. Creates SYNC_IMPORT operation
-   * 6. Clears all local operations
-   * 7. Stores the new SYNC_IMPORT locally
-   * 8. Updates vector clock
-   * 9. Saves new snapshot
+   * The destructive sequence (clear OPS, append SYNC_IMPORT, write vector
+   * clock, write state_cache) runs as a single atomic transaction. On
+   * failure, the rotated clientId is rolled back so `pf` and `SUP_OPS` stay
+   * consistent.
    *
-   * ## Important Notes
-   * - This method does NOT upload to server - that happens in the next sync
-   * - The SYNC_IMPORT operation will be uploaded with `isCleanSlate=true` flag
-   * - Server will delete all operations when receiving the upload
-   * - Other clients will detect the clean slate and re-sync from new baseline
+   * Does NOT upload to the server — that happens on the next sync, with the
+   * `isCleanSlate=true` flag, which makes the server delete its operations
+   * and accept the new baseline. Other clients then re-sync from the new
+   * baseline.
    *
-   * @param reason - Why the clean slate is being created
-   * @throws If state snapshot cannot be retrieved or operations cannot be stored
+   * @throws If state snapshot cannot be retrieved or operations cannot be stored.
    */
   async createCleanSlate(
-    reason: PreMigrationReason,
+    reason: CleanSlateReason,
     syncImportReason: SyncImportReason,
   ): Promise<void> {
     // Diagnostic snapshot of state about to be wiped. Captured before any
@@ -106,23 +86,13 @@ export class CleanSlateService {
       priorClock: priorClock ?? null,
     });
 
-    // 1. Create pre-migration backup (placeholder for now)
-    try {
-      await this.preMigrationBackupService.createPreMigrationBackup(reason);
-    } catch (e) {
-      OpLog.warn('[CleanSlate] Failed to create pre-migration backup', {
-        name: (e as Error | undefined)?.name,
-        message: (e as Error | undefined)?.message,
-      });
-      // Continue anyway - backup is optional safety feature
-    }
-
-    // 2. Get current application state (includes all features + archives)
-    // IMPORTANT: Must use async version to load real archives from IndexedDB
-    // The sync getStateSnapshot() returns DEFAULT_ARCHIVE (empty) which causes data loss
+    // 1. Get current application state (includes all features + archives).
+    // IMPORTANT: must use the async version to load real archives from
+    // IndexedDB. The sync getStateSnapshot() returns DEFAULT_ARCHIVE (empty)
+    // which causes data loss.
     const currentState = await this.stateSnapshotService.getStateSnapshotAsync();
 
-    // 3. Capture prior clientId so we can roll back the rotation if the
+    // 2. Capture prior clientId so we can roll back the rotation if the
     // destructive replacement fails. The clientId lives in a separate IDB
     // database (`pf`) and so cannot share the atomic tx below; rollback is
     // the next-best guarantee that `pf` and `SUP_OPS` agree on the device's
@@ -131,11 +101,10 @@ export class CleanSlateService {
     const newClientId = await this.clientIdService.generateNewClientId();
     OpLog.normal('[CleanSlate] Generated new client ID', { newClientId });
 
-    // 4. Create fresh vector clock starting at 1 for the new client
+    // 3. Fresh vector clock starting at 1 for the new client.
     const newVectorClock = { [newClientId]: 1 };
 
-    // 5. Create SYNC_IMPORT operation
-    // This will be uploaded to server with isCleanSlate=true flag
+    // 4. SYNC_IMPORT operation. Uploaded next sync with isCleanSlate=true.
     const syncImportOp: Operation = {
       id: uuidv7(),
       actionType: ActionType.LOAD_ALL_DATA,
@@ -155,13 +124,11 @@ export class CleanSlateService {
       clientId: newClientId,
     });
 
-    // 6-9. Atomically replace OPS + state_cache + vector_clock. Issue #7709:
-    // before this was a sequence of independent transactions, and an interrupt
-    // between `clearAllOperations()` and `saveStateCache(...)` on a never-
-    // compacted device left `isWhollyFreshClient()===true` with meaningful
-    // store data — the precondition for the multi-device data-loss chain.
-    // `runDestructiveStateReplacement` makes the destructive sequence either
-    // commit fully or leave the prior state intact.
+    // 5. Atomically replace OPS + state_cache + vector_clock (issue #7709).
+    // On a never-compacted device, the pre-fix sequence could leave
+    // `isWhollyFreshClient()===true` with meaningful store data — the
+    // precondition for the multi-device data-loss chain. See the helper's
+    // JSDoc for the atomicity guarantee.
     OpLog.normal('[CleanSlate] Replacing op-log + state cache atomically');
     try {
       await this.opLogStore.runDestructiveStateReplacement({

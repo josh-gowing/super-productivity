@@ -123,7 +123,7 @@ async runDestructiveStateReplacement(opts) {
 - WebKit on Capacitor iOS has no precedent in this codebase for multi-store readwrite transactions carrying multi-MB payloads (every existing `db.transaction(...)` call in `operation-log-store.service.ts` is single-store). The snapshot-then-swap pattern keeps the cross-store tx small enough to avoid testing the limits.
 - Performance W1's recommendation to "smoke test multi-store tx on each runtime" still applies, but the surface area to test is much smaller.
 
-**On `pre-migration-backup.service.ts`:** This service is currently a placeholder (`PreMigrationBackupService.createPreMigrationBackup` is a no-op that logs `'[PreMigrationBackup] PLACEHOLDER'`). The original plan implied it was a working safety net. **Implement it in PR-A:** before `runDestructiveStateReplacement`, dump the current state + vector clock to a record in the existing `IMPORT_BACKUP` store (`STORE_NAMES.IMPORT_BACKUP`), keyed by `'pre-clean-slate'`. On failure or post-hoc user request, restore via the existing backup-restore flow. This gives a real recovery path independent of IDB atomicity.
+**On `pre-migration-backup.service.ts` — DELETED in PR-A.** The original plan kept a placeholder `PreMigrationBackupService` and proposed implementing it as a recovery path independent of IDB atomicity. With `runDestructiveStateReplacement` now atomic, the safety net it was meant to provide (recover from a partial destructive write) cannot fire — the destructive tx either fully commits or fully rolls back. The placeholder service was deleted along with its DI wiring and stub tests. If a future requirement appears for "user-initiated undo of a successful clean-slate," that should be designed as its own feature, not a vestigial backup layer.
 
 ### Fix 3 (LOAD-BEARING) — Empty-snapshot throw at `operation-log-sync.service.ts:606`
 
@@ -249,7 +249,7 @@ Reordered per multi-review convergence (Correctness S3, Architecture S1, Simplic
 
 | PR | Contents | Risk | Rollback |
 | --- | --- | --- | --- |
-| **PR-A** | Atomicity via `runDestructiveStateReplacement` + pre-migration backup implementation (Fix 2); empty-snapshot fix + `RemoteDataDescriptor` type (Fix 3); dead-code cleanup (Fix 6) | Medium — touches IDB write patterns and the conflict dialog dialog data shape | Single revert |
+| **PR-A** | Atomicity via `runDestructiveStateReplacement` (Fix 2); `PreMigrationBackupService` deleted (atomic replace makes the recovery layer unnecessary). Empty-snapshot fix + `RemoteDataDescriptor` type (Fix 3) and dead-code cleanup (Fix 6) **deferred** to follow-up PRs. | Medium — touches IDB write patterns | Single revert |
 | **PR-B** | Forensic logging (Fix 4) | Very low — pure observability | Trivial |
 | **PR-C** | Confirmation modal (Fix 5) | Low — UI-only, doesn't refuse uploads | Trivial |
 | **PR-D** | *Conditional.* Temporal preflight gate (Fix 1 — temporal, not count-based) + export-to-file escape hatch | Medium — refuses uploads | Trivial via call-site removal |
@@ -263,7 +263,7 @@ PR-A is the actual bug-closing PR — it eliminates Problem A and fixes the empt
 - **`runDestructiveStateReplacement` fault injection:** simulate failure at each step (stage write, verify read, each line of the destructive tx). Verify post-condition is "OPS unchanged, STATE_CACHE singleton unchanged, VECTOR_CLOCK unchanged" — even with a staging row left over.
 - **Boot-time staging reconciliation:** seed STATE_CACHE with a `STATE_CACHE_STAGING_KEY` row, run init, verify the staging row is deleted and the singleton is untouched.
 - **`LocalDataConflictError` shape:** verify each of the three throw sites constructs the correct `RemoteDataDescriptor` variant.
-- **`pre-migration-backup` round-trip:** write a backup via the new implementation, verify it can be restored.
+- ~~**`pre-migration-backup` round-trip:** write a backup via the new implementation, verify it can be restored.~~ Deleted in PR-A — see Fix 2 note above.
 
 ### Integration tests (Karma)
 
@@ -297,14 +297,14 @@ One Playwright test reproducing the issue #7709 chain on the *fixed* code:
 
 These are smaller decisions, not design alternatives:
 
-- **OA1.** Should `IMPORT_BACKUP` store be reused for the pre-migration backup, or should we add a new store? The store already exists for the legacy migration backup; reusing it requires distinguishing the two backups by key.
+- ~~**OA1.** Should `IMPORT_BACKUP` store be reused for the pre-migration backup, or should we add a new store?~~ Moot — `PreMigrationBackupService` deleted in PR-A.
 - **OA2.** Should `runDestructiveStateReplacement` accept the operation entry directly or build it from primitives? Affects testability vs. caller ergonomics.
 - **OA3.** Cross-platform smoke test execution — manual on each runtime before merge, or block on a CI matrix? Currently no Capacitor CI in this repo.
 
 ## What this plan does NOT fix
 
 - **Fully-compromised client.** Out of scope per threat model. A malicious browser extension, XSS attacker with IDB write access, or compromised app process can wipe the user's own server data; the preflight reads NgRx via `StateSnapshotService`, which can be poisoned.
-- **External IDB wipe.** A user whose browser cache is cleared still appears as a fresh client. The atomicity fix doesn't help, but the pre-migration backup (now real, not placeholder) means the user has a JSON export to restore from if they hit the destructive trigger.
+- **External IDB wipe.** A user whose browser cache is cleared still appears as a fresh client. The atomicity fix doesn't help. Users with this risk should keep periodic JSON exports via the existing backup flow.
 - **Server-side acceptance.** Old/buggy/malicious clients can still wipe their own server data because the server trusts `isCleanSlate=true` unconditionally. Server-side completeness gating (Alternatives alt #1) is the right follow-up and is tracked as a separate plan.
 
 ## Evidence / verification

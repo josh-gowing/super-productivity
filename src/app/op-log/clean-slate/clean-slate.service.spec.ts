@@ -3,7 +3,6 @@ import { CleanSlateService } from './clean-slate.service';
 import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { ClientIdService } from '../../core/util/client-id.service';
-import { PreMigrationBackupService } from './pre-migration-backup.service';
 import { OpType, OperationLogEntry } from '../core/operation.types';
 import { ActionType } from '../core/action-types.enum';
 import { CURRENT_SCHEMA_VERSION } from '../persistence/schema-migration.service';
@@ -14,7 +13,6 @@ describe('CleanSlateService', () => {
   let mockStateSnapshotService: jasmine.SpyObj<StateSnapshotService>;
   let mockOpLogStore: jasmine.SpyObj<OperationLogStoreService>;
   let mockClientIdService: jasmine.SpyObj<ClientIdService>;
-  let mockPreMigrationBackupService: jasmine.SpyObj<PreMigrationBackupService>;
 
   const mockState = {
     task: { ids: [], entities: {} },
@@ -37,9 +35,6 @@ describe('CleanSlateService', () => {
       'loadClientId',
       'persistClientId',
     ]);
-    mockPreMigrationBackupService = jasmine.createSpyObj('PreMigrationBackupService', [
-      'createPreMigrationBackup',
-    ]);
 
     TestBed.configureTestingModule({
       providers: [
@@ -47,10 +42,6 @@ describe('CleanSlateService', () => {
         { provide: StateSnapshotService, useValue: mockStateSnapshotService },
         { provide: OperationLogStoreService, useValue: mockOpLogStore },
         { provide: ClientIdService, useValue: mockClientIdService },
-        {
-          provide: PreMigrationBackupService,
-          useValue: mockPreMigrationBackupService,
-        },
       ],
     });
 
@@ -61,7 +52,6 @@ describe('CleanSlateService', () => {
     mockClientIdService.loadClientId.and.resolveTo('ePrior');
     mockClientIdService.generateNewClientId.and.resolveTo('eNewC');
     mockClientIdService.persistClientId.and.resolveTo();
-    mockPreMigrationBackupService.createPreMigrationBackup.and.resolveTo();
     mockOpLogStore.runDestructiveStateReplacement.and.resolveTo();
     mockOpLogStore.getVectorClock.and.resolveTo(null);
     mockOpLogStore.getUnsynced.and.resolveTo([]);
@@ -70,11 +60,6 @@ describe('CleanSlateService', () => {
   describe('createCleanSlate', () => {
     it('should create a clean slate successfully', async () => {
       await service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED');
-
-      // Should create pre-migration backup
-      expect(mockPreMigrationBackupService.createPreMigrationBackup).toHaveBeenCalledWith(
-        'ENCRYPTION_CHANGE',
-      );
 
       // Should get current state (async version to include archives)
       expect(mockStateSnapshotService.getStateSnapshotAsync).toHaveBeenCalled();
@@ -154,22 +139,7 @@ describe('CleanSlateService', () => {
     it('should work with MANUAL reason', async () => {
       await service.createCleanSlate('MANUAL', 'PASSWORD_CHANGED');
 
-      expect(mockPreMigrationBackupService.createPreMigrationBackup).toHaveBeenCalledWith(
-        'MANUAL',
-      );
-    });
-
-    it('should continue if pre-migration backup fails', async () => {
-      mockPreMigrationBackupService.createPreMigrationBackup.and.rejectWith(
-        new Error('Backup failed'),
-      );
-
-      // Should not throw - backup failure is non-fatal
-      await expectAsync(
-        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
-      ).toBeResolved();
-
-      // Should still complete the destructive replacement
+      // Should still complete the destructive replacement with MANUAL reason.
       expect(mockOpLogStore.runDestructiveStateReplacement).toHaveBeenCalledTimes(1);
     });
 

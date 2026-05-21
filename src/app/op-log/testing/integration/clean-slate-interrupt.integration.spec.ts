@@ -3,7 +3,6 @@ import { OperationLogStoreService } from '../../persistence/operation-log-store.
 import { CleanSlateService } from '../../clean-slate/clean-slate.service';
 import { StateSnapshotService } from '../../backup/state-snapshot.service';
 import { ClientIdService } from '../../../core/util/client-id.service';
-import { PreMigrationBackupService } from '../../clean-slate/pre-migration-backup.service';
 import { SyncLocalStateService } from '../../sync/sync-local-state.service';
 import { TranslateService } from '@ngx-translate/core';
 import { CURRENT_SCHEMA_VERSION } from '../../persistence/schema-migration.service';
@@ -31,7 +30,6 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
   let cleanSlate: CleanSlateService;
   let mockStateSnapshot: jasmine.SpyObj<StateSnapshotService>;
   let mockClientId: jasmine.SpyObj<ClientIdService>;
-  let mockPreMigration: jasmine.SpyObj<PreMigrationBackupService>;
   let mockTranslate: jasmine.SpyObj<TranslateService>;
 
   const meaningfulState = {
@@ -63,11 +61,6 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
     mockClientId.loadClientId.and.resolveTo('cPrior');
     mockClientId.persistClientId.and.resolveTo();
 
-    mockPreMigration = jasmine.createSpyObj('PreMigrationBackupService', [
-      'createPreMigrationBackup',
-    ]);
-    mockPreMigration.createPreMigrationBackup.and.resolveTo();
-
     mockTranslate = jasmine.createSpyObj('TranslateService', ['instant']);
     mockTranslate.instant.and.callFake((k: string) => k);
 
@@ -78,7 +71,6 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
         CleanSlateService,
         { provide: StateSnapshotService, useValue: mockStateSnapshot },
         { provide: ClientIdService, useValue: mockClientId },
-        { provide: PreMigrationBackupService, useValue: mockPreMigration },
         { provide: TranslateService, useValue: mockTranslate },
       ],
     });
