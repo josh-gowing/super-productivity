@@ -122,7 +122,10 @@ describe('PluginBridgeService.workContext — header buttons + embed slot', () =
         { provide: Router, useValue: jasmine.createSpyObj('Router', ['navigate']) },
         {
           provide: PluginHooksService,
-          useValue: jasmine.createSpyObj('PluginHooksService', ['registerHook']),
+          useValue: jasmine.createSpyObj('PluginHooksService', [
+            'registerHook',
+            'unregisterPluginHooks',
+          ]),
         },
         {
           provide: PluginUserPersistenceService,
@@ -146,7 +149,13 @@ describe('PluginBridgeService.workContext — header buttons + embed slot', () =
         },
         Injector,
         { provide: GlobalThemeService, useValue: {} },
-        { provide: PluginIssueProviderRegistryService, useValue: {} },
+        {
+          provide: PluginIssueProviderRegistryService,
+          useValue: jasmine.createSpyObj('PluginIssueProviderRegistryService', [
+            'getRegisteredKey',
+            'unregister',
+          ]),
+        },
         { provide: IssueSyncAdapterRegistryService, useValue: {} },
         { provide: PluginHttpService, useValue: {} },
         { provide: DataInitService, useValue: { reInit: () => Promise.resolve() } },
@@ -212,6 +221,18 @@ describe('PluginBridgeService.workContext — header buttons + embed slot', () =
       const btns = service.workContextHeaderButtons();
       expect(btns.length).toBe(1);
       expect(btns[0].onClick).toBe(second);
+    });
+
+    it('rejects showFor entries outside PROJECT|TAG|TODAY', () => {
+      const { service } = setup();
+      const api = service.createBoundMethods(PLUGIN_A, manifest(PLUGIN_A));
+      expect(() =>
+        api.registerWorkContextHeaderButton({
+          label: 'Bad',
+          onClick: () => {},
+          showFor: ['PROJECT', 'FOOBAR' as unknown as 'PROJECT'],
+        }),
+      ).toThrowError(/showFor contains invalid value/);
     });
   });
 
@@ -298,6 +319,44 @@ describe('PluginBridgeService.workContext — header buttons + embed slot', () =
       const apiB = service.createBoundMethods(PLUGIN_B, manifest(PLUGIN_B));
       apiA.showInWorkContext();
       apiB.closeWorkContextView();
+      expect(service.workContextEmbedPluginId()).toBe(PLUGIN_A);
+    });
+  });
+
+  describe('unregisterPluginHooks cleanup', () => {
+    it('removes header buttons + clears embed slot owned by the unloaded plugin', () => {
+      const { service } = setup();
+      const apiA = service.createBoundMethods(PLUGIN_A, manifest(PLUGIN_A));
+      const apiB = service.createBoundMethods(PLUGIN_B, manifest(PLUGIN_B));
+      apiA.registerWorkContextHeaderButton({
+        label: 'A1',
+        onClick: () => {},
+        showFor: ['PROJECT'],
+      });
+      apiB.registerWorkContextHeaderButton({
+        label: 'B1',
+        onClick: () => {},
+        showFor: ['PROJECT'],
+      });
+      apiA.showInWorkContext();
+      expect(service.workContextEmbedPluginId()).toBe(PLUGIN_A);
+      expect(service.workContextHeaderButtons().length).toBe(2);
+
+      service.unregisterPluginHooks(PLUGIN_A);
+
+      expect(service.workContextEmbedPluginId()).toBeNull();
+      const remaining = service.workContextHeaderButtons();
+      expect(remaining.length).toBe(1);
+      expect(remaining[0].pluginId).toBe(PLUGIN_B);
+    });
+
+    it('keeps the embed slot when a non-owning plugin unloads', () => {
+      const { service } = setup();
+      const apiA = service.createBoundMethods(PLUGIN_A, manifest(PLUGIN_A));
+      const apiB = service.createBoundMethods(PLUGIN_B, manifest(PLUGIN_B));
+      apiA.showInWorkContext();
+      void apiB;
+      service.unregisterPluginHooks(PLUGIN_B);
       expect(service.workContextEmbedPluginId()).toBe(PLUGIN_A);
     });
   });

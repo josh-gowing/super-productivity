@@ -166,6 +166,12 @@ export const createPluginApiScript = (config: PluginIframeConfig): string => {
 
         // Handle responses from parent
         window.addEventListener('message', function(event) {
+          // Accept messages only from the host (our parent window).
+          // Without this check, any other iframe / sibling window could
+          // spoof API responses, hook events, or work-context button
+          // clicks. The host always posts via the iframe's contentWindow,
+          // so event.source will be window.parent in the legitimate case.
+          if (event.source !== window.parent) return;
           const data = event.data;
           if (data?.type === '${PluginIframeMessageType.API_RESPONSE}' && data.callId) {
             const resolver = pendingCalls.get(data.callId);
@@ -381,6 +387,9 @@ export const createPluginApiScript = (config: PluginIframeConfig): string => {
             // Store the handler and set up message listener
             window.__pluginMessageHandler = handler;
             window.addEventListener('message', async (event) => {
+              // Same origin-check rationale as the listener above —
+              // accept only messages from our parent host.
+              if (event.source !== window.parent) return;
               if (event.data?.type === '${PluginIframeMessageType.MESSAGE}' && window.__pluginMessageHandler) {
                 try {
                   const result = await window.__pluginMessageHandler(event.data.message);

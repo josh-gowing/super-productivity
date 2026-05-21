@@ -43,7 +43,7 @@ import { WorkContextService } from '../features/work-context/work-context.servic
 import { ProjectService } from '../features/project/project.service';
 import { TagService } from '../features/tag/tag.service';
 import typia from 'typia';
-import { first, map, take } from 'rxjs/operators';
+import { first, map, take, timeout } from 'rxjs/operators';
 import { firstValueFrom } from 'rxjs';
 import { selectTaskByIdWithSubTaskData } from '../features/tasks/store/task.selectors';
 import { PluginUserPersistenceService } from './plugin-user-persistence.service';
@@ -532,12 +532,21 @@ export class PluginBridgeService implements OnDestroy {
 
   /**
    * Snapshot of the active work context for plugins. Returns null when no
-   * context is active (e.g. user is on a settings page).
+   * context is active (e.g. user is on a settings page) or when the host
+   * hasn't yet emitted a context within the timeout. Plugins calling this
+   * during their constructor / init hook may hit the timeout because
+   * `_afterDataLoadedOnce$` hasn't unblocked yet — returning null is
+   * preferable to a Promise that never resolves.
    */
   async getActiveWorkContext(): Promise<ActiveWorkContext | null> {
     try {
       const ctx = await firstValueFrom(
-        this._workContextService.activeWorkContext$.pipe(take(1)),
+        this._workContextService.activeWorkContext$.pipe(
+          // 10s is well past normal data-load time but still bounded so
+          // a plugin can fall back to other behaviour instead of hanging.
+          timeout({ first: 10_000 }),
+          take(1),
+        ),
       );
       if (!ctx) return null;
       return {
@@ -1192,6 +1201,15 @@ export class PluginBridgeService implements OnDestroy {
     if (!Array.isArray(cfg.showFor) || cfg.showFor.length === 0) {
       throw new Error(
         'PluginBridge: registerWorkContextHeaderButton requires non-empty showFor',
+      );
+    }
+    // Reject unknown showFor entries — otherwise typos are silently
+    // accepted and the button never shows up, which is hard to debug.
+    const allowedShowFor = new Set(['PROJECT', 'TAG', 'TODAY']);
+    const invalid = cfg.showFor.filter((v) => !allowedShowFor.has(v as string));
+    if (invalid.length > 0) {
+      throw new Error(
+        `PluginBridge: registerWorkContextHeaderButton showFor contains invalid value(s): ${invalid.join(', ')}. Expected one of ${[...allowedShowFor].join(', ')}.`,
       );
     }
     const button: PluginWorkContextHeaderBtnCfg = { ...cfg, pluginId };
