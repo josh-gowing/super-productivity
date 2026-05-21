@@ -128,6 +128,25 @@
         outline: 1px solid var(--c-primary, #3f51b5);
         outline-offset: -1px;
       }
+      /* Subtask: indented, slightly smaller toggle to match the app's
+         sub-task hierarchy without dropping legibility. */
+      .ProseMirror > .sub-task-ref {
+        margin-left: 24px;
+        position: relative;
+      }
+      .ProseMirror > .sub-task-ref::before {
+        content: '';
+        position: absolute;
+        left: -14px;
+        top: 50%;
+        width: 8px;
+        border-top: 1px solid var(--divider-color, rgba(0, 0, 0, 0.12));
+      }
+      .sub-task-ref .done-toggle,
+      .sub-task-ref .done-toggle-svg {
+        width: 18px;
+        height: 18px;
+      }
 
       /* Done-toggle: mirror src/app/ui/done-toggle exactly */
       .task-ref .done-toggle {

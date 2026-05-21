@@ -79,6 +79,85 @@ const createTaskAfter = async (insertPos: number): Promise<void> => {
   }
 };
 
+/**
+ * Sibling of createTaskAfter — creates a subtask under `parentTaskId` and
+ * inserts a subTaskRef block at insertPos. Used by the subtask Enter handler.
+ */
+const createSubTaskAfter = async (
+  insertPos: number,
+  parentTaskId: string,
+): Promise<void> => {
+  if (!editor || !currentCtx) return;
+  try {
+    const taskId = await PluginAPI.addTask({
+      title: '',
+      parentId: parentTaskId,
+      projectId: currentCtx.type === 'PROJECT' ? currentCtx.id : null,
+    });
+    await refreshTaskCache();
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(insertPos, {
+        type: 'subTaskRef',
+        attrs: { taskId, isDone: false },
+        content: [],
+      })
+      .run();
+    editor.commands.focus(insertPos + 1);
+  } catch (err) {
+    PluginAPI.log.err('createSubTaskAfter failed', err);
+  }
+};
+
+/**
+ * Walk doc backwards from a position to find which top-level taskRef owns
+ * the subtask that lives at that position. Returns its taskId, or null
+ * if there is no owning parent (orphan subTaskRef).
+ */
+const findParentTaskIdBefore = (subTaskRefPos: number): string | null => {
+  if (!editor) return null;
+  const doc = editor.state.doc;
+  const idx = doc.resolve(subTaskRefPos).index(0);
+  for (let i = idx - 1; i >= 0; i--) {
+    const child = doc.child(i);
+    if (child.type.name === 'taskRef') {
+      return (child.attrs.taskId as string) || null;
+    }
+    if (child.type.name === 'subTaskRef') {
+      continue;
+    }
+    return null;
+  }
+  return null;
+};
+
+/**
+ * Given a taskRef's nodePos, return the doc position immediately after the
+ * parent's whole "group" — past the parent and any subTaskRefs that follow
+ * it. Used so that Enter at the end of a parent inserts the next sibling
+ * after its subtasks, not between parent and first child.
+ */
+const positionAfterParentGroup = (parentNodePos: number): number => {
+  if (!editor) return parentNodePos;
+  const doc = editor.state.doc;
+  let cursor = 0;
+  for (let i = 0; i < doc.childCount; i++) {
+    const child = doc.child(i);
+    if (cursor === parentNodePos && child.type.name === 'taskRef') {
+      let end = cursor + child.nodeSize;
+      let j = i + 1;
+      while (j < doc.childCount && doc.child(j).type.name === 'subTaskRef') {
+        end += doc.child(j).nodeSize;
+        j++;
+      }
+      return end;
+    }
+    cursor += child.nodeSize;
+  }
+  return parentNodePos;
+};
+
 const TaskRefNode = Node.create({
   name: 'taskRef',
   group: 'block',
@@ -129,8 +208,9 @@ const TaskRefNode = Node.create({
           return true;
         }
         if (info.atEnd) {
-          // Enter at end of chip → new empty task below.
-          const insertAfter = info.nodePos + info.nodeSize;
+          // Enter at end of chip → new empty task below. Skip past any
+          // subtasks of this task so the new sibling lands after the group.
+          const insertAfter = positionAfterParentGroup(info.nodePos);
           void createTaskAfter(insertAfter);
           return true;
         }
@@ -209,9 +289,10 @@ const TaskRefNode = Node.create({
       toggle.contentEditable = 'false';
       toggle.setAttribute('role', 'checkbox');
       toggle.setAttribute('tabindex', '-1');
+      // Squircle (rounded square) — matches the shape used in the app, not a circle.
       toggle.innerHTML = `
         <svg class="done-toggle-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <circle class="done-circle" cx="12" cy="12" r="10"></circle>
+          <rect class="done-circle" x="3" y="3" width="18" height="18" rx="5" ry="5"></rect>
           <polyline class="done-check" points="6,12 10.5,16.5 18,8"></polyline>
         </svg>
       `;
@@ -267,6 +348,198 @@ const TaskRefNode = Node.create({
         contentDOM: title,
         update: (updatedNode: ProseMirrorNode): boolean => {
           if (updatedNode.type.name !== 'taskRef') return false;
+          if (updatedNode.attrs.taskId !== node.attrs.taskId) return false;
+          applyState(updatedNode);
+          return true;
+        },
+      };
+    };
+  },
+});
+
+/**
+ * Subtask variant of taskRef. Same content/attrs/parse/render plumbing but
+ * lives at indent depth — its NodeView adds `.sub-task-ref` so CSS shifts
+ * it right, and Enter/Backspace behaviours target the subtask's parent
+ * instead of the top level.
+ */
+const SubTaskRefNode = Node.create({
+  name: 'subTaskRef',
+  group: 'block',
+  content: 'inline*',
+  selectable: true,
+  draggable: true,
+  addKeyboardShortcuts() {
+    const inSubTaskRef = (): null | {
+      atStart: boolean;
+      atEnd: boolean;
+      isEmpty: boolean;
+      taskId: string;
+      nodePos: number;
+      nodeSize: number;
+    } => {
+      if (!editor) return null;
+      const { $from } = editor.state.selection;
+      if ($from.parent.type.name !== 'subTaskRef') return null;
+      const node = $from.parent;
+      const nodePos = $from.before($from.depth);
+      return {
+        atStart: $from.parentOffset === 0,
+        atEnd: $from.parentOffset === node.content.size,
+        isEmpty: node.content.size === 0,
+        taskId: node.attrs.taskId as string,
+        nodePos,
+        nodeSize: node.nodeSize,
+      };
+    };
+
+    return {
+      Enter: () => {
+        const info = inSubTaskRef();
+        if (!info) return false;
+        if (info.isEmpty) {
+          // Empty subtask + Enter → outdent to paragraph + delete the empty task.
+          if (info.taskId) {
+            PluginAPI.deleteTask(info.taskId).catch((err) =>
+              PluginAPI.log.err('deleteTask failed', err),
+            );
+          }
+          if (!editor) return false;
+          editor.chain().focus().setNodeSelection(info.nodePos).setParagraph().run();
+          return true;
+        }
+        if (info.atEnd) {
+          // Enter at end of subtask → create another subtask under same parent.
+          const parentTaskId = findParentTaskIdBefore(info.nodePos);
+          if (!parentTaskId) return false;
+          const insertAfter = info.nodePos + info.nodeSize;
+          void createSubTaskAfter(insertAfter, parentTaskId);
+          return true;
+        }
+        // Middle: swallow to avoid splitting a chip into two with the same taskId.
+        return true;
+      },
+      Backspace: () => {
+        const info = inSubTaskRef();
+        if (!info) return false;
+        if (!info.atStart) return false;
+        if (info.isEmpty) {
+          if (info.taskId) {
+            PluginAPI.deleteTask(info.taskId).catch((err) =>
+              PluginAPI.log.err('deleteTask failed', err),
+            );
+          }
+          if (!editor) return false;
+          editor.chain().focus().setNodeSelection(info.nodePos).deleteSelection().run();
+          return true;
+        }
+        return true;
+      },
+    };
+  },
+  addAttributes() {
+    return {
+      taskId: { default: '' },
+      isDone: {
+        default: false,
+        parseHTML: (el: HTMLElement) => el.getAttribute('data-done') === 'true',
+        renderHTML: (attrs) => ({ 'data-done': attrs.isDone ? 'true' : 'false' }),
+      },
+    };
+  },
+  parseHTML() {
+    return [
+      {
+        tag: 'div[data-sub-task-ref]',
+        getAttrs: (el: HTMLElement | string) => {
+          if (typeof el === 'string') return false;
+          return {
+            taskId: el.getAttribute('data-task-id') || '',
+            isDone: el.getAttribute('data-done') === 'true',
+          };
+        },
+      },
+    ];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return [
+      'div',
+      mergeAttributes(HTMLAttributes, {
+        'data-sub-task-ref': '',
+        'data-task-id': HTMLAttributes.taskId,
+        class: 'task-ref sub-task-ref',
+      }),
+      0,
+    ];
+  },
+  addNodeView() {
+    return ({ node, editor: viewEditor, getPos }: NodeViewRendererProps) => {
+      const dom = document.createElement('div');
+      dom.className = 'task-ref sub-task-ref';
+      dom.dataset.subTaskRef = '';
+      dom.dataset.taskId = node.attrs.taskId;
+
+      const toggle = document.createElement('span');
+      toggle.className = 'done-toggle';
+      toggle.contentEditable = 'false';
+      toggle.setAttribute('role', 'checkbox');
+      toggle.setAttribute('tabindex', '-1');
+      toggle.innerHTML = `
+        <svg class="done-toggle-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect class="done-circle" x="3" y="3" width="18" height="18" rx="5" ry="5"></rect>
+          <polyline class="done-check" points="6,12 10.5,16.5 18,8"></polyline>
+        </svg>
+      `;
+
+      const title = document.createElement('span');
+      title.className = 'title';
+
+      const applyState = (n: ProseMirrorNode): void => {
+        const taskId = n.attrs.taskId as string;
+        const task = taskCache.get(taskId);
+        if (!task) {
+          dom.classList.add('is-missing');
+          dom.classList.remove('is-done');
+          toggle.setAttribute('aria-checked', 'false');
+          toggle.setAttribute('aria-disabled', 'true');
+        } else {
+          dom.classList.remove('is-missing');
+          const done = !!(n.attrs.isDone || task.isDone);
+          dom.classList.toggle('is-done', done);
+          toggle.setAttribute('aria-checked', done ? 'true' : 'false');
+          toggle.removeAttribute('aria-disabled');
+        }
+      };
+
+      toggle.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const taskId = node.attrs.taskId as string;
+        const task = taskCache.get(taskId);
+        if (!task) return;
+        const next = !task.isDone;
+        PluginAPI.updateTask(taskId, { isDone: next }).catch((err) => {
+          PluginAPI.log.err('updateTask failed', err);
+        });
+        taskCache.set(taskId, { ...task, isDone: next });
+        const pos = typeof getPos === 'function' ? getPos() : null;
+        if (pos !== null && pos !== undefined) {
+          const tr = viewEditor.state.tr.setNodeAttribute(pos, 'isDone', next);
+          viewEditor.view.dispatch(tr);
+        } else {
+          applyState(node);
+        }
+      });
+
+      dom.appendChild(toggle);
+      dom.appendChild(title);
+      applyState(node);
+
+      return {
+        dom,
+        contentDOM: title,
+        update: (updatedNode: ProseMirrorNode): boolean => {
+          if (updatedNode.type.name !== 'subTaskRef') return false;
           if (updatedNode.attrs.taskId !== node.attrs.taskId) return false;
           applyState(updatedNode);
           return true;
@@ -338,14 +611,23 @@ const scheduleSave = (): void => {
  * pulled from the cache (populated by refreshTaskCache before this is
  * called) so the taskRef nodes have content, not just IDs.
  */
-const taskRefNodeJSON = (taskId: string): unknown => {
+const taskNodeJSON = (taskId: string, variant: 'taskRef' | 'subTaskRef'): unknown => {
   const task = taskCache.get(taskId);
   const title = task?.title || '';
   return {
-    type: 'taskRef',
+    type: variant,
     attrs: { taskId, isDone: !!task?.isDone },
     content: title ? [{ type: 'text', text: title }] : [],
   };
+};
+
+const taskRefWithSubtasksJSON = (taskId: string): unknown[] => {
+  const task = taskCache.get(taskId);
+  const out: unknown[] = [taskNodeJSON(taskId, 'taskRef')];
+  for (const subId of task?.subTaskIds ?? []) {
+    out.push(taskNodeJSON(subId, 'subTaskRef'));
+  }
+  return out;
 };
 
 const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
@@ -357,7 +639,7 @@ const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
         attrs: { level: 1 },
         content: [{ type: 'text', text: ctx.title }],
       },
-      ...ctx.taskIds.map(taskRefNodeJSON),
+      ...ctx.taskIds.flatMap(taskRefWithSubtasksJSON),
       { type: 'paragraph' },
     ],
   };
@@ -381,7 +663,7 @@ const migrateStoredDoc = (raw: unknown): unknown => {
   const visit = (node: PMNode | PMText | undefined): PMNode | PMText | undefined => {
     if (!node || typeof node !== 'object') return node;
     if ('text' in node) return node;
-    if (node.type === 'taskRef') {
+    if (node.type === 'taskRef' || node.type === 'subTaskRef') {
       const taskId = (node.attrs?.taskId as string) || '';
       const task = taskCache.get(taskId);
       const hasContent = Array.isArray(node.content) && node.content.length > 0;
@@ -445,11 +727,14 @@ const setActiveContext = async (ctx: ActiveWorkContext | null): Promise<void> =>
   isLoadingDoc = false;
 };
 
-const collectTaskRefIds = (): Set<string> => {
+const isTaskNode = (name: string): name is 'taskRef' | 'subTaskRef' =>
+  name === 'taskRef' || name === 'subTaskRef';
+
+const collectKnownTaskIds = (): Set<string> => {
   const ids = new Set<string>();
   if (!editor) return ids;
   editor.state.doc.descendants((node: ProseMirrorNode): boolean | undefined => {
-    if (node.type.name === 'taskRef' && node.attrs.taskId) {
+    if (isTaskNode(node.type.name) && node.attrs.taskId) {
       ids.add(node.attrs.taskId as string);
     }
     return undefined;
@@ -459,12 +744,54 @@ const collectTaskRefIds = (): Set<string> => {
 
 const appendMissingTask = (taskId: string): void => {
   if (!editor) return;
-  if (collectTaskRefIds().has(taskId)) return;
+  if (collectKnownTaskIds().has(taskId)) return;
+  // Subtasks should be inserted next to their parent, not at the doc end.
+  const task = taskCache.get(taskId);
+  if (task?.parentId) {
+    insertSubtaskByParent(taskId, task.parentId);
+    return;
+  }
   const endPos = editor.state.doc.content.size;
   editor
     .chain()
     .focus(endPos)
     .insertContentAt(endPos, { type: 'taskRef', attrs: { taskId } })
+    .run();
+};
+
+/**
+ * Insert a subTaskRef right after the parent's group (parent taskRef +
+ * any existing subTaskRefs). No-op if the parent is not in the doc.
+ */
+const insertSubtaskByParent = (taskId: string, parentTaskId: string): void => {
+  if (!editor) return;
+  const doc = editor.state.doc;
+  let parentEndPos = -1;
+  let cursor = 0;
+  for (let i = 0; i < doc.childCount; i++) {
+    const child = doc.child(i);
+    if (
+      child.type.name === 'taskRef' &&
+      (child.attrs.taskId as string) === parentTaskId
+    ) {
+      parentEndPos = cursor + child.nodeSize;
+      // Skip past existing subTaskRefs that belong to this parent.
+      let scan = i + 1;
+      let scanCursor = parentEndPos;
+      while (scan < doc.childCount && doc.child(scan).type.name === 'subTaskRef') {
+        scanCursor += doc.child(scan).nodeSize;
+        scan++;
+      }
+      parentEndPos = scanCursor;
+      break;
+    }
+    cursor += child.nodeSize;
+  }
+  if (parentEndPos < 0) return;
+  editor
+    .chain()
+    .focus(parentEndPos)
+    .insertContentAt(parentEndPos, { type: 'subTaskRef', attrs: { taskId } })
     .run();
 };
 
@@ -507,7 +834,7 @@ const writeTitleBack = (taskId: string, newTitle: string): void => {
 const reconcileTitlesFromDoc = (): void => {
   if (!editor || isLoadingDoc) return;
   editor.state.doc.descendants((node) => {
-    if (node.type.name !== 'taskRef') return;
+    if (!isTaskNode(node.type.name)) return;
     const taskId = node.attrs.taskId as string;
     if (!taskId) return;
     const docTitle = node.textContent;
@@ -524,7 +851,7 @@ const isTaskRefFocused = (taskId: string): boolean => {
   const { from, to } = editor.state.selection;
   let focused = false;
   editor.state.doc.nodesBetween(from, to, (node) => {
-    if (node.type.name === 'taskRef' && node.attrs.taskId === taskId) {
+    if (isTaskNode(node.type.name) && node.attrs.taskId === taskId) {
       focused = true;
       return false;
     }
@@ -547,7 +874,7 @@ const refreshTaskRef = (taskId: string): void => {
 
   const updates: { pos: number; nodeSize: number; node: ProseMirrorNode }[] = [];
   editor.state.doc.descendants((node, pos) => {
-    if (node.type.name === 'taskRef' && node.attrs.taskId === taskId) {
+    if (isTaskNode(node.type.name) && node.attrs.taskId === taskId) {
       updates.push({ pos, nodeSize: node.nodeSize, node });
       return false;
     }
@@ -1226,6 +1553,7 @@ const mount = async (): Promise<void> => {
       StarterKit,
       Placeholder.configure({ placeholder: "Type '/' for commands…" }),
       TaskRefNode,
+      SubTaskRefNode,
       BubbleMenu.configure({
         element: bubbleEl,
         shouldShow: ({ from, to, state }) => {
