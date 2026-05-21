@@ -1,16 +1,17 @@
 /**
- * Document-Mode editor — runs inside the plugin iframe.
- *
- * Mounts TipTap on #editor-root, loads/saves the current work context's
- * ProseMirror JSON via PluginAPI.persistDataSynced, and keeps task references
- * in sync with the host task cache via ANY_TASK_UPDATE.
+ * Document-Mode editor — runs inside the plugin iframe. Notion-style UX:
+ * inline bubble menu on text selection, block hover gutter with insert
+ * (`+`) and grip (`⋮⋮`) buttons, slash menu for inserts and turn-into,
+ * and a custom taskRef atom node tied to Super Productivity tasks.
  */
 
 import { Editor, Node, mergeAttributes } from '@tiptap/core';
 import type { NodeViewRendererProps } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { NodeSelection } from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
+import BubbleMenu from '@tiptap/extension-bubble-menu';
 import {
   PluginHooks,
   type ActiveWorkContext,
@@ -27,11 +28,8 @@ const STORAGE_VERSION = 1;
 
 interface StoredState {
   version: number;
-  docs: Record<string, unknown>; // ctxId -> ProseMirror JSON
-  // We don't model enabledCtxIds here — the background script owns it. The
-  // editor preserves whatever fields it doesn't recognize via
-  // read-modify-write at save time.
-  [key: string]: unknown;
+  docs: Record<string, unknown>;
+  [key: string]: unknown; // preserve fields owned by background script
 }
 
 let currentCtx: ActiveWorkContext | null = null;
@@ -118,14 +116,11 @@ const TaskRefNode = Node.create({
         PluginAPI.updateTask(taskId, { isDone: next }).catch((err) => {
           PluginAPI.log.err('updateTask failed', err);
         });
-        // Optimistic update so the UI feels snappy.
         taskCache.set(taskId, { ...task, isDone: next });
         render();
       });
 
       dom.addEventListener('click', (ev) => {
-        // Click on chip body (not checkbox) → select the node so user can
-        // delete with backspace. Full task panel integration is v2.
         if (ev.target === checkbox) return;
         const pos = typeof getPos === 'function' ? getPos() : null;
         if (pos === null || pos === undefined) return;
@@ -181,8 +176,6 @@ const flushSave = async (): Promise<void> => {
     saveTimer = null;
   }
   if (!currentCtx || !editor) return;
-  // Read-modify-write: pull the latest blob from storage so we don't clobber
-  // the background script's enabledCtxIds or any other field added later.
   try {
     const latest = await readBlob();
     const merged: StoredState = {
@@ -205,7 +198,7 @@ const scheduleSave = (): void => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Seed doc + task cache                                                       */
+/* Seed + task sync                                                            */
 /* -------------------------------------------------------------------------- */
 
 const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
@@ -237,9 +230,7 @@ const refreshTaskCache = async (): Promise<void> => {
 };
 
 const setActiveContext = async (ctx: ActiveWorkContext | null): Promise<void> => {
-  // Save previous ctx before switching.
   await flushSave();
-
   currentCtx = ctx;
   if (!ctx || !editor) return;
 
@@ -263,10 +254,6 @@ const setActiveContext = async (ctx: ActiveWorkContext | null): Promise<void> =>
   isLoadingDoc = false;
 };
 
-/* -------------------------------------------------------------------------- */
-/* Task sync                                                                   */
-/* -------------------------------------------------------------------------- */
-
 const collectTaskRefIds = (): Set<string> => {
   const ids = new Set<string>();
   if (!editor) return ids;
@@ -281,8 +268,7 @@ const collectTaskRefIds = (): Set<string> => {
 
 const appendMissingTask = (taskId: string): void => {
   if (!editor) return;
-  const refs = collectTaskRefIds();
-  if (refs.has(taskId)) return;
+  if (collectTaskRefIds().has(taskId)) return;
   const endPos = editor.state.doc.content.size;
   editor
     .chain()
@@ -294,14 +280,11 @@ const appendMissingTask = (taskId: string): void => {
 const onAnyTaskUpdate = (payload: AnyTaskUpdatePayload): void => {
   if (!currentCtx || !editor) return;
   void refreshTaskCache().then(() => {
-    // Force node-views to re-render with new title/done state.
     if (editor) {
       const tr = editor.state.tr.setMeta('taskRefRefresh', true);
       editor.view.dispatch(tr);
     }
   });
-
-  // If a new task was added to the active project/today list, append a ref.
   if (payload.task && payload.taskId) {
     const inProject =
       currentCtx.type === 'PROJECT' && payload.task.projectId === currentCtx.id;
@@ -310,41 +293,73 @@ const onAnyTaskUpdate = (payload: AnyTaskUpdatePayload): void => {
       (payload.task.tagIds?.includes('TODAY') ||
         !!payload.task.dueDay ||
         !!payload.task.dueWithTime);
-    if (inProject || inToday) {
-      appendMissingTask(payload.taskId);
-    }
+    if (inProject || inToday) appendMissingTask(payload.taskId);
   }
 };
 
 /* -------------------------------------------------------------------------- */
-/* Slash menu                                                                  */
+/* Slash menu + block menu (Notion-style)                                      */
 /* -------------------------------------------------------------------------- */
 
-interface SlashItem {
+interface MenuItem {
   label: string;
+  icon: string;
+  hint?: string;
   action: () => void;
 }
 
-const buildSlashItems = (): SlashItem[] => {
+const insertItems = (): MenuItem[] => {
   if (!editor) return [];
   const ed = editor;
   return [
-    { label: 'Paragraph', action: () => ed.chain().focus().setParagraph().run() },
+    {
+      label: 'Paragraph',
+      icon: 'segment',
+      action: () => ed.chain().focus().setParagraph().run(),
+    },
     {
       label: 'Heading 1',
+      icon: 'title',
       action: () => ed.chain().focus().setHeading({ level: 1 }).run(),
     },
     {
       label: 'Heading 2',
+      icon: 'text_fields',
       action: () => ed.chain().focus().setHeading({ level: 2 }).run(),
     },
     {
       label: 'Heading 3',
+      icon: 'short_text',
       action: () => ed.chain().focus().setHeading({ level: 3 }).run(),
     },
-    { label: 'Divider', action: () => ed.chain().focus().setHorizontalRule().run() },
     {
-      label: 'New Task',
+      label: 'Bullet list',
+      icon: 'format_list_bulleted',
+      action: () => ed.chain().focus().toggleBulletList().run(),
+    },
+    {
+      label: 'Numbered list',
+      icon: 'format_list_numbered',
+      action: () => ed.chain().focus().toggleOrderedList().run(),
+    },
+    {
+      label: 'Quote',
+      icon: 'format_quote',
+      action: () => ed.chain().focus().setBlockquote().run(),
+    },
+    {
+      label: 'Code block',
+      icon: 'code',
+      action: () => ed.chain().focus().toggleCodeBlock().run(),
+    },
+    {
+      label: 'Divider',
+      icon: 'horizontal_rule',
+      action: () => ed.chain().focus().setHorizontalRule().run(),
+    },
+    {
+      label: 'New task',
+      icon: 'check_circle_outline',
       action: async () => {
         if (!currentCtx) return;
         const taskId = await PluginAPI.addTask({
@@ -361,30 +376,56 @@ const buildSlashItems = (): SlashItem[] => {
 let menuEl: HTMLDivElement | null = null;
 let menuActiveIndex = 0;
 let menuFilter = '';
+let menuCurrentItems: MenuItem[] = [];
 
-const closeSlashMenu = (): void => {
+const closeMenu = (): void => {
   if (menuEl) {
     menuEl.remove();
     menuEl = null;
   }
+  menuFilter = '';
+  menuActiveIndex = 0;
+  menuCurrentItems = [];
 };
 
-const renderSlashMenu = (anchorRect: DOMRect, items: SlashItem[]): void => {
-  closeSlashMenu();
-  if (items.length === 0) return;
+const renderMenu = (rect: DOMRect, items: MenuItem[]): void => {
+  if (menuEl) menuEl.remove();
+  menuCurrentItems = items;
+  if (items.length === 0) {
+    menuEl = document.createElement('div');
+    menuEl.className = 'slash-menu';
+    menuEl.style.top = `${rect.bottom + 4}px`;
+    menuEl.style.left = `${rect.left}px`;
+    const empty = document.createElement('div');
+    empty.className = 'slash-menu-empty';
+    empty.textContent = 'No matches';
+    menuEl.appendChild(empty);
+    document.body.appendChild(menuEl);
+    return;
+  }
   menuEl = document.createElement('div');
   menuEl.className = 'slash-menu';
-  menuEl.style.top = `${anchorRect.bottom + 4}px`;
-  menuEl.style.left = `${anchorRect.left}px`;
+  menuEl.style.top = `${rect.bottom + 4}px`;
+  menuEl.style.left = `${rect.left}px`;
   items.forEach((item, idx) => {
     const el = document.createElement('div');
     el.className = 'slash-menu-item';
     if (idx === menuActiveIndex) el.classList.add('is-active');
-    el.textContent = item.label;
+    el.innerHTML = `
+      <span class="material-icons slash-menu-icon">${item.icon}</span>
+      <span class="slash-menu-label">${item.label}</span>
+      ${item.hint ? `<span class="slash-menu-hint">${item.hint}</span>` : ''}
+    `;
     el.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
-      closeSlashMenu();
+      closeMenu();
       item.action();
+    });
+    el.addEventListener('mouseenter', () => {
+      menuActiveIndex = idx;
+      menuEl
+        ?.querySelectorAll('.slash-menu-item')
+        .forEach((n, i) => n.classList.toggle('is-active', i === idx));
     });
     menuEl!.appendChild(el);
   });
@@ -395,22 +436,171 @@ const showSlashMenu = (): void => {
   if (!editor) return;
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return;
-  const range = sel.getRangeAt(0);
-  const rect = range.getBoundingClientRect();
+  const rect = sel.getRangeAt(0).getBoundingClientRect();
   menuActiveIndex = 0;
   menuFilter = '';
-  renderSlashMenu(rect, buildSlashItems());
+  renderMenu(rect, insertItems());
 };
 
-const updateSlashMenu = (): void => {
-  if (!menuEl || !editor) return;
-  const items = buildSlashItems().filter((i) =>
+const filterAndRender = (rect: DOMRect): void => {
+  const items = insertItems().filter((i) =>
     i.label.toLowerCase().includes(menuFilter.toLowerCase()),
   );
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return;
-  const rect = sel.getRangeAt(0).getBoundingClientRect();
-  renderSlashMenu(rect, items);
+  if (menuActiveIndex >= items.length) menuActiveIndex = 0;
+  renderMenu(rect, items);
+};
+
+/* -------------------------------------------------------------------------- */
+/* Block hover gutter (Notion-style + / drag handle)                           */
+/* -------------------------------------------------------------------------- */
+
+let gutterEl: HTMLDivElement | null = null;
+let hoveredBlock: HTMLElement | null = null;
+
+const createGutter = (): HTMLDivElement => {
+  const g = document.createElement('div');
+  g.className = 'block-gutter';
+  g.innerHTML = `
+    <button class="block-gutter-btn" data-action="add" title="Insert below">
+      <span class="material-icons">add</span>
+    </button>
+    <button class="block-gutter-btn" data-action="grip" title="Drag to move; click for menu" draggable="true">
+      <span class="material-icons">drag_indicator</span>
+    </button>
+  `;
+  g.style.display = 'none';
+  document.body.appendChild(g);
+
+  g.querySelector('[data-action="add"]')?.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (!hoveredBlock || !editor) return;
+    const pos = editor.view.posAtDOM(hoveredBlock, 0);
+    // Insert paragraph after hovered block then open slash menu at new pos.
+    const $pos = editor.state.doc.resolve(pos);
+    const blockEnd = $pos.end($pos.depth);
+    editor
+      .chain()
+      .focus(blockEnd + 1)
+      .insertContentAt(blockEnd + 1, { type: 'paragraph' })
+      .run();
+    requestAnimationFrame(() => showSlashMenu());
+  });
+
+  const grip = g.querySelector('[data-action="grip"]') as HTMLElement | null;
+  if (grip) {
+    grip.addEventListener('mousedown', (ev) => {
+      ev.stopPropagation();
+      if (!hoveredBlock || !editor) return;
+      const pos = editor.view.posAtDOM(hoveredBlock, 0);
+      const resolved = editor.state.doc.resolve(pos);
+      const nodePos = resolved.before(resolved.depth);
+      try {
+        editor.view.dispatch(
+          editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, nodePos)),
+        );
+      } catch {
+        // selection may not be valid (e.g. doc root)
+      }
+    });
+    grip.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!hoveredBlock || !editor) return;
+      const rect = (grip as HTMLElement).getBoundingClientRect();
+      openBlockMenu(rect);
+    });
+  }
+
+  return g;
+};
+
+const positionGutter = (block: HTMLElement | null): void => {
+  if (!gutterEl) return;
+  if (!block) {
+    gutterEl.style.display = 'none';
+    hoveredBlock = null;
+    return;
+  }
+  const rect = block.getBoundingClientRect();
+  gutterEl.style.display = 'flex';
+  gutterEl.style.top = `${rect.top + window.scrollY}px`;
+  gutterEl.style.left = `${rect.left + window.scrollX - 52}px`;
+  gutterEl.style.height = `${Math.max(28, rect.height)}px`;
+  hoveredBlock = block;
+};
+
+const findBlockFromEvent = (ev: MouseEvent): HTMLElement | null => {
+  if (!editor) return null;
+  const target = ev.target as HTMLElement | null;
+  if (!target) return null;
+  const root = editor.view.dom as HTMLElement;
+  if (!root.contains(target) && target !== gutterEl && !gutterEl?.contains(target)) {
+    return null;
+  }
+  // Walk up to the direct child of .ProseMirror.
+  let node: HTMLElement | null = target;
+  while (node && node.parentElement && node.parentElement !== root) {
+    node = node.parentElement;
+  }
+  return node && node.parentElement === root ? node : null;
+};
+
+const openBlockMenu = (anchorRect: DOMRect): void => {
+  if (!editor || !hoveredBlock) return;
+  const ed = editor;
+  const pos = ed.view.posAtDOM(hoveredBlock, 0);
+  const $pos = ed.state.doc.resolve(pos);
+  const nodePos = $pos.before($pos.depth);
+
+  const items: MenuItem[] = [
+    {
+      label: 'Turn into paragraph',
+      icon: 'segment',
+      action: () => ed.chain().focus().setNodeSelection(nodePos).setParagraph().run(),
+    },
+    {
+      label: 'Turn into H1',
+      icon: 'title',
+      action: () =>
+        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 1 }).run(),
+    },
+    {
+      label: 'Turn into H2',
+      icon: 'text_fields',
+      action: () =>
+        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 2 }).run(),
+    },
+    {
+      label: 'Turn into H3',
+      icon: 'short_text',
+      action: () =>
+        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 3 }).run(),
+    },
+    {
+      label: 'Duplicate',
+      icon: 'content_copy',
+      action: () => {
+        const node = ed.state.doc.nodeAt(nodePos);
+        if (!node) return;
+        ed.chain()
+          .focus()
+          .insertContentAt(nodePos + node.nodeSize, node.toJSON())
+          .run();
+      },
+    },
+    {
+      label: 'Delete',
+      icon: 'delete',
+      action: () => {
+        ed.chain().focus().setNodeSelection(nodePos).deleteSelection().run();
+      },
+    },
+  ];
+
+  menuActiveIndex = 0;
+  menuFilter = '';
+  renderMenu(anchorRect, items);
 };
 
 /* -------------------------------------------------------------------------- */
@@ -427,16 +617,32 @@ const mount = async (): Promise<void> => {
     return;
   }
 
+  const bubbleEl = document.createElement('div');
+  bubbleEl.className = 'bubble-menu';
+  bubbleEl.innerHTML = `
+    <button data-action="bold" title="Bold"><b>B</b></button>
+    <button data-action="italic" title="Italic"><i>I</i></button>
+    <button data-action="strike" title="Strike"><s>S</s></button>
+    <button data-action="code" title="Code"><code>{}</code></button>
+  `;
+  document.body.appendChild(bubbleEl);
+
   editor = new Editor({
     element: root,
     extensions: [
-      StarterKit.configure({
-        // We keep dropcursor/gapcursor/history defaults.
-      }),
-      Placeholder.configure({
-        placeholder: 'Type / for commands…',
-      }),
+      StarterKit,
+      Placeholder.configure({ placeholder: "Type '/' for commands…" }),
       TaskRefNode,
+      BubbleMenu.configure({
+        element: bubbleEl,
+        shouldShow: ({ from, to, state }) => {
+          if (from === to) return false;
+          // Don't show on atom node selections (taskRef).
+          const node = state.doc.nodeAt(from);
+          if (node?.isAtom) return false;
+          return true;
+        },
+      }),
     ],
     content: { type: 'doc', content: [{ type: 'paragraph' }] },
     onUpdate: () => {
@@ -444,71 +650,101 @@ const mount = async (): Promise<void> => {
     },
   });
 
-  // Keydown handler — slash menu + nav.
+  bubbleEl.querySelectorAll('button[data-action]').forEach((btn) => {
+    btn.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const action = (btn as HTMLElement).dataset.action;
+      if (!editor) return;
+      const chain = editor.chain().focus();
+      if (action === 'bold') chain.toggleBold().run();
+      else if (action === 'italic') chain.toggleItalic().run();
+      else if (action === 'strike') chain.toggleStrike().run();
+      else if (action === 'code') chain.toggleCode().run();
+    });
+  });
+
+  gutterEl = createGutter();
+
+  root.addEventListener('mousemove', (ev) => {
+    const block = findBlockFromEvent(ev);
+    if (block !== hoveredBlock) positionGutter(block);
+  });
+  root.addEventListener('mouseleave', (ev) => {
+    // Don't hide if the user moved onto the gutter itself.
+    const next = ev.relatedTarget as HTMLElement | null;
+    if (next && gutterEl?.contains(next)) return;
+    positionGutter(null);
+  });
+  gutterEl.addEventListener('mouseleave', (ev) => {
+    const next = ev.relatedTarget as HTMLElement | null;
+    if (next && (root.contains(next) || gutterEl?.contains(next))) return;
+    positionGutter(null);
+  });
+
   editor.view.dom.addEventListener('keydown', (ev: KeyboardEvent) => {
     if (menuEl) {
       if (ev.key === 'Escape') {
         ev.preventDefault();
-        closeSlashMenu();
+        closeMenu();
         return;
       }
       if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
         ev.preventDefault();
-        const items = buildSlashItems().filter((i) =>
-          i.label.toLowerCase().includes(menuFilter.toLowerCase()),
-        );
-        if (items.length === 0) return;
+        if (menuCurrentItems.length === 0) return;
         if (ev.key === 'ArrowDown') {
-          menuActiveIndex = (menuActiveIndex + 1) % items.length;
+          menuActiveIndex = (menuActiveIndex + 1) % menuCurrentItems.length;
         } else {
-          menuActiveIndex = (menuActiveIndex - 1 + items.length) % items.length;
+          menuActiveIndex =
+            (menuActiveIndex - 1 + menuCurrentItems.length) % menuCurrentItems.length;
         }
         const sel = window.getSelection();
         if (sel && sel.rangeCount > 0) {
-          renderSlashMenu(sel.getRangeAt(0).getBoundingClientRect(), items);
+          renderMenu(sel.getRangeAt(0).getBoundingClientRect(), menuCurrentItems);
         }
         return;
       }
       if (ev.key === 'Enter') {
         ev.preventDefault();
-        const items = buildSlashItems().filter((i) =>
-          i.label.toLowerCase().includes(menuFilter.toLowerCase()),
-        );
-        if (items[menuActiveIndex]) {
-          closeSlashMenu();
-          items[menuActiveIndex].action();
+        if (menuCurrentItems[menuActiveIndex]) {
+          const action = menuCurrentItems[menuActiveIndex].action;
+          closeMenu();
+          action();
         }
         return;
       }
       if (ev.key === 'Backspace') {
-        menuFilter = menuFilter.slice(0, -1);
         if (menuFilter === '') {
-          closeSlashMenu();
+          closeMenu();
         } else {
-          updateSlashMenu();
+          menuFilter = menuFilter.slice(0, -1);
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount > 0) {
+            filterAndRender(sel.getRangeAt(0).getBoundingClientRect());
+          }
         }
         return;
       }
       if (ev.key.length === 1) {
         menuFilter += ev.key;
-        updateSlashMenu();
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          filterAndRender(sel.getRangeAt(0).getBoundingClientRect());
+        }
         return;
       }
     } else if (ev.key === '/') {
-      // Open menu on next tick (after the `/` is inserted).
       setTimeout(() => showSlashMenu(), 0);
     }
   });
 
   document.addEventListener('mousedown', (ev) => {
     if (menuEl && ev.target instanceof globalThis.Node && !menuEl.contains(ev.target)) {
-      closeSlashMenu();
+      closeMenu();
     }
   });
 
   await setActiveContext(initialCtx);
 
-  // Subscribe to host events.
   PluginAPI.registerHook(PluginHooks.WORK_CONTEXT_CHANGE, (payload) => {
     void setActiveContext(payload as WorkContextChangePayload);
   });
@@ -521,12 +757,6 @@ const mount = async (): Promise<void> => {
   });
 };
 
-/**
- * The host injects the PluginAPI <script> just before </body>. Depending on
- * how the blob iframe is parsed, our inlined editor.js may run before the
- * API script. Poll on a short interval until window.PluginAPI is set, then
- * mount.
- */
 const waitForPluginAPI = (): Promise<void> =>
   new Promise<void>((resolve) => {
     const check = (): void => {
