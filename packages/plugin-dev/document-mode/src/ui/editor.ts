@@ -372,7 +372,11 @@ const TaskRefNode = Node.create({
           toggle.setAttribute('aria-disabled', 'true');
         } else {
           dom.classList.remove('is-missing');
-          const done = !!(n.attrs.isDone || task.isDone);
+          // Trust task.isDone (the host's source of truth) — the attr is
+          // optimistic and only useful for the undo stack. Using OR would
+          // keep "done" stuck visually if the host clears it but the doc
+          // node's attr hasn't been refreshed (e.g. while focused).
+          const done = !!task.isDone;
           dom.classList.toggle('is-done', done);
           toggle.setAttribute('aria-checked', done ? 'true' : 'false');
           toggle.removeAttribute('aria-disabled');
@@ -564,7 +568,11 @@ const SubTaskRefNode = Node.create({
           toggle.setAttribute('aria-disabled', 'true');
         } else {
           dom.classList.remove('is-missing');
-          const done = !!(n.attrs.isDone || task.isDone);
+          // Trust task.isDone (the host's source of truth) — the attr is
+          // optimistic and only useful for the undo stack. Using OR would
+          // keep "done" stuck visually if the host clears it but the doc
+          // node's attr hasn't been refreshed (e.g. while focused).
+          const done = !!task.isDone;
           dom.classList.toggle('is-done', done);
           toggle.setAttribute('aria-checked', done ? 'true' : 'false');
           toggle.removeAttribute('aria-disabled');
@@ -750,9 +758,13 @@ const ensureSubtasksInJSON = (doc: unknown): unknown => {
       }
       if (parent?.subTaskIds) {
         for (const subId of parent.subTaskIds) {
-          if (subId && !existing.has(subId)) {
-            out.push(taskNodeJSON(subId, 'subTaskRef') as PMNode);
-          }
+          if (!subId || existing.has(subId)) continue;
+          // Skip subs not in the cache yet — they would render as
+          // empty "ghost" rows that look broken. They'll show up on
+          // the next refreshTaskCache via onAnyTaskUpdate +
+          // insertSubtaskByParent.
+          if (!taskCache.has(subId)) continue;
+          out.push(taskNodeJSON(subId, 'subTaskRef') as PMNode);
         }
       }
       i = j;
@@ -1179,17 +1191,38 @@ const insertItems = (): MenuItem[] => {
       label: 'New task',
       icon: 'check_circle_outline',
       action: async () => {
-        if (!currentCtx) return;
-        const taskId = await PluginAPI.addTask({
-          title: 'New task',
-          projectId: currentCtx.type === 'PROJECT' ? currentCtx.id : null,
-        });
-        await refreshTaskCache();
-        ed.chain().focus().insertContent({ type: 'taskRef', attrs: { taskId } }).run();
+        if (slashActionInFlight) return;
+        const ctxAtStart = currentCtx;
+        if (!ctxAtStart) return;
+        slashActionInFlight = true;
+        try {
+          const taskId = await PluginAPI.addTask({
+            title: 'New task',
+            projectId: ctxAtStart.type === 'PROJECT' ? ctxAtStart.id : null,
+          });
+          await refreshTaskCache();
+          // Skip the doc insert if the user switched contexts during the
+          // host round-trip — the task is still saved in the host, it just
+          // doesn't belong in this editor doc.
+          if (currentCtx?.id === ctxAtStart.id) {
+            ed.chain()
+              .focus()
+              .insertContent({ type: 'taskRef', attrs: { taskId } })
+              .run();
+          }
+        } finally {
+          slashActionInFlight = false;
+        }
       },
     },
   ];
 };
+
+// Re-entrance guard for awaited slash-menu actions (e.g. "New task").
+// The menu closes before the action awaits its host round-trip; without
+// this, a second fast trigger could double-create a task or insert into
+// a stale context.
+let slashActionInFlight = false;
 
 let menuEl: HTMLDivElement | null = null;
 let menuActiveIndex = 0;
@@ -1246,11 +1279,20 @@ const renderMenu = (rect: DOMRect, items: MenuItem[]): void => {
     const el = document.createElement('div');
     el.className = 'slash-menu-item';
     if (idx === menuActiveIndex) el.classList.add('is-active');
-    el.innerHTML = `
-      ${iconSvg(item.icon, 'slash-menu-icon')}
-      <span class="slash-menu-label">${item.label}</span>
-      ${item.hint ? `<span class="slash-menu-hint">${item.hint}</span>` : ''}
-    `;
+    // Icon is a constant string we control (SVG path map), so innerHTML is
+    // safe; label/hint may come from task titles or other dynamic sources
+    // so build those as text nodes to avoid an XSS vector.
+    el.innerHTML = iconSvg(item.icon, 'slash-menu-icon');
+    const labelEl = document.createElement('span');
+    labelEl.className = 'slash-menu-label';
+    labelEl.textContent = item.label;
+    el.appendChild(labelEl);
+    if (item.hint) {
+      const hintEl = document.createElement('span');
+      hintEl.className = 'slash-menu-hint';
+      hintEl.textContent = item.hint;
+      el.appendChild(hintEl);
+    }
     el.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
       closeMenu();
@@ -2028,6 +2070,13 @@ const mount = async (): Promise<void> => {
         return;
       }
       if (ev.key === 'Enter') {
+        if (menuCurrentItems.length === 0) {
+          // Empty result set — let Enter through to the editor instead of
+          // eating it. Previously the menu stayed open with "No matches"
+          // and Enter did nothing.
+          closeMenu();
+          return;
+        }
         ev.preventDefault();
         if (menuCurrentItems[menuActiveIndex]) {
           const action = menuCurrentItems[menuActiveIndex].action;
@@ -2046,6 +2095,9 @@ const mount = async (): Promise<void> => {
         return;
       }
       if (ev.key.length === 1) {
+        // Skip when an OS shortcut (Ctrl/Cmd/Alt + char) or IME composition
+        // is in progress — those keys should NOT extend the slash filter.
+        if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) return;
         menuFilter += ev.key;
         filterAndRender(caretRect());
         return;
