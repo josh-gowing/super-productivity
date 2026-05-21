@@ -36,6 +36,12 @@
       .ProseMirror > * {
         margin: 4px 0;
       }
+      .ProseMirror > [data-task-ref] {
+        margin: 0;
+      }
+      .ProseMirror > [data-task-ref] + [data-task-ref] {
+        margin-top: 0;
+      }
       .ProseMirror > h1 {
         font-size: 1.8em;
         font-weight: 700;
@@ -100,45 +106,47 @@
         pointer-events: none;
       }
 
-      /* taskRef chip */
+      /* taskRef — editable list-item, not a card */
       .task-ref {
         display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 4px 8px;
-        margin: 1px 0;
-        border-radius: 4px;
-        cursor: pointer;
-        user-select: none;
-        line-height: 1.4;
-      }
-      .task-ref:hover {
-        background: var(--task-c-bg, rgba(0, 0, 0, 0.04));
+        align-items: baseline;
+        gap: 8px;
+        padding: 1px 2px;
+        margin: 0;
+        line-height: 1.5;
+        background: transparent;
+        border-radius: 3px;
       }
       .ProseMirror-selectednode.task-ref {
-        background: var(--task-c-selected-bg, rgba(63, 81, 181, 0.12));
-        outline: 2px solid var(--c-primary, #3f51b5);
+        background: var(--task-c-selected-bg, rgba(63, 81, 181, 0.08));
+        outline: 1px solid var(--c-primary, #3f51b5);
         outline-offset: -1px;
       }
       .task-ref input[type='checkbox'] {
         flex-shrink: 0;
         accent-color: var(--c-primary, #3f51b5);
         cursor: pointer;
+        margin: 0;
+        position: relative;
+        top: 2px;
       }
       .task-ref .title {
         flex: 1;
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        outline: none;
+        word-break: break-word;
+        white-space: pre-wrap;
       }
       .task-ref.is-done .title {
         text-decoration: line-through;
-        opacity: var(--task-is-done-dim-opacity, 0.45);
+        opacity: var(--task-is-done-dim-opacity, 0.5);
       }
-      .task-ref.is-missing {
+      .task-ref.is-missing .title {
         opacity: 0.4;
         font-style: italic;
+      }
+      .task-ref.is-missing .title:empty::before {
+        content: '(task not found)';
       }
 
       /* Block hover gutter */

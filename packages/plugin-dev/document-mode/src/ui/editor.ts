@@ -43,71 +43,85 @@ let isLoadingDoc = false;
 /* taskRef node                                                                */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * taskRef is a content-bearing block node — its inline content IS the task
+ * title, so typing inside it edits the linked task. We debounce write-back
+ * to PluginAPI.updateTask and reconcile against ANY_TASK_UPDATE events
+ * from the host without clobbering an active edit.
+ */
 const TaskRefNode = Node.create({
   name: 'taskRef',
   group: 'block',
-  atom: true,
+  content: 'inline*',
   selectable: true,
   draggable: true,
   addAttributes() {
     return {
       taskId: { default: '' },
+      isDone: {
+        default: false,
+        parseHTML: (el: HTMLElement) => el.getAttribute('data-done') === 'true',
+        renderHTML: (attrs) => ({ 'data-done': attrs.isDone ? 'true' : 'false' }),
+      },
     };
   },
   parseHTML() {
     return [
       {
         tag: 'div[data-task-ref]',
-        getAttrs: (el: HTMLElement | string): { taskId: string } | false => {
+        getAttrs: (el: HTMLElement | string) => {
           if (typeof el === 'string') return false;
-          const taskId = el.getAttribute('data-task-id') || '';
-          return { taskId };
+          return {
+            taskId: el.getAttribute('data-task-id') || '',
+            isDone: el.getAttribute('data-done') === 'true',
+          };
         },
       },
     ];
   },
-  renderHTML({ HTMLAttributes }: { HTMLAttributes: Record<string, unknown> }) {
+  renderHTML({ HTMLAttributes }) {
     return [
       'div',
       mergeAttributes(HTMLAttributes, {
         'data-task-ref': '',
-        'data-task-id': HTMLAttributes.taskId as string,
+        'data-task-id': HTMLAttributes.taskId,
         class: 'task-ref',
       }),
+      0,
     ];
   },
   addNodeView() {
-    return ({ node, getPos, editor: viewEditor }: NodeViewRendererProps) => {
+    return ({ node, editor: viewEditor, getPos }: NodeViewRendererProps) => {
       const dom = document.createElement('div');
       dom.className = 'task-ref';
       dom.dataset.taskRef = '';
       dom.dataset.taskId = node.attrs.taskId;
-      dom.contentEditable = 'false';
 
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
+      checkbox.contentEditable = 'false';
       const title = document.createElement('span');
       title.className = 'title';
 
-      const render = (): void => {
-        const taskId = node.attrs.taskId as string;
+      const applyState = (n: ProseMirrorNode): void => {
+        const taskId = n.attrs.taskId as string;
         const task = taskCache.get(taskId);
         if (!task) {
           dom.classList.add('is-missing');
           dom.classList.remove('is-done');
           checkbox.checked = false;
           checkbox.disabled = true;
-          title.textContent = '(task not found)';
         } else {
           dom.classList.remove('is-missing');
-          dom.classList.toggle('is-done', !!task.isDone);
-          checkbox.checked = !!task.isDone;
+          const done = !!(n.attrs.isDone || task.isDone);
+          dom.classList.toggle('is-done', done);
+          checkbox.checked = done;
           checkbox.disabled = false;
-          title.textContent = task.title || '(untitled)';
         }
       };
 
-      checkbox.addEventListener('click', (ev) => {
+      checkbox.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
         ev.stopPropagation();
         const taskId = node.attrs.taskId as string;
         const task = taskCache.get(taskId);
@@ -117,26 +131,27 @@ const TaskRefNode = Node.create({
           PluginAPI.log.err('updateTask failed', err);
         });
         taskCache.set(taskId, { ...task, isDone: next });
-        render();
-      });
-
-      dom.addEventListener('click', (ev) => {
-        if (ev.target === checkbox) return;
+        // Reflect on attr so undo stack carries it.
         const pos = typeof getPos === 'function' ? getPos() : null;
-        if (pos === null || pos === undefined) return;
-        viewEditor.commands.setNodeSelection(pos);
+        if (pos !== null && pos !== undefined) {
+          const tr = viewEditor.state.tr.setNodeAttribute(pos, 'isDone', next);
+          viewEditor.view.dispatch(tr);
+        } else {
+          applyState(node);
+        }
       });
 
       dom.appendChild(checkbox);
       dom.appendChild(title);
-      render();
+      applyState(node);
 
       return {
         dom,
+        contentDOM: title,
         update: (updatedNode: ProseMirrorNode): boolean => {
           if (updatedNode.type.name !== 'taskRef') return false;
           if (updatedNode.attrs.taskId !== node.attrs.taskId) return false;
-          render();
+          applyState(updatedNode);
           return true;
         },
       };
@@ -201,11 +216,22 @@ const scheduleSave = (): void => {
 /* Seed + task sync                                                            */
 /* -------------------------------------------------------------------------- */
 
-const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
-  const taskNodes = ctx.taskIds.map((taskId) => ({
+/**
+ * Build a fresh doc from the work-context's task list. Task titles are
+ * pulled from the cache (populated by refreshTaskCache before this is
+ * called) so the taskRef nodes have content, not just IDs.
+ */
+const taskRefNodeJSON = (taskId: string): unknown => {
+  const task = taskCache.get(taskId);
+  const title = task?.title || '';
+  return {
     type: 'taskRef',
-    attrs: { taskId },
-  }));
+    attrs: { taskId, isDone: !!task?.isDone },
+    content: title ? [{ type: 'text', text: title }] : [],
+  };
+};
+
+const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
   return {
     type: 'doc',
     content: [
@@ -214,10 +240,58 @@ const buildSeedDoc = (ctx: ActiveWorkContext): unknown => {
         attrs: { level: 1 },
         content: [{ type: 'text', text: ctx.title }],
       },
-      ...taskNodes,
+      ...ctx.taskIds.map(taskRefNodeJSON),
       { type: 'paragraph' },
     ],
   };
+};
+
+type PMText = { type: 'text'; text: string };
+type PMNode = {
+  type?: string;
+  attrs?: Record<string, unknown>;
+  content?: (PMNode | PMText)[];
+  text?: string;
+};
+
+/**
+ * Older docs stored taskRef as an atom node (no `content` array). Walk the
+ * stored JSON and populate content from the task cache so the new
+ * content-bearing schema can load them. Idempotent — nodes that already
+ * have content are left alone.
+ */
+const migrateStoredDoc = (raw: unknown): unknown => {
+  const visit = (node: PMNode | PMText | undefined): PMNode | PMText | undefined => {
+    if (!node || typeof node !== 'object') return node;
+    if ('text' in node) return node;
+    if (node.type === 'taskRef') {
+      const taskId = (node.attrs?.taskId as string) || '';
+      const task = taskCache.get(taskId);
+      const hasContent = Array.isArray(node.content) && node.content.length > 0;
+      return {
+        ...node,
+        attrs: {
+          taskId,
+          isDone: (node.attrs?.isDone as boolean) ?? !!task?.isDone,
+        },
+        content: hasContent
+          ? node.content
+          : task?.title
+            ? [{ type: 'text', text: task.title }]
+            : [],
+      };
+    }
+    if (Array.isArray(node.content)) {
+      return {
+        ...node,
+        content: node.content
+          .map(visit)
+          .filter((n): n is PMNode | PMText => n !== undefined),
+      };
+    }
+    return node;
+  };
+  return visit(raw as PMNode);
 };
 
 const refreshTaskCache = async (): Promise<void> => {
@@ -238,7 +312,7 @@ const setActiveContext = async (ctx: ActiveWorkContext | null): Promise<void> =>
   await refreshTaskCache();
 
   const stored = storedState.docs[ctx.id];
-  const docJson = stored ?? buildSeedDoc(ctx);
+  const docJson = stored ? migrateStoredDoc(stored) : buildSeedDoc(ctx);
   try {
     editor.commands.setContent(
       docJson as Parameters<typeof editor.commands.setContent>[0],
@@ -277,12 +351,124 @@ const appendMissingTask = (taskId: string): void => {
     .run();
 };
 
+/**
+ * Per-task debouncers for writing edited titles back to the host. Pending
+ * writes prevent ANY_TASK_UPDATE echoes from clobbering the user's typing.
+ */
+const titleWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingTitleWrites = new Set<string>();
+
+const writeTitleBack = (taskId: string, newTitle: string): void => {
+  const existing = titleWriteTimers.get(taskId);
+  if (existing) clearTimeout(existing);
+  pendingTitleWrites.add(taskId);
+  titleWriteTimers.set(
+    taskId,
+    setTimeout(() => {
+      titleWriteTimers.delete(taskId);
+      PluginAPI.updateTask(taskId, { title: newTitle })
+        .then(() => {
+          const cached = taskCache.get(taskId);
+          if (cached) taskCache.set(taskId, { ...cached, title: newTitle });
+        })
+        .catch((err) => {
+          PluginAPI.log.err('updateTask (title) failed', err);
+        })
+        .finally(() => {
+          // Keep the "pending" marker briefly to absorb the echo from our
+          // own write that will arrive via ANY_TASK_UPDATE.
+          setTimeout(() => pendingTitleWrites.delete(taskId), 500);
+        });
+    }, 600),
+  );
+};
+
+/**
+ * Walk all taskRef nodes in the current doc and emit write-backs for any
+ * whose inline content drifted from the task cache.
+ */
+const reconcileTitlesFromDoc = (): void => {
+  if (!editor || isLoadingDoc) return;
+  editor.state.doc.descendants((node) => {
+    if (node.type.name !== 'taskRef') return;
+    const taskId = node.attrs.taskId as string;
+    if (!taskId) return;
+    const docTitle = node.textContent;
+    const cached = taskCache.get(taskId);
+    if (!cached) return;
+    if (docTitle !== cached.title) {
+      writeTitleBack(taskId, docTitle);
+    }
+  });
+};
+
+const isTaskRefFocused = (taskId: string): boolean => {
+  if (!editor) return false;
+  const { from, to } = editor.state.selection;
+  let focused = false;
+  editor.state.doc.nodesBetween(from, to, (node) => {
+    if (node.type.name === 'taskRef' && node.attrs.taskId === taskId) {
+      focused = true;
+      return false;
+    }
+    return undefined;
+  });
+  return focused;
+};
+
+/**
+ * Refresh inline content + isDone attr for one taskRef from the cache.
+ * Skips nodes that the user is currently editing or that have a pending
+ * write-back (so we don't undo their typing).
+ */
+const refreshTaskRef = (taskId: string): void => {
+  if (!editor) return;
+  if (pendingTitleWrites.has(taskId)) return;
+  if (isTaskRefFocused(taskId)) return;
+  const task = taskCache.get(taskId);
+  if (!task) return;
+
+  const updates: { pos: number; nodeSize: number; node: ProseMirrorNode }[] = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name === 'taskRef' && node.attrs.taskId === taskId) {
+      updates.push({ pos, nodeSize: node.nodeSize, node });
+      return false;
+    }
+    return undefined;
+  });
+  if (updates.length === 0) return;
+
+  const tr = editor.state.tr;
+  for (const { pos, nodeSize, node } of updates) {
+    if (node.attrs.isDone !== !!task.isDone) {
+      tr.setNodeAttribute(pos, 'isDone', !!task.isDone);
+    }
+    if (node.textContent !== task.title) {
+      const schema = editor.schema;
+      const titleText = task.title || '';
+      const newContent = titleText ? schema.text(titleText) : null;
+      // Replace inline content of the node: positions are [pos+1, pos+nodeSize-1].
+      const from = pos + 1;
+      const to = pos + nodeSize - 1;
+      if (newContent) {
+        tr.replaceWith(from, to, newContent);
+      } else {
+        tr.delete(from, to);
+      }
+    }
+  }
+  if (tr.docChanged) {
+    isLoadingDoc = true;
+    editor.view.dispatch(tr);
+    isLoadingDoc = false;
+  }
+};
+
 const onAnyTaskUpdate = (payload: AnyTaskUpdatePayload): void => {
   if (!currentCtx || !editor) return;
   void refreshTaskCache().then(() => {
-    if (editor) {
-      const tr = editor.state.tr.setMeta('taskRefRefresh', true);
-      editor.view.dispatch(tr);
+    if (payload.taskId) {
+      refreshTaskRef(payload.taskId);
     }
   });
   if (payload.task && payload.taskId) {
@@ -646,6 +832,7 @@ const mount = async (): Promise<void> => {
     ],
     content: { type: 'doc', content: [{ type: 'paragraph' }] },
     onUpdate: () => {
+      reconcileTitlesFromDoc();
       scheduleSave();
     },
   });
