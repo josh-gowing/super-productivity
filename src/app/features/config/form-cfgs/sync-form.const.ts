@@ -476,8 +476,8 @@ export const SYNC_FORM: ConfigFormSection<SyncConfig> = {
         // entered. Hidden once encryption is set up (the encryption-status-box
         // above already shows "Encryption password is set" in that case).
         {
-          hideExpression: (m, v, field) =>
-            field?.parent?.parent?.model.syncProvider !== SyncProviderId.SuperSync ||
+          hideExpression: (m: any, v: any, field?: FormlyFieldConfig) =>
+            field?.parent?.parent?.model?.syncProvider !== SyncProviderId.SuperSync ||
             (field?.parent?.parent?.model?.isEncryptionEnabled ?? false),
           type: 'tpl',
           templateOptions: {
