@@ -748,26 +748,85 @@ type PMNode = {
 };
 
 /**
- * Older docs stored taskRef as an atom node (no `content` array). Walk the
- * stored JSON and populate content from the task cache so the new
- * content-bearing schema can load them. Idempotent — nodes that already
- * have content are left alone.
+ * Drop top-level taskRef chips whose task is no longer part of `ctx.taskIds`,
+ * and append any in `ctx.taskIds` that aren't yet in the doc.
+ *
+ * The case that motivated this is TODAY: the doc is persisted by ctx.id =
+ * 'TODAY', but the membership of TODAY changes every day. Without this
+ * step the editor would show yesterday's tasks (still in the saved doc)
+ * and miss today's (never inserted). Same drift applies to TAG contexts.
+ *
+ * When we drop a taskRef, we also drop the contiguous run of subTaskRefs
+ * that immediately followed it — those belong to that parent group.
  */
-/**
- * After loading a stored doc (which may have been saved before subtasks were
- * supported), walk the top-level content and insert any subTaskRefs from the
- * host that aren't already present right after their parent taskRef.
- * Idempotent — existing subtask blocks are preserved in order.
- */
-/**
- * Two-step pipeline applied to a stored doc before loading it into TipTap.
- * Order matters and is enforced by `prepareStoredDoc`: schema migration
- * MUST run before subtask backfill, because the backfill walks taskRef /
- * subTaskRef shapes that the migration is responsible for producing.
- */
-const prepareStoredDoc = (raw: unknown): unknown =>
-  ensureSubtasksInJSON(migrateStoredDoc(raw));
+const reconcileTopLevelTaskRefs = (doc: unknown, ctx: ActiveWorkContext): unknown => {
+  const root = doc as PMNode;
+  if (!root || root.type !== 'doc' || !Array.isArray(root.content)) return doc;
+  const wanted = new Set(ctx.taskIds);
+  const src = root.content as (PMNode | PMText)[];
+  const out: (PMNode | PMText)[] = [];
+  const kept = new Set<string>();
+  let i = 0;
+  while (i < src.length) {
+    const node = src[i] as PMNode;
+    if (node.type === 'taskRef') {
+      const taskId = (node.attrs?.taskId as string) || '';
+      if (wanted.has(taskId)) {
+        out.push(node);
+        kept.add(taskId);
+        // Carry trailing subTaskRefs along with the parent.
+        let j = i + 1;
+        while (j < src.length && (src[j] as PMNode).type === 'subTaskRef') {
+          out.push(src[j]);
+          j++;
+        }
+        i = j;
+      } else {
+        // Out-of-context parent — skip it AND its subtask run.
+        let j = i + 1;
+        while (j < src.length && (src[j] as PMNode).type === 'subTaskRef') j++;
+        i = j;
+      }
+    } else if (node.type === 'subTaskRef') {
+      // Orphan subtask (parent was removed earlier in some old save).
+      // Drop it so the doc doesn't carry a row attached to nothing.
+      i++;
+    } else {
+      out.push(node);
+      i++;
+    }
+  }
+  // Append any wanted ids that weren't in the doc, preserving ctx order.
+  // Insert before the trailing paragraph (if any) so the empty line stays
+  // at the doc end.
+  const trailing: (PMNode | PMText)[] = [];
+  while (out.length > 0 && (out[out.length - 1] as PMNode).type === 'paragraph') {
+    trailing.unshift(out.pop()!);
+  }
+  for (const id of ctx.taskIds) {
+    if (!kept.has(id)) {
+      for (const n of taskRefWithSubtasksJSON(id) as (PMNode | PMText)[]) out.push(n);
+    }
+  }
+  for (const t of trailing) out.push(t);
+  return { ...root, content: out };
+};
 
+/**
+ * Three-step pipeline applied to a stored doc before loading it into TipTap.
+ * Order matters: schema migration first (canonicalises old taskRef shapes),
+ * then top-level reconciliation against the current ctx (drops stale chips,
+ * appends new ones), then subtask backfill (inserts host subtasks under
+ * each kept parent).
+ */
+const prepareStoredDoc = (raw: unknown, ctx: ActiveWorkContext): unknown =>
+  ensureSubtasksInJSON(reconcileTopLevelTaskRefs(migrateStoredDoc(raw), ctx));
+
+/**
+ * After loading a stored doc, walk the top-level content and insert any
+ * subTaskRefs from the host that aren't already present right after their
+ * parent taskRef. Idempotent — existing subtask blocks are preserved.
+ */
 const ensureSubtasksInJSON = (doc: unknown): unknown => {
   const root = doc as PMNode;
   if (!root || root.type !== 'doc' || !Array.isArray(root.content)) return doc;
@@ -806,6 +865,12 @@ const ensureSubtasksInJSON = (doc: unknown): unknown => {
   return { ...root, content: out };
 };
 
+/**
+ * Older docs stored taskRef as an atom node (no `content` array). Walk
+ * the stored JSON and populate content from the task cache so the new
+ * content-bearing schema can load them. Idempotent — nodes that already
+ * have content are left alone.
+ */
 const migrateStoredDoc = (raw: unknown): unknown => {
   const visit = (node: PMNode | PMText | undefined): PMNode | PMText | undefined => {
     if (!node || typeof node !== 'object') return node;
@@ -881,7 +946,7 @@ const setActiveContext = async (ctx: ActiveWorkContext | null): Promise<void> =>
   lastSeenTaskIds = snapshotInContextTaskIds(ctx);
 
   const stored = storedState.docs[ctx.id];
-  const docJson = stored ? prepareStoredDoc(stored) : buildSeedDoc(ctx);
+  const docJson = stored ? prepareStoredDoc(stored, ctx) : buildSeedDoc(ctx);
   try {
     editor.commands.setContent(
       docJson as Parameters<typeof editor.commands.setContent>[0],
