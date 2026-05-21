@@ -83,7 +83,6 @@ export class CleanSlateService {
       priorUnsyncedCount: priorUnsynced.length,
       priorUnsyncedByOpType: priorOpTypeBreakdown,
       priorClockSize: priorClock ? Object.keys(priorClock).length : 0,
-      priorClock: priorClock ?? null,
     });
 
     // 1. Get current application state (includes all features + archives).
@@ -92,76 +91,52 @@ export class CleanSlateService {
     // which causes data loss.
     const currentState = await this.stateSnapshotService.getStateSnapshotAsync();
 
-    // 2. Capture prior clientId so we can roll back the rotation if the
-    // destructive replacement fails. The clientId lives in a separate IDB
-    // database (`pf`) and so cannot share the atomic tx below; rollback is
-    // the next-best guarantee that `pf` and `SUP_OPS` agree on the device's
+    // Rotate the clientId for the duration of the destructive replacement.
+    // The clientId lives in a separate IDB database (`pf`) and so cannot
+    // share the atomic SUP_OPS tx below; ClientIdService.withRotation rolls
+    // it back on failure so `pf` and `SUP_OPS` agree on the device's
     // clientId after this method returns or throws.
-    const priorClientId = await this.clientIdService.loadClientId();
-    const newClientId = await this.clientIdService.generateNewClientId();
-    OpLog.normal('[CleanSlate] Generated new client ID', { newClientId });
+    const result = await this.clientIdService.withRotation(
+      '[CleanSlate]',
+      async (newClientId) => {
+        OpLog.normal('[CleanSlate] Generated new client ID', { newClientId });
 
-    // 3. Fresh vector clock starting at 1 for the new client.
-    const newVectorClock = { [newClientId]: 1 };
+        const newVectorClock = { [newClientId]: 1 };
+        const syncImportOp: Operation = {
+          id: uuidv7(),
+          actionType: ActionType.LOAD_ALL_DATA,
+          opType: OpType.SyncImport,
+          entityType: 'ALL',
+          entityId: undefined,
+          payload: currentState,
+          clientId: newClientId,
+          vectorClock: newVectorClock,
+          timestamp: Date.now(),
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          syncImportReason,
+        };
 
-    // 4. SYNC_IMPORT operation. Uploaded next sync with isCleanSlate=true.
-    const syncImportOp: Operation = {
-      id: uuidv7(),
-      actionType: ActionType.LOAD_ALL_DATA,
-      opType: OpType.SyncImport, // Maps to reason='initial' on server
-      entityType: 'ALL',
-      entityId: undefined,
-      payload: currentState,
-      clientId: newClientId,
-      vectorClock: newVectorClock,
-      timestamp: Date.now(),
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      syncImportReason,
-    };
+        OpLog.normal('[CleanSlate] Created SYNC_IMPORT operation', {
+          opId: syncImportOp.id,
+          clientId: newClientId,
+        });
 
-    OpLog.normal('[CleanSlate] Created SYNC_IMPORT operation', {
-      opId: syncImportOp.id,
-      clientId: newClientId,
-    });
+        OpLog.normal('[CleanSlate] Replacing op-log + state cache atomically');
+        await this.opLogStore.runDestructiveStateReplacement({
+          syncImportOp,
+          newVectorClock,
+          newState: currentState,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          snapshotEntityKeys: extractEntityKeysFromState(currentState),
+        });
 
-    // 5. Atomically replace OPS + state_cache + vector_clock (issue #7709).
-    // On a never-compacted device, the pre-fix sequence could leave
-    // `isWhollyFreshClient()===true` with meaningful store data — the
-    // precondition for the multi-device data-loss chain. See the helper's
-    // JSDoc for the atomicity guarantee.
-    OpLog.normal('[CleanSlate] Replacing op-log + state cache atomically');
-    try {
-      await this.opLogStore.runDestructiveStateReplacement({
-        syncImportOp,
-        newVectorClock,
-        newState: currentState,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        snapshotEntityKeys: extractEntityKeysFromState(currentState),
-      });
-    } catch (e) {
-      if (priorClientId) {
-        try {
-          await this.clientIdService.persistClientId(priorClientId);
-        } catch (rollbackErr) {
-          OpLog.critical(
-            '[CleanSlate] Failed to roll back clientId rotation after destructive failure',
-            {
-              priorClientId,
-              originalError: {
-                name: (e as Error | undefined)?.name,
-                message: (e as Error | undefined)?.message,
-              },
-              rollbackErr: (rollbackErr as Error | undefined)?.message,
-            },
-          );
-        }
-      }
-      throw e;
-    }
+        return { syncImportId: syncImportOp.id, newClientId };
+      },
+    );
 
     OpLog.normal('[CleanSlate] Clean slate completed successfully', {
-      syncImportId: syncImportOp.id,
-      newClientId,
+      syncImportId: result.syncImportId,
+      newClientId: result.newClientId,
       reason,
     });
   }

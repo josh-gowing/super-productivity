@@ -126,6 +126,50 @@ export class ClientIdService {
   }
 
   /**
+   * Rotate the clientId for the duration of `fn`. Captures the prior id,
+   * generates and persists a new one, runs `fn(newClientId)`. If `fn` throws,
+   * the prior id is restored so the `pf` database stays consistent with any
+   * caller-side state that didn't get updated.
+   *
+   * Edge case: if there was no prior clientId (wholly fresh device), the new
+   * id is intentionally left in `pf` on failure — there is nothing to restore
+   * to. If the restore itself throws, the original `fn` error is propagated
+   * and the restore failure is logged at critical level for forensics.
+   *
+   * `logPrefix` is used to tag the critical-log entry on rollback failure so
+   * forensics can attribute it to the caller (e.g. `'[CleanSlate]'`).
+   */
+  async withRotation<T>(
+    logPrefix: string,
+    fn: (newClientId: string) => Promise<T>,
+  ): Promise<T> {
+    const priorClientId = await this.loadClientId();
+    const newClientId = await this.generateNewClientId();
+    try {
+      return await fn(newClientId);
+    } catch (e) {
+      if (priorClientId) {
+        try {
+          await this.persistClientId(priorClientId);
+        } catch (rollbackErr) {
+          OpLog.critical(
+            `${logPrefix} Failed to roll back clientId rotation after failure`,
+            {
+              priorClientId,
+              originalError: {
+                name: (e as Error | undefined)?.name,
+                message: (e as Error | undefined)?.message,
+              },
+              rollbackErr: (rollbackErr as Error | undefined)?.message,
+            },
+          );
+        }
+      }
+      throw e;
+    }
+  }
+
+  /**
    * Returns true if the clientId matches a known valid format.
    * Old format: any string of length >= 10 (legacy IDs).
    * New format: {platform}_{4-char-base62} e.g. "B_a7Kx".

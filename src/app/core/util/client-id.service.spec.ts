@@ -162,4 +162,61 @@ describe('ClientIdService', () => {
       await expectAsync(service.persistClientId('INVALID')).toBeRejected();
     });
   });
+
+  describe('withRotation()', () => {
+    it('should call fn with a fresh clientId and return its value', async () => {
+      await service.persistClientId('B_Prio');
+      service.clearCache();
+
+      const result = await service.withRotation('[Test]', async (newId) => {
+        expect(newId).not.toBe('B_Prio');
+        return { ok: true, id: newId };
+      });
+
+      expect(result.ok).toBe(true);
+      const persisted = await service.loadClientId();
+      expect(persisted).toBe(result.id);
+    });
+
+    it('should restore the prior clientId when fn throws', async () => {
+      await service.persistClientId('B_Prio');
+      service.clearCache();
+
+      await expectAsync(
+        service.withRotation('[Test]', async () => {
+          throw new Error('work failed');
+        }),
+      ).toBeRejectedWith(jasmine.objectContaining({ message: 'work failed' }));
+
+      service.clearCache();
+      expect(await service.loadClientId()).toBe('B_Prio');
+    });
+
+    it('should leave the rotated clientId in place when there was no prior id', async () => {
+      // Wholly fresh device — `pf` is empty.
+      expect(await service.loadClientId()).toBeNull();
+
+      await expectAsync(
+        service.withRotation('[Test]', async () => {
+          throw new Error('work failed');
+        }),
+      ).toBeRejectedWith(jasmine.objectContaining({ message: 'work failed' }));
+
+      service.clearCache();
+      const persisted = await service.loadClientId();
+      expect(persisted).not.toBeNull();
+    });
+
+    it('should propagate the original fn error when rollback also fails', async () => {
+      await service.persistClientId('B_Prio');
+      service.clearCache();
+      spyOn(service, 'persistClientId').and.rejectWith(new Error('pf write also broken'));
+
+      await expectAsync(
+        service.withRotation('[Test]', async () => {
+          throw new Error('work failed');
+        }),
+      ).toBeRejectedWith(jasmine.objectContaining({ message: 'work failed' }));
+    });
+  });
 });

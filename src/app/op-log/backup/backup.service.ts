@@ -197,39 +197,34 @@ export class BackupService {
       );
     }
 
-    // 2. Capture prior clientId so we can roll back if the destructive
-    // replacement throws. `pf` (clientId) is a separate IDB DB and so cannot
-    // share the atomic tx; rollback keeps `pf` and `SUP_OPS` in sync.
-    const priorClientId = await this._clientIdService.loadClientId();
-    const clientId = await this._clientIdService.generateNewClientId();
+    // Rotate the clientId for the duration of the destructive replacement.
+    // `pf` (clientId) is a separate IDB DB and so cannot share the atomic
+    // SUP_OPS tx; ClientIdService.withRotation rolls it back on failure.
+    await this._clientIdService.withRotation('BackupService:', async (clientId) => {
+      const newClock = { [clientId]: 1 };
+      const opId = uuidv7();
+      // IMPORTANT: Uses OpType.BackupImport which maps to reason='recovery' on the server.
+      // This allows backup imports to succeed even when a SYNC_IMPORT already exists.
+      // See server validation at sync.routes.ts:703-733
+      const op: Operation = {
+        id: opId,
+        actionType: ActionType.LOAD_ALL_DATA,
+        opType: OpType.BackupImport,
+        entityType: 'ALL',
+        entityId: opId,
+        payload: importedData,
+        clientId,
+        vectorClock: newClock,
+        timestamp: Date.now(),
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        syncImportReason: 'BACKUP_RESTORE',
+      };
 
-    // Fresh clock: new clientId with initial counter for clean baseline
-    const newClock = { [clientId]: 1 };
-
-    const opId = uuidv7();
-    // IMPORTANT: Uses OpType.BackupImport which maps to reason='recovery' on the server.
-    // This allows backup imports to succeed even when a SYNC_IMPORT already exists.
-    // See server validation at sync.routes.ts:703-733
-    const op: Operation = {
-      id: opId,
-      actionType: ActionType.LOAD_ALL_DATA,
-      opType: OpType.BackupImport,
-      entityType: 'ALL',
-      entityId: opId,
-      payload: importedData,
-      clientId,
-      vectorClock: newClock,
-      timestamp: Date.now(),
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      syncImportReason: 'BACKUP_RESTORE',
-    };
-
-    // Issue #7709: replace OPS + state_cache + vector_clock atomically so an
-    // interrupt during backup-restore can't leave the device in the
-    // `isWhollyFreshClient + meaningful store data` state that triggers the
-    // multi-device data-loss chain.
-    OpLog.normal('BackupService: Replacing op-log + state cache atomically');
-    try {
+      // Issue #7709: replace OPS + state_cache + vector_clock atomically so an
+      // interrupt during backup-restore can't leave the device in the
+      // `isWhollyFreshClient + meaningful store data` state that triggers the
+      // multi-device data-loss chain.
+      OpLog.normal('BackupService: Replacing op-log + state cache atomically');
       await this._opLogStore.runDestructiveStateReplacement({
         syncImportOp: op,
         newVectorClock: newClock,
@@ -237,26 +232,7 @@ export class BackupService {
         schemaVersion: CURRENT_SCHEMA_VERSION,
         snapshotEntityKeys: extractEntityKeysFromState(importedData),
       });
-    } catch (e) {
-      if (priorClientId) {
-        try {
-          await this._clientIdService.persistClientId(priorClientId);
-        } catch (rollbackErr) {
-          OpLog.critical(
-            'BackupService: Failed to roll back clientId rotation after destructive failure',
-            {
-              priorClientId,
-              originalError: {
-                name: (e as Error | undefined)?.name,
-                message: (e as Error | undefined)?.message,
-              },
-              rollbackErr: (rollbackErr as Error | undefined)?.message,
-            },
-          );
-        }
-      }
-      throw e;
-    }
+    });
 
     OpLog.normal('BackupService: Import persisted to operation log.');
   }

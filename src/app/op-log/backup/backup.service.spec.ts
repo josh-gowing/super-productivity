@@ -9,7 +9,6 @@ import { ArchiveDbAdapter } from '../../core/persistence/archive-db-adapter.serv
 import { ArchiveModel } from '../../features/archive/archive.model';
 import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { OpType } from '../core/operation.types';
-import { OpLog } from '../../core/log';
 
 describe('BackupService', () => {
   let service: BackupService;
@@ -105,11 +104,7 @@ describe('BackupService', () => {
       'saveImportBackup',
       'runDestructiveStateReplacement',
     ]);
-    mockClientIdService = jasmine.createSpyObj('ClientIdService', [
-      'generateNewClientId',
-      'loadClientId',
-      'persistClientId',
-    ]);
+    mockClientIdService = jasmine.createSpyObj('ClientIdService', ['withRotation']);
     mockArchiveDbAdapter = jasmine.createSpyObj('ArchiveDbAdapter', [
       'saveArchiveYoung',
       'saveArchiveOld',
@@ -119,9 +114,12 @@ describe('BackupService', () => {
     mockOpLogStore.loadStateCache.and.returnValue(Promise.resolve(null));
     mockOpLogStore.saveImportBackup.and.resolveTo();
     mockOpLogStore.runDestructiveStateReplacement.and.resolveTo();
-    mockClientIdService.loadClientId.and.resolveTo('priorClientId');
-    mockClientIdService.generateNewClientId.and.resolveTo('newClientId');
-    mockClientIdService.persistClientId.and.resolveTo();
+    // ClientIdService.withRotation owns the rollback semantics (see its own
+    // spec); here we just invoke the callback with a fresh id.
+    mockClientIdService.withRotation.and.callFake(
+      async (_logPrefix: string, fn: (newClientId: string) => Promise<any>) =>
+        fn('newClientId'),
+    );
     mockArchiveDbAdapter.saveArchiveYoung.and.returnValue(Promise.resolve());
     mockArchiveDbAdapter.saveArchiveOld.and.returnValue(Promise.resolve());
 
@@ -300,7 +298,10 @@ describe('BackupService', () => {
     });
 
     it('should pass a fresh clock to the atomic helper on force-import', async () => {
-      mockClientIdService.generateNewClientId.and.resolveTo('newForceClient');
+      mockClientIdService.withRotation.and.callFake(
+        async (_logPrefix: string, fn: (newClientId: string) => Promise<any>) =>
+          fn('newForceClient'),
+      );
       const backupData = createMinimalValidBackup();
 
       await service.importCompleteBackup(backupData as any, true, true, true);
@@ -334,7 +335,10 @@ describe('BackupService', () => {
     });
 
     it('should produce fresh { [clientId]: 1 } clock on import', async () => {
-      mockClientIdService.generateNewClientId.and.resolveTo('newForceClient');
+      mockClientIdService.withRotation.and.callFake(
+        async (_logPrefix: string, fn: (newClientId: string) => Promise<any>) =>
+          fn('newForceClient'),
+      );
       const backupData = createMinimalValidBackup();
 
       await service.importCompleteBackup(backupData as any, true, true, true);
@@ -366,18 +370,17 @@ describe('BackupService', () => {
       expect(mockArchiveDbAdapter.saveArchiveOld).not.toHaveBeenCalled();
     });
 
-    it('should roll back the rotated clientId if the destructive replacement fails', async () => {
-      mockClientIdService.loadClientId.and.resolveTo('priorClientId');
-      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
-        new Error('Atomic replacement failed'),
+    it('should delegate cross-DB clientId rollback to ClientIdService.withRotation', async () => {
+      // ClientIdService.withRotation owns the rollback semantics — capture
+      // prior id, run callback, restore on failure, log critical if rollback
+      // also fails. Tested directly in client-id.service.spec.ts; here we
+      // only verify BackupService routes through it with the right log tag.
+      await service.importCompleteBackup(createMinimalValidBackup() as any, true, true);
+
+      expect(mockClientIdService.withRotation).toHaveBeenCalledWith(
+        'BackupService:',
+        jasmine.any(Function),
       );
-
-      await expectAsync(
-        service.importCompleteBackup(createMinimalValidBackup() as any, true, true),
-      ).toBeRejected();
-
-      expect(mockClientIdService.persistClientId).toHaveBeenCalledWith('priorClientId');
-      expect(mockStore.dispatch).not.toHaveBeenCalled();
     });
 
     it('should pass snapshotEntityKeys derived from the imported data', async () => {
@@ -389,33 +392,6 @@ describe('BackupService', () => {
         .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
       expect(args.snapshotEntityKeys).toBeDefined();
       expect(Array.isArray(args.snapshotEntityKeys)).toBe(true);
-    });
-
-    it('should surface the original destructive failure when the clientId rollback also fails', async () => {
-      const criticalSpy = spyOn(OpLog, 'critical');
-      mockClientIdService.loadClientId.and.resolveTo('priorClientId');
-      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
-        new Error('Atomic replacement failed'),
-      );
-      mockClientIdService.persistClientId.and.rejectWith(
-        new Error('pf write also broken'),
-      );
-
-      await expectAsync(
-        service.importCompleteBackup(createMinimalValidBackup() as any, true, true),
-      ).toBeRejectedWith(
-        jasmine.objectContaining({ message: 'Atomic replacement failed' }),
-      );
-
-      expect(criticalSpy).toHaveBeenCalledWith(
-        jasmine.any(String),
-        jasmine.objectContaining({
-          priorClientId: 'priorClientId',
-          originalError: jasmine.objectContaining({
-            message: 'Atomic replacement failed',
-          }),
-        }),
-      );
     });
   });
 });

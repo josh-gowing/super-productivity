@@ -7,6 +7,7 @@ import { SyncLocalStateService } from '../../sync/sync-local-state.service';
 import { TranslateService } from '@ngx-translate/core';
 import { CURRENT_SCHEMA_VERSION } from '../../persistence/schema-migration.service';
 import { Operation } from '../../core/operation.types';
+import { STORE_NAMES } from '../../persistence/db-keys.const';
 
 /**
  * Integration tests for issue #7709 — `createCleanSlate` / `BackupService` import
@@ -52,14 +53,13 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
     mockStateSnapshot.getStateSnapshot.and.returnValue(meaningfulState as any);
     mockStateSnapshot.getStateSnapshotAsync.and.resolveTo(meaningfulState as any);
 
-    mockClientId = jasmine.createSpyObj('ClientIdService', [
-      'generateNewClientId',
-      'loadClientId',
-      'persistClientId',
-    ]);
-    mockClientId.generateNewClientId.and.resolveTo('cNew1');
-    mockClientId.loadClientId.and.resolveTo('cPrior');
-    mockClientId.persistClientId.and.resolveTo();
+    mockClientId = jasmine.createSpyObj('ClientIdService', ['withRotation']);
+    // Default: invoke the rotation callback with a fresh id. Rollback
+    // semantics are exercised in ClientIdService's own spec.
+    mockClientId.withRotation.and.callFake(
+      async (_logPrefix: string, fn: (newClientId: string) => Promise<any>) =>
+        fn('cNew1'),
+    );
 
     mockTranslate = jasmine.createSpyObj('TranslateService', ['instant']);
     mockTranslate.instant.and.callFake((k: string) => k);
@@ -129,17 +129,17 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
       const cacheBefore = await storeService.loadStateCache();
       const clockBefore = await storeService.getVectorClock();
 
-      // Inject a failure inside the destructive tx: spy on db.transaction to
-      // return a tx whose opsStore.add throws. The helper's catch block must
-      // call tx.abort() to roll back the queued opsStore.clear().
+      // Inject a failure inside the destructive tx: opsStore.add throws after
+      // the queued opsStore.clear(). IDB auto-aborts the tx; the prior OPS
+      // entries must survive.
       const realTransaction = (storeService as any).db.transaction.bind(
         (storeService as any).db,
       );
       spyOn((storeService as any).db, 'transaction').and.callFake(
         (stores: any, mode: any) => {
           const tx = realTransaction(stores, mode);
-          if (Array.isArray(stores) && stores.includes('ops')) {
-            const opsStore = tx.objectStore('ops');
+          if (Array.isArray(stores) && stores.includes(STORE_NAMES.OPS)) {
+            const opsStore = tx.objectStore(STORE_NAMES.OPS);
             opsStore.add = async () => {
               throw new Error('Simulated interrupt: append failed inside destructive tx');
             };
@@ -159,39 +159,6 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
       expect((cacheAfter!.state as any).sentinel).toBe('prior-state');
       expect(cacheAfter!.vectorClock).toEqual(cacheBefore!.vectorClock);
       expect(await storeService.getVectorClock()).toEqual(clockBefore);
-    });
-
-    it('leaves no orphaned staging row after a failed destructive tx', async () => {
-      // Make the destructive tx's opsStore.clear() abort by closing the db
-      // connection mid-flight. The IDB tx will reject; the helper's catch
-      // path attempts a best-effort staging-row cleanup.
-      const realTransaction = (storeService as any).db.transaction.bind(
-        (storeService as any).db,
-      );
-      spyOn((storeService as any).db, 'transaction').and.callFake(
-        (stores: any, mode: any) => {
-          const tx = realTransaction(stores, mode);
-          // Force the tx to abort by making its opsStore.clear reject.
-          if (Array.isArray(stores) && stores.includes('ops')) {
-            const opsStore = tx.objectStore('ops');
-            const realClear = opsStore.clear.bind(opsStore);
-            opsStore.clear = async () => {
-              await realClear();
-              throw new Error('Simulated interrupt: destructive tx aborted');
-            };
-          }
-          return tx;
-        },
-      );
-
-      await expectAsync(
-        cleanSlate.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
-      ).toBeRejected();
-
-      // The best-effort cleanup in the catch path should have removed the staging row.
-      // (If it didn't, the boot reconciliation in init() would on next launch.)
-      const staging = await (storeService as any).db.get('state_cache', 'staging');
-      expect(staging).toBeUndefined();
     });
   });
 
@@ -223,8 +190,8 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
       spyOn((storeService as any).db, 'transaction').and.callFake(
         (stores: any, mode: any) => {
           const tx = realTransaction(stores, mode);
-          if (Array.isArray(stores) && stores.includes('ops')) {
-            const opsStore = tx.objectStore('ops');
+          if (Array.isArray(stores) && stores.includes(STORE_NAMES.OPS)) {
+            const opsStore = tx.objectStore(STORE_NAMES.OPS);
             opsStore.add = async () => {
               throw new Error('Simulated interrupt: append failed inside destructive tx');
             };
@@ -250,29 +217,6 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
       // was missing before the destructive call too, the surviving op-log keeps
       // `lastSeq > 0` so `isWhollyFreshClient()` is false.
       expect(await syncLocalState.isWhollyFreshClient()).toBe(false);
-    });
-  });
-
-  describe('boot-time staging-row reconciliation', () => {
-    it('cleans up an orphaned staging row on next init()', async () => {
-      // Simulate a previous run that crashed leaving a staging row behind.
-      await (storeService as any).db.put('state_cache', {
-        id: 'staging',
-        state: { ghost: true },
-        lastAppliedOpSeq: 0,
-        vectorClock: {},
-        compactedAt: Date.now(),
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-      });
-      expect(await (storeService as any).db.get('state_cache', 'staging')).toBeDefined();
-
-      // Force a re-init by tearing down and reconstructing the service via TestBed.
-      // (The simpler path: invoke the init() method again to trigger the
-      // reconciliation block.)
-      await storeService.init();
-
-      const staging = await (storeService as any).db.get('state_cache', 'staging');
-      expect(staging).toBeUndefined();
     });
   });
 });

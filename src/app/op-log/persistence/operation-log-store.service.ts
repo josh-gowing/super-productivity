@@ -22,7 +22,6 @@ import {
   STORE_NAMES,
   SINGLETON_KEY,
   BACKUP_KEY,
-  STATE_CACHE_STAGING_KEY,
   OPS_INDEXES,
   ArchiveStoreEntry,
   ProfileDataStoreEntry,
@@ -198,29 +197,6 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       this._initPromise = undefined;
     });
     this._db = db;
-
-    // Reconcile orphaned state_cache staging row. A staging row that survived
-    // means runDestructiveStateReplacement's destructive transaction never
-    // committed; the singleton row is the authoritative state. Use getKey so
-    // we don't deserialise the multi-MB payload just to delete it.
-    try {
-      const stagingKey = await db.getKey(
-        STORE_NAMES.STATE_CACHE,
-        STATE_CACHE_STAGING_KEY,
-      );
-      if (stagingKey !== undefined) {
-        await db.delete(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
-        Log.warn(
-          '[OpLogStore] Cleaned up orphaned state_cache staging row from a previous interrupted destructive replacement.',
-        );
-      }
-    } catch (e) {
-      // Non-fatal: an init that can't read state_cache will fail elsewhere too.
-      Log.warn('[OpLogStore] Staging-row reconciliation skipped:', {
-        name: (e as Error | undefined)?.name,
-        message: (e as Error | undefined)?.message,
-      });
-    }
   }
 
   /**
@@ -1585,34 +1561,17 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   /**
    * Atomically replace local op-log + state_cache + vector_clock with a new
    * full-state baseline. Used by destructive flows (clean-slate, backup-restore)
-   * to fix issue #7709.
-   *
-   * Before this method existed, the destructive sequence was four independent
-   * IndexedDB transactions: clearAllOperations → append(syncImportOp) →
-   * setVectorClock → saveStateCache. An interrupt between steps could leave
-   * OPS empty and state_cache stale/missing — which on a low-activity device
-   * (never reached COMPACTION_THRESHOLD) routed the next launch through the
-   * `isWhollyFreshClient + meaningful store data` conflict-dialog branch and
-   * caused the user-reported multi-device data-loss chain.
-   *
-   * ## Staging-then-commit
-   *
-   * 1. Write the new `state` payload to a separate row keyed by
-   *    `STATE_CACHE_STAGING_KEY`. This acts as a crash-detection sentinel —
-   *    if the destructive tx never commits, the orphan staging row is
-   *    reconciled at boot via `init()`.
-   * 2. Open one multi-store readwrite transaction (OPS + STATE_CACHE +
-   *    VECTOR_CLOCK): clear OPS, append the SYNC_IMPORT/BACKUP_IMPORT entry,
-   *    write the vector clock, write the singleton row directly from
-   *    `opts.newState` with `lastAppliedOpSeq` set to the appended op's seq,
-   *    delete the staging row.
+   * to fix issue #7709 — interrupted destructive sequences could otherwise
+   * leave OPS empty and state_cache stale, tripping the
+   * `isWhollyFreshClient + meaningful store data` branch on next launch.
    *
    * If any step throws, the IndexedDB transaction aborts and no committed
-   * change to OPS / STATE_CACHE singleton / VECTOR_CLOCK survives.
+   * change to OPS / STATE_CACHE / VECTOR_CLOCK survives.
    *
-   * Note: this guarantees atomicity within the `SUP_OPS` database only.
-   * Callers that also rotate the clientId (stored in a separate `pf` database)
-   * remain responsible for rolling that back on failure.
+   * Atomicity holds within the `SUP_OPS` database only. Callers that rotate
+   * the clientId (stored in the separate `pf` database) own that rollback —
+   * including the no-prior-clientId edge case, where the rotated id is
+   * intentionally left in `pf` on failure (see ClientIdService.withRotation).
    */
   async runDestructiveStateReplacement(opts: {
     syncImportOp: Operation;
@@ -1623,25 +1582,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   }): Promise<void> {
     await this._ensureInit();
 
-    // 1. Stage the new state cache as a crash-detection sentinel. The large
-    // payload write happens here, outside the destructive tx, so the
-    // multi-store tx below only has to clone the state once (on its put).
-    // If the destructive tx never commits, the orphan row is reconciled at
-    // boot via init().
     const compactedAt = Date.now();
-    await this.db.put(STORE_NAMES.STATE_CACHE, {
-      id: STATE_CACHE_STAGING_KEY,
-      state: opts.newState,
-      lastAppliedOpSeq: 0,
-      vectorClock: opts.newVectorClock,
-      compactedAt,
-      schemaVersion: opts.schemaVersion,
-      snapshotEntityKeys: opts.snapshotEntityKeys,
-    });
-
-    // 2. Destructive multi-store transaction. Writes the new singleton row
-    // directly from `opts.newState` (already in memory); no need to read the
-    // staged row back.
     const compactOp = encodeOperation(opts.syncImportOp);
     const tx = this.db.transaction(
       [STORE_NAMES.OPS, STORE_NAMES.STATE_CACHE, STORE_NAMES.VECTOR_CLOCK],
@@ -1678,30 +1619,22 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         schemaVersion: opts.schemaVersion,
         snapshotEntityKeys: opts.snapshotEntityKeys,
       });
-      await stateCacheStore.delete(STATE_CACHE_STAGING_KEY);
 
       await tx.done;
 
-      // Cache invalidation — match the pattern used by every other write site.
       this._appliedOpIdsCache = null;
       this._cacheLastSeq = 0;
       this._invalidateUnsyncedCache();
       this._vectorClockCache = opts.newVectorClock;
     } catch (e) {
-      // idb auto-aborts the tx on any rejected request, but be explicit so
-      // a non-IDB throw between awaits (e.g. the staging-row check above)
-      // also unwinds queued writes. Harmless if the tx already finished.
+      // idb auto-aborts the tx on any rejected request, but a spy that
+      // throws synchronously instead of rejecting the IDB request (used by
+      // the interrupt integration tests) leaves the tx open with queued
+      // writes — explicit abort is what unwinds them in that case.
       try {
         tx.abort();
       } catch {
         // Already aborted/committed — InvalidStateError; nothing to do.
-      }
-
-      // Best-effort staging cleanup; init() sweeps any orphan on next boot.
-      try {
-        await this.db.delete(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
-      } catch {
-        // Swallow — boot-time reconciliation will handle it.
       }
       if (e instanceof DOMException && e.name === 'QuotaExceededError') {
         throw new StorageQuotaExceededError();

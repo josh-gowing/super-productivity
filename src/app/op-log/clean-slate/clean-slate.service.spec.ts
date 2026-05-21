@@ -30,11 +30,7 @@ describe('CleanSlateService', () => {
       'getVectorClock',
       'getUnsynced',
     ]);
-    mockClientIdService = jasmine.createSpyObj('ClientIdService', [
-      'generateNewClientId',
-      'loadClientId',
-      'persistClientId',
-    ]);
+    mockClientIdService = jasmine.createSpyObj('ClientIdService', ['withRotation']);
 
     TestBed.configureTestingModule({
       providers: [
@@ -49,9 +45,13 @@ describe('CleanSlateService', () => {
 
     // Setup default mock responses
     mockStateSnapshotService.getStateSnapshotAsync.and.resolveTo(mockState as any);
-    mockClientIdService.loadClientId.and.resolveTo('ePrior');
-    mockClientIdService.generateNewClientId.and.resolveTo('eNewC');
-    mockClientIdService.persistClientId.and.resolveTo();
+    // Default: withRotation invokes its callback with the new clientId and
+    // propagates whatever the callback returns or throws. ClientIdService's
+    // own spec covers the rollback semantics.
+    mockClientIdService.withRotation.and.callFake(
+      async (_logPrefix: string, fn: (newClientId: string) => Promise<any>) =>
+        fn('eNewC'),
+    );
     mockOpLogStore.runDestructiveStateReplacement.and.resolveTo();
     mockOpLogStore.getVectorClock.and.resolveTo(null);
     mockOpLogStore.getUnsynced.and.resolveTo([]);
@@ -64,8 +64,11 @@ describe('CleanSlateService', () => {
       // Should get current state (async version to include archives)
       expect(mockStateSnapshotService.getStateSnapshotAsync).toHaveBeenCalled();
 
-      // Should generate new client ID
-      expect(mockClientIdService.generateNewClientId).toHaveBeenCalled();
+      // Should rotate client ID via the shared helper
+      expect(mockClientIdService.withRotation).toHaveBeenCalledWith(
+        '[CleanSlate]',
+        jasmine.any(Function),
+      );
 
       // Should route through the atomic helper (issue #7709)
       expect(mockOpLogStore.runDestructiveStateReplacement).toHaveBeenCalledTimes(1);
@@ -123,9 +126,15 @@ describe('CleanSlateService', () => {
             [OpType.Update]: 1,
           }),
           priorClockSize: 2,
-          priorClock: { ['B_old']: 42, ['B_other']: 7 },
         }),
       );
+      // Security C2: vector-clock contents must never be logged — keys are
+      // per-device clientIds and log history is user-exportable.
+      const loggedPayload = opLogSpy.calls.mostRecent().args[1] as Record<
+        string,
+        unknown
+      >;
+      expect('priorClock' in loggedPayload).toBe(false);
       // Order invariant: diagnostic snapshot reads must precede the
       // destructive atomic replacement.
       expect(mockOpLogStore.getVectorClock).toHaveBeenCalledBefore(
@@ -173,19 +182,11 @@ describe('CleanSlateService', () => {
       ).toBeRejectedWith(jasmine.objectContaining({ message: 'State error' }));
     });
 
-    it('should throw if client ID generation fails', async () => {
-      mockClientIdService.generateNewClientId.and.rejectWith(new Error('ClientID error'));
-
-      await expectAsync(
-        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
-      ).toBeRejectedWith(jasmine.objectContaining({ message: 'ClientID error' }));
-    });
-
-    it('should propagate errors from runDestructiveStateReplacement', async () => {
-      // Atomicity is guaranteed by the helper itself (see
-      // clean-slate-interrupt.integration.spec.ts). Here we only verify that
-      // CleanSlateService surfaces the helper's failure to its caller.
-      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
+    it('should propagate errors from withRotation', async () => {
+      // ClientIdService.withRotation owns the cross-DB rollback semantics
+      // (see its own spec). Here we only verify that CleanSlateService
+      // surfaces failures from the rotation/replacement chain to its caller.
+      mockClientIdService.withRotation.and.rejectWith(
         new Error('Atomic replacement failed'),
       );
 
@@ -196,65 +197,18 @@ describe('CleanSlateService', () => {
       );
     });
 
-    it('should roll back the rotated clientId if the destructive replacement fails', async () => {
-      // The clientId lives in a separate IndexedDB database (`pf`) that
-      // cannot share the atomic SUP_OPS transaction. Without rollback, a
-      // failed clean-slate leaves `pf` with the NEW clientId while OPS /
-      // vector_clock still reference the OLD one — a state-divergence
-      // scenario that breaks vector-clock continuity on the next sync.
-      mockClientIdService.loadClientId.and.resolveTo('ePrior');
+    it('should propagate errors from runDestructiveStateReplacement through withRotation', async () => {
+      // The destructive helper runs inside the withRotation callback.
+      // withRotation must re-throw whatever the callback throws so the
+      // caller sees the real failure.
       mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
         new Error('Atomic replacement failed'),
-      );
-
-      await expectAsync(
-        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
-      ).toBeRejected();
-
-      expect(mockClientIdService.persistClientId).toHaveBeenCalledWith('ePrior');
-    });
-
-    it('should not attempt rollback when there was no prior clientId', async () => {
-      // Wholly fresh device — no prior clientId to restore.
-      mockClientIdService.loadClientId.and.resolveTo(null);
-      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
-        new Error('Atomic replacement failed'),
-      );
-
-      await expectAsync(
-        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
-      ).toBeRejected();
-
-      expect(mockClientIdService.persistClientId).not.toHaveBeenCalled();
-    });
-
-    it('should surface the original destructive failure when the clientId rollback also fails', async () => {
-      // If the rollback persistClientId throws, we must still propagate the
-      // ORIGINAL destructive failure to the caller — not the rollback error.
-      // The rollback failure is logged at critical level for forensics.
-      const criticalSpy = spyOn(OpLog, 'critical');
-      mockClientIdService.loadClientId.and.resolveTo('ePrior');
-      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
-        new Error('Atomic replacement failed'),
-      );
-      mockClientIdService.persistClientId.and.rejectWith(
-        new Error('pf write also broken'),
       );
 
       await expectAsync(
         service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
       ).toBeRejectedWith(
         jasmine.objectContaining({ message: 'Atomic replacement failed' }),
-      );
-
-      expect(criticalSpy).toHaveBeenCalledWith(
-        jasmine.any(String),
-        jasmine.objectContaining({
-          priorClientId: 'ePrior',
-          originalError: jasmine.objectContaining({
-            message: 'Atomic replacement failed',
-          }),
-        }),
       );
     });
 
