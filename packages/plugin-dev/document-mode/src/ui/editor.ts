@@ -49,12 +49,117 @@ let isLoadingDoc = false;
  * to PluginAPI.updateTask and reconcile against ANY_TASK_UPDATE events
  * from the host without clobbering an active edit.
  */
+/**
+ * Helper invoked from keyboard shortcuts to create a new empty task and
+ * insert a taskRef pointing at it. Hoisted so keybindings inside
+ * TaskRefNode can call it without needing the editor closure variable
+ * (which isn't initialised at extension creation time).
+ */
+const createTaskAfter = async (insertPos: number): Promise<void> => {
+  if (!editor || !currentCtx) return;
+  try {
+    const taskId = await PluginAPI.addTask({
+      title: '',
+      projectId: currentCtx.type === 'PROJECT' ? currentCtx.id : null,
+    });
+    await refreshTaskCache();
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(insertPos, {
+        type: 'taskRef',
+        attrs: { taskId, isDone: false },
+        content: [],
+      })
+      .run();
+    // Cursor lands inside the new chip's empty title; refresh selection.
+    editor.commands.focus(insertPos + 1);
+  } catch (err) {
+    PluginAPI.log.err('createTaskAfter failed', err);
+  }
+};
+
 const TaskRefNode = Node.create({
   name: 'taskRef',
   group: 'block',
   content: 'inline*',
   selectable: true,
   draggable: true,
+  addKeyboardShortcuts() {
+    const inTaskRef = (): null | {
+      from: number;
+      to: number;
+      atStart: boolean;
+      atEnd: boolean;
+      isEmpty: boolean;
+      taskId: string;
+      nodePos: number;
+      nodeSize: number;
+    } => {
+      if (!editor) return null;
+      const { $from } = editor.state.selection;
+      if ($from.parent.type.name !== 'taskRef') return null;
+      const node = $from.parent;
+      const nodePos = $from.before($from.depth);
+      return {
+        from: $from.parentOffset,
+        to: $from.parentOffset,
+        atStart: $from.parentOffset === 0,
+        atEnd: $from.parentOffset === node.content.size,
+        isEmpty: node.content.size === 0,
+        taskId: node.attrs.taskId as string,
+        nodePos,
+        nodeSize: node.nodeSize,
+      };
+    };
+
+    return {
+      Enter: () => {
+        const info = inTaskRef();
+        if (!info) return false;
+        if (info.isEmpty) {
+          // Empty chip + Enter → convert to paragraph + delete the empty task.
+          if (info.taskId) {
+            PluginAPI.deleteTask(info.taskId).catch((err) =>
+              PluginAPI.log.err('deleteTask failed', err),
+            );
+          }
+          if (!editor) return false;
+          editor.chain().focus().setNodeSelection(info.nodePos).setParagraph().run();
+          return true;
+        }
+        if (info.atEnd) {
+          // Enter at end of chip → new empty task below.
+          const insertAfter = info.nodePos + info.nodeSize;
+          void createTaskAfter(insertAfter);
+          return true;
+        }
+        // Enter in the middle: swallow for POC (avoid splitting chip into
+        // two with the same taskId). Could split + create new task in v2.
+        return true;
+      },
+      Backspace: () => {
+        const info = inTaskRef();
+        if (!info) return false;
+        if (!info.atStart) return false;
+        if (info.isEmpty) {
+          // Empty chip + Backspace at start → delete task + remove chip.
+          if (info.taskId) {
+            PluginAPI.deleteTask(info.taskId).catch((err) =>
+              PluginAPI.log.err('deleteTask failed', err),
+            );
+          }
+          if (!editor) return false;
+          editor.chain().focus().setNodeSelection(info.nodePos).deleteSelection().run();
+          return true;
+        }
+        // Non-empty chip + Backspace at start: suppress default to avoid
+        // merging the chip's content into the previous block (which would
+        // detach the title from the task).
+        return true;
+      },
+    };
+  },
   addAttributes() {
     return {
       taskId: { default: '' },
@@ -642,6 +747,22 @@ const filterAndRender = (rect: DOMRect): void => {
 
 let gutterEl: HTMLDivElement | null = null;
 let hoveredBlock: HTMLElement | null = null;
+let hideGutterTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleHideGutter = (): void => {
+  if (hideGutterTimer) clearTimeout(hideGutterTimer);
+  hideGutterTimer = setTimeout(() => {
+    hideGutterTimer = null;
+    positionGutter(null);
+  }, 200);
+};
+
+const cancelHideGutter = (): void => {
+  if (hideGutterTimer) {
+    clearTimeout(hideGutterTimer);
+    hideGutterTimer = null;
+  }
+};
 
 const createGutter = (): HTMLDivElement => {
   const g = document.createElement('div');
@@ -853,19 +974,23 @@ const mount = async (): Promise<void> => {
   gutterEl = createGutter();
 
   root.addEventListener('mousemove', (ev) => {
+    cancelHideGutter();
     const block = findBlockFromEvent(ev);
     if (block !== hoveredBlock) positionGutter(block);
   });
   root.addEventListener('mouseleave', (ev) => {
-    // Don't hide if the user moved onto the gutter itself.
     const next = ev.relatedTarget as HTMLElement | null;
     if (next && gutterEl?.contains(next)) return;
-    positionGutter(null);
+    // Debounce: gives the mouse ~200 ms to reach the gutter across the gap.
+    scheduleHideGutter();
+  });
+  gutterEl.addEventListener('mouseenter', () => {
+    cancelHideGutter();
   });
   gutterEl.addEventListener('mouseleave', (ev) => {
     const next = ev.relatedTarget as HTMLElement | null;
     if (next && (root.contains(next) || gutterEl?.contains(next))) return;
-    positionGutter(null);
+    scheduleHideGutter();
   });
 
   editor.view.dom.addEventListener('keydown', (ev: KeyboardEvent) => {
