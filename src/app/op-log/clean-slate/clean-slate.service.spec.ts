@@ -278,8 +278,13 @@ describe('CleanSlateService', () => {
       );
 
       expect(criticalSpy).toHaveBeenCalledWith(
-        jasmine.stringMatching(/[Ff]ailed to roll back clientId/),
-        jasmine.objectContaining({ priorClientId: 'ePrior' }),
+        jasmine.any(String),
+        jasmine.objectContaining({
+          priorClientId: 'ePrior',
+          originalError: jasmine.objectContaining({
+            message: 'Atomic replacement failed',
+          }),
+        }),
       );
     });
 

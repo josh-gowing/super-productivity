@@ -110,7 +110,10 @@ export class CleanSlateService {
     try {
       await this.preMigrationBackupService.createPreMigrationBackup(reason);
     } catch (e) {
-      OpLog.warn('[CleanSlate] Failed to create pre-migration backup', e);
+      OpLog.warn('[CleanSlate] Failed to create pre-migration backup', {
+        name: (e as Error | undefined)?.name,
+        message: (e as Error | undefined)?.message,
+      });
       // Continue anyway - backup is optional safety feature
     }
 
@@ -177,6 +180,10 @@ export class CleanSlateService {
             '[CleanSlate] Failed to roll back clientId rotation after destructive failure',
             {
               priorClientId,
+              originalError: {
+                name: (e as Error | undefined)?.name,
+                message: (e as Error | undefined)?.message,
+              },
               rollbackErr: (rollbackErr as Error | undefined)?.message,
             },
           );

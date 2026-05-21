@@ -408,8 +408,13 @@ describe('BackupService', () => {
       );
 
       expect(criticalSpy).toHaveBeenCalledWith(
-        jasmine.stringMatching(/[Ff]ailed to roll back clientId/),
-        jasmine.objectContaining({ priorClientId: 'priorClientId' }),
+        jasmine.any(String),
+        jasmine.objectContaining({
+          priorClientId: 'priorClientId',
+          originalError: jasmine.objectContaining({
+            message: 'Atomic replacement failed',
+          }),
+        }),
       );
     });
   });

@@ -246,6 +246,10 @@ export class BackupService {
             'BackupService: Failed to roll back clientId rotation after destructive failure',
             {
               priorClientId,
+              originalError: {
+                name: (e as Error | undefined)?.name,
+                message: (e as Error | undefined)?.message,
+              },
               rollbackErr: (rollbackErr as Error | undefined)?.message,
             },
           );

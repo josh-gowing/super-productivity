@@ -1595,19 +1595,20 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
    * `isWhollyFreshClient + meaningful store data` conflict-dialog branch and
    * caused the user-reported multi-device data-loss chain.
    *
-   * ## Snapshot-then-swap (not single large multi-store tx)
+   * ## Staging-then-commit
    *
-   * 1. Stage the new `state` payload to a separate row keyed by
-   *    `STATE_CACHE_STAGING_KEY`. This single-store write can carry the
-   *    multi-MB payload without keeping a multi-store transaction open.
-   * 2. Open one short multi-store readwrite transaction (OPS + STATE_CACHE +
+   * 1. Write the new `state` payload to a separate row keyed by
+   *    `STATE_CACHE_STAGING_KEY`. This acts as a crash-detection sentinel —
+   *    if the destructive tx never commits, the orphan staging row is
+   *    reconciled at boot via `init()`.
+   * 2. Open one multi-store readwrite transaction (OPS + STATE_CACHE +
    *    VECTOR_CLOCK): clear OPS, append the SYNC_IMPORT/BACKUP_IMPORT entry,
-   *    write the vector clock, promote staging → singleton with
-   *    `lastAppliedOpSeq` set to the appended op's seq, delete staging.
+   *    write the vector clock, write the singleton row directly from
+   *    `opts.newState` with `lastAppliedOpSeq` set to the appended op's seq,
+   *    delete the staging row.
    *
    * If any step throws, the IndexedDB transaction aborts and no committed
-   * change to OPS / STATE_CACHE singleton / VECTOR_CLOCK survives. The next
-   * `init()` removes any orphaned staging row.
+   * change to OPS / STATE_CACHE singleton / VECTOR_CLOCK survives.
    *
    * Note: this guarantees atomicity within the `SUP_OPS` database only.
    * Callers that also rotate the clientId (stored in a separate `pf` database)
@@ -1622,20 +1623,25 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   }): Promise<void> {
     await this._ensureInit();
 
-    // 1. Stage the new state cache (large payload, outside the destructive tx).
-    // `lastAppliedOpSeq` is patched with the real seq inside the destructive
-    // tx below, once we know what seq IDB assigned to the appended op.
+    // 1. Stage the new state cache as a crash-detection sentinel. The large
+    // payload write happens here, outside the destructive tx, so the
+    // multi-store tx below only has to clone the state once (on its put).
+    // If the destructive tx never commits, the orphan row is reconciled at
+    // boot via init().
+    const compactedAt = Date.now();
     await this.db.put(STORE_NAMES.STATE_CACHE, {
       id: STATE_CACHE_STAGING_KEY,
       state: opts.newState,
       lastAppliedOpSeq: 0,
       vectorClock: opts.newVectorClock,
-      compactedAt: Date.now(),
+      compactedAt,
       schemaVersion: opts.schemaVersion,
       snapshotEntityKeys: opts.snapshotEntityKeys,
     });
 
-    // 2. Destructive multi-store transaction.
+    // 2. Destructive multi-store transaction. Writes the new singleton row
+    // directly from `opts.newState` (already in memory); no need to read the
+    // staged row back.
     const compactOp = encodeOperation(opts.syncImportOp);
     const tx = this.db.transaction(
       [STORE_NAMES.OPS, STORE_NAMES.STATE_CACHE, STORE_NAMES.VECTOR_CLOCK],
@@ -1646,13 +1652,6 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       const opsStore = tx.objectStore(STORE_NAMES.OPS);
       const stateCacheStore = tx.objectStore(STORE_NAMES.STATE_CACHE);
       const vcStore = tx.objectStore(STORE_NAMES.VECTOR_CLOCK);
-
-      const staged = await stateCacheStore.get(STATE_CACHE_STAGING_KEY);
-      if (!staged) {
-        throw new Error(
-          '[OpLogStore] runDestructiveStateReplacement: staging row missing inside destructive tx',
-        );
-      }
 
       await opsStore.clear();
 
@@ -1671,17 +1670,21 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       );
 
       await stateCacheStore.put({
-        ...staged,
         id: SINGLETON_KEY,
+        state: opts.newState,
         lastAppliedOpSeq: seq,
+        vectorClock: opts.newVectorClock,
+        compactedAt,
+        schemaVersion: opts.schemaVersion,
+        snapshotEntityKeys: opts.snapshotEntityKeys,
       });
       await stateCacheStore.delete(STATE_CACHE_STAGING_KEY);
 
       await tx.done;
 
-      // Cache invalidation.
+      // Cache invalidation — match the pattern used by every other write site.
       this._appliedOpIdsCache = null;
-      this._cacheLastSeq = seq;
+      this._cacheLastSeq = 0;
       this._invalidateUnsyncedCache();
       this._vectorClockCache = opts.newVectorClock;
     } catch (e) {
