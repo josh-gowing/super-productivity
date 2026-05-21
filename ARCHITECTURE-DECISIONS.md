@@ -162,7 +162,7 @@ The original action type (`DOCUMENT_MODE_UPDATE_BLOCKS_DELTA`) and its op-log co
 
 **Open known limitations** (intentional scope cuts for the POC):
 
-- Doc / `task.subTaskIds` order may drift; only a full reseed of the context heals it.
+- On load, top-level chip ordering is rebuilt from `ctx.taskIds` rather than preserved from the stored doc. This is the right behaviour for TODAY (whose ordering changes daily) and for honouring user reorders done in the regular task view, but means any chip reorder the user performs _inside_ doc-mode is lost on the next reload — there is no write-back to `ctx.taskIds`. Custom non-chip blocks (paragraphs, headings, dividers) survive but are moved to the doc tail rather than staying interleaved between chips.
 - Concurrent local typing + remote title change can silently overwrite the remote within the debounce + echo window (~1.1 s).
 - A corrupted stored blob shows an empty seed; saves are suppressed (`isDocCorrupt` flag) so the original isn't overwritten, but there is no in-app recovery path yet.
 - Plugin unload / `pagehide` flushes the debounce best-effort but can lose up to ~5 s of edits on hard exit.
