@@ -11,6 +11,7 @@ import { OpLog } from '../../core/log';
 import { Operation, OpType, SyncImportReason } from '../core/operation.types';
 import { ActionType } from '../core/action-types.enum';
 import { CURRENT_SCHEMA_VERSION } from '../persistence/schema-migration.service';
+import { extractEntityKeysFromState } from '../persistence/extract-entity-keys';
 
 /**
  * Service for performing "clean slate" operations on the sync state.
@@ -118,7 +119,12 @@ export class CleanSlateService {
     // The sync getStateSnapshot() returns DEFAULT_ARCHIVE (empty) which causes data loss
     const currentState = await this.stateSnapshotService.getStateSnapshotAsync();
 
-    // 3. Generate new client ID (fresh start - all devices get new IDs after clean slate)
+    // 3. Capture prior clientId so we can roll back the rotation if the
+    // destructive replacement fails. The clientId lives in a separate IDB
+    // database (`pf`) and so cannot share the atomic tx below; rollback is
+    // the next-best guarantee that `pf` and `SUP_OPS` agree on the device's
+    // clientId after this method returns or throws.
+    const priorClientId = await this.clientIdService.loadClientId();
     const newClientId = await this.clientIdService.generateNewClientId();
     OpLog.normal('[CleanSlate] Generated new client ID', { newClientId });
 
@@ -154,12 +160,30 @@ export class CleanSlateService {
     // `runDestructiveStateReplacement` makes the destructive sequence either
     // commit fully or leave the prior state intact.
     OpLog.normal('[CleanSlate] Replacing op-log + state cache atomically');
-    await this.opLogStore.runDestructiveStateReplacement({
-      syncImportOp,
-      newVectorClock,
-      newState: currentState,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-    });
+    try {
+      await this.opLogStore.runDestructiveStateReplacement({
+        syncImportOp,
+        newVectorClock,
+        newState: currentState,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        snapshotEntityKeys: extractEntityKeysFromState(currentState),
+      });
+    } catch (e) {
+      if (priorClientId) {
+        try {
+          await this.clientIdService.persistClientId(priorClientId);
+        } catch (rollbackErr) {
+          OpLog.critical(
+            '[CleanSlate] Failed to roll back clientId rotation after destructive failure',
+            {
+              priorClientId,
+              rollbackErr: (rollbackErr as Error | undefined)?.message,
+            },
+          );
+        }
+      }
+      throw e;
+    }
 
     OpLog.normal('[CleanSlate] Clean slate completed successfully', {
       syncImportId: syncImportOp.id,

@@ -19,6 +19,7 @@ import { CompleteBackup } from '../core/types/sync.types';
 import { ArchiveDbAdapter } from '../../core/persistence/archive-db-adapter.service';
 import { ArchiveModel } from '../../features/archive/archive.model';
 import { normalizeGlobalConfigStartOfNextDay } from '../../features/config/normalize-start-of-next-day-config';
+import { extractEntityKeysFromState } from '../persistence/extract-entity-keys';
 
 /**
  * Service for handling backup import and export operations.
@@ -175,8 +176,11 @@ export class BackupService {
   ): Promise<void> {
     OpLog.normal('BackupService: Persisting import to operation log...');
 
-    // 1. Backup current state before clearing operations
-    let backupSucceeded = true;
+    // 1. Backup current state before clearing operations. If this fails we
+    // throw — the caller unconditionally replaces NgRx + archives + sync seqs
+    // after this method returns, so silently skipping the destructive write
+    // would leave the device in a hybrid state (imported NgRx/archives, old
+    // op-log) that is worse than either outcome.
     try {
       const existingStateCache = await this._opLogStore.loadStateCache();
       if (existingStateCache?.state) {
@@ -184,20 +188,19 @@ export class BackupService {
         await this._opLogStore.saveImportBackup(existingStateCache.state);
       }
     } catch (e) {
-      OpLog.warn('BackupService: Failed to backup state before import:', e);
-      backupSucceeded = false;
-    }
-
-    // Skip the atomic destructive replacement if the import-backup write failed —
-    // we don't want to overwrite the user's local state without a recovery point.
-    if (!backupSucceeded) {
-      OpLog.warn(
-        'BackupService: Pre-import backup failed; skipping destructive import to preserve local state.',
+      OpLog.warn('BackupService: Failed to backup state before import:', {
+        name: (e as Error | undefined)?.name,
+        message: (e as Error | undefined)?.message,
+      });
+      throw new Error(
+        'BackupService: Pre-import backup failed; aborting import to preserve local state.',
       );
-      return;
     }
 
-    // Generate new client ID for both paths - imports are a fresh start
+    // 2. Capture prior clientId so we can roll back if the destructive
+    // replacement throws. `pf` (clientId) is a separate IDB DB and so cannot
+    // share the atomic tx; rollback keeps `pf` and `SUP_OPS` in sync.
+    const priorClientId = await this._clientIdService.loadClientId();
     const clientId = await this._clientIdService.generateNewClientId();
 
     // Fresh clock: new clientId with initial counter for clean baseline
@@ -226,12 +229,30 @@ export class BackupService {
     // `isWhollyFreshClient + meaningful store data` state that triggers the
     // multi-device data-loss chain.
     OpLog.normal('BackupService: Replacing op-log + state cache atomically');
-    await this._opLogStore.runDestructiveStateReplacement({
-      syncImportOp: op,
-      newVectorClock: newClock,
-      newState: importedData,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-    });
+    try {
+      await this._opLogStore.runDestructiveStateReplacement({
+        syncImportOp: op,
+        newVectorClock: newClock,
+        newState: importedData,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        snapshotEntityKeys: extractEntityKeysFromState(importedData),
+      });
+    } catch (e) {
+      if (priorClientId) {
+        try {
+          await this._clientIdService.persistClientId(priorClientId);
+        } catch (rollbackErr) {
+          OpLog.critical(
+            'BackupService: Failed to roll back clientId rotation after destructive failure',
+            {
+              priorClientId,
+              rollbackErr: (rollbackErr as Error | undefined)?.message,
+            },
+          );
+        }
+      }
+      throw e;
+    }
 
     OpLog.normal('BackupService: Import persisted to operation log.');
   }

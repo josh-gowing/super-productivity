@@ -106,6 +106,8 @@ describe('BackupService', () => {
     ]);
     mockClientIdService = jasmine.createSpyObj('ClientIdService', [
       'generateNewClientId',
+      'loadClientId',
+      'persistClientId',
     ]);
     mockArchiveDbAdapter = jasmine.createSpyObj('ArchiveDbAdapter', [
       'saveArchiveYoung',
@@ -114,8 +116,11 @@ describe('BackupService', () => {
 
     // Default mock returns
     mockOpLogStore.loadStateCache.and.returnValue(Promise.resolve(null));
-    mockOpLogStore.runDestructiveStateReplacement.and.resolveTo(1);
+    mockOpLogStore.saveImportBackup.and.resolveTo();
+    mockOpLogStore.runDestructiveStateReplacement.and.resolveTo();
+    mockClientIdService.loadClientId.and.resolveTo('priorClientId');
     mockClientIdService.generateNewClientId.and.resolveTo('newClientId');
+    mockClientIdService.persistClientId.and.resolveTo();
     mockArchiveDbAdapter.saveArchiveYoung.and.returnValue(Promise.resolve());
     mockArchiveDbAdapter.saveArchiveOld.and.returnValue(Promise.resolve());
 
@@ -336,6 +341,53 @@ describe('BackupService', () => {
       const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
         .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
       expect(args.syncImportOp.vectorClock).toEqual({ newForceClient: 1 });
+    });
+
+    it('should abort the import (and not dispatch loadAllData) when the pre-import backup fails', async () => {
+      // Without this, the silent early-return in _persistImportToOperationLog
+      // leaves the device in a hybrid state: NgRx + archive DBs + sync seqs
+      // replaced with imported data, but OPS / state_cache / vector_clock
+      // still hold the previous content.
+      mockOpLogStore.loadStateCache.and.resolveTo({
+        state: { task: { ids: [], entities: {} } },
+      } as any);
+      mockOpLogStore.saveImportBackup.and.rejectWith(new Error('IDB quota exceeded'));
+
+      const backupData = createMinimalValidBackup();
+
+      await expectAsync(
+        service.importCompleteBackup(backupData as any, true, true),
+      ).toBeRejected();
+
+      expect(mockOpLogStore.runDestructiveStateReplacement).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).not.toHaveBeenCalled();
+      expect(mockArchiveDbAdapter.saveArchiveYoung).not.toHaveBeenCalled();
+      expect(mockArchiveDbAdapter.saveArchiveOld).not.toHaveBeenCalled();
+    });
+
+    it('should roll back the rotated clientId if the destructive replacement fails', async () => {
+      mockClientIdService.loadClientId.and.resolveTo('priorClientId');
+      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
+        new Error('Atomic replacement failed'),
+      );
+
+      await expectAsync(
+        service.importCompleteBackup(createMinimalValidBackup() as any, true, true),
+      ).toBeRejected();
+
+      expect(mockClientIdService.persistClientId).toHaveBeenCalledWith('priorClientId');
+      expect(mockStore.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('should pass snapshotEntityKeys derived from the imported data', async () => {
+      const backupData = createMinimalValidBackup();
+
+      await service.importCompleteBackup(backupData as any, true, true);
+
+      const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
+        .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
+      expect(args.snapshotEntityKeys).toBeDefined();
+      expect(Array.isArray(args.snapshotEntityKeys)).toBe(true);
     });
   });
 });

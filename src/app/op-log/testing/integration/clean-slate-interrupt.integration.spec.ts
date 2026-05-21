@@ -54,8 +54,14 @@ describe('CleanSlate / Backup interrupt (issue #7709 regression)', () => {
     mockStateSnapshot.getStateSnapshot.and.returnValue(meaningfulState as any);
     mockStateSnapshot.getStateSnapshotAsync.and.resolveTo(meaningfulState as any);
 
-    mockClientId = jasmine.createSpyObj('ClientIdService', ['generateNewClientId']);
+    mockClientId = jasmine.createSpyObj('ClientIdService', [
+      'generateNewClientId',
+      'loadClientId',
+      'persistClientId',
+    ]);
     mockClientId.generateNewClientId.and.resolveTo('cNew1');
+    mockClientId.loadClientId.and.resolveTo('cPrior');
+    mockClientId.persistClientId.and.resolveTo();
 
     mockPreMigration = jasmine.createSpyObj('PreMigrationBackupService', [
       'createPreMigrationBackup',

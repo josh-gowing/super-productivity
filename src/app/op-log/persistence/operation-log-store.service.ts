@@ -201,11 +201,14 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
     // Reconcile orphaned state_cache staging row. A staging row that survived
     // means runDestructiveStateReplacement's destructive transaction never
-    // committed; the singleton row is the authoritative state. Delete the
-    // staging row so the next destructive replacement starts clean.
+    // committed; the singleton row is the authoritative state. Use getKey so
+    // we don't deserialise the multi-MB payload just to delete it.
     try {
-      const staging = await db.get(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
-      if (staging) {
+      const stagingKey = await db.getKey(
+        STORE_NAMES.STATE_CACHE,
+        STATE_CACHE_STAGING_KEY,
+      );
+      if (stagingKey !== undefined) {
         await db.delete(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
         Log.warn(
           '[OpLogStore] Cleaned up orphaned state_cache staging row from a previous interrupted destructive replacement.',
@@ -213,7 +216,10 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       }
     } catch (e) {
       // Non-fatal: an init that can't read state_cache will fail elsewhere too.
-      Log.warn('[OpLogStore] Staging-row reconciliation skipped (read failed):', e);
+      Log.warn('[OpLogStore] Staging-row reconciliation skipped:', {
+        name: (e as Error | undefined)?.name,
+        message: (e as Error | undefined)?.message,
+      });
     }
   }
 
@@ -1594,28 +1600,31 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
    * 1. Stage the new `state` payload to a separate row keyed by
    *    `STATE_CACHE_STAGING_KEY`. This single-store write can carry the
    *    multi-MB payload without keeping a multi-store transaction open.
-   * 2. Verify the staged row with a round-trip read.
-   * 3. Open one short multi-store readwrite transaction (OPS + STATE_CACHE +
-   *    VECTOR_CLOCK) that does only small writes: clear OPS, append the
-   *    SYNC_IMPORT entry, write the vector clock, copy staging → singleton,
-   *    delete staging.
+   * 2. Open one short multi-store readwrite transaction (OPS + STATE_CACHE +
+   *    VECTOR_CLOCK): clear OPS, append the SYNC_IMPORT/BACKUP_IMPORT entry,
+   *    write the vector clock, promote staging → singleton with
+   *    `lastAppliedOpSeq` set to the appended op's seq, delete staging.
    *
    * If any step throws, the IndexedDB transaction aborts and no committed
    * change to OPS / STATE_CACHE singleton / VECTOR_CLOCK survives. The next
    * `init()` removes any orphaned staging row.
    *
-   * @returns The seq of the appended SYNC_IMPORT/BACKUP_IMPORT op.
+   * Note: this guarantees atomicity within the `SUP_OPS` database only.
+   * Callers that also rotate the clientId (stored in a separate `pf` database)
+   * remain responsible for rolling that back on failure.
    */
   async runDestructiveStateReplacement(opts: {
     syncImportOp: Operation;
     newVectorClock: VectorClock;
     newState: unknown;
     schemaVersion: number;
-    snapshotEntityKeys?: string[];
-  }): Promise<number> {
+    snapshotEntityKeys: string[];
+  }): Promise<void> {
     await this._ensureInit();
 
     // 1. Stage the new state cache (large payload, outside the destructive tx).
+    // `lastAppliedOpSeq` is patched with the real seq inside the destructive
+    // tx below, once we know what seq IDB assigned to the appended op.
     await this.db.put(STORE_NAMES.STATE_CACHE, {
       id: STATE_CACHE_STAGING_KEY,
       state: opts.newState,
@@ -1626,18 +1635,8 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       snapshotEntityKeys: opts.snapshotEntityKeys,
     });
 
-    // 2. Round-trip verify. If the staged write didn't land, abort before
-    // we touch OPS — the prior state is still intact at this point.
-    const staged = await this.db.get(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
-    if (!staged || staged.state === null || staged.state === undefined) {
-      throw new Error(
-        '[OpLogStore] runDestructiveStateReplacement: stage write failed verification',
-      );
-    }
-
-    // 3. Destructive multi-store transaction. Small writes only:
-    // clear OPS, add the SYNC_IMPORT entry, write the vector clock,
-    // promote staging row to the singleton, delete the staging row.
+    // 2. Destructive multi-store transaction.
+    const compactOp = encodeOperation(opts.syncImportOp);
     const tx = this.db.transaction(
       [STORE_NAMES.OPS, STORE_NAMES.STATE_CACHE, STORE_NAMES.VECTOR_CLOCK],
       'readwrite',
@@ -1648,9 +1647,15 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       const stateCacheStore = tx.objectStore(STORE_NAMES.STATE_CACHE);
       const vcStore = tx.objectStore(STORE_NAMES.VECTOR_CLOCK);
 
+      const staged = await stateCacheStore.get(STATE_CACHE_STAGING_KEY);
+      if (!staged) {
+        throw new Error(
+          '[OpLogStore] runDestructiveStateReplacement: staging row missing inside destructive tx',
+        );
+      }
+
       await opsStore.clear();
 
-      const compactOp = encodeOperation(opts.syncImportOp);
       const entry: Omit<StoredOperationLogEntry, 'seq'> = {
         op: compactOp,
         appliedAt: Date.now(),
@@ -1665,33 +1670,31 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         SINGLETON_KEY,
       );
 
-      await stateCacheStore.put({ ...staged, id: SINGLETON_KEY });
+      await stateCacheStore.put({
+        ...staged,
+        id: SINGLETON_KEY,
+        lastAppliedOpSeq: seq,
+      });
       await stateCacheStore.delete(STATE_CACHE_STAGING_KEY);
 
       await tx.done;
 
       // Cache invalidation.
       this._appliedOpIdsCache = null;
-      this._cacheLastSeq = 0;
+      this._cacheLastSeq = seq;
       this._invalidateUnsyncedCache();
       this._vectorClockCache = opts.newVectorClock;
-
-      return seq;
     } catch (e) {
-      // CRITICAL: explicitly abort the IDB tx so any already-queued writes
-      // (like the opsStore.clear() above) are rolled back. Without this,
-      // a JS-level throw between IDB requests can let the tx auto-commit
-      // partial state — defeating the whole atomicity story this method
-      // exists for.
+      // idb auto-aborts the tx on any rejected request, but be explicit so
+      // a non-IDB throw between awaits (e.g. the staging-row check above)
+      // also unwinds queued writes. Harmless if the tx already finished.
       try {
         tx.abort();
       } catch {
-        // Already aborted/committed — IDB throws InvalidStateError; nothing to do.
+        // Already aborted/committed — InvalidStateError; nothing to do.
       }
 
-      // OPS/STATE_CACHE singleton/VECTOR_CLOCK are now unchanged.
-      // The staging row may persist — best-effort cleanup; the next init()
-      // will sweep it if this fails.
+      // Best-effort staging cleanup; init() sweeps any orphan on next boot.
       try {
         await this.db.delete(STORE_NAMES.STATE_CACHE, STATE_CACHE_STAGING_KEY);
       } catch {

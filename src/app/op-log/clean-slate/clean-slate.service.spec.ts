@@ -34,6 +34,8 @@ describe('CleanSlateService', () => {
     ]);
     mockClientIdService = jasmine.createSpyObj('ClientIdService', [
       'generateNewClientId',
+      'loadClientId',
+      'persistClientId',
     ]);
     mockPreMigrationBackupService = jasmine.createSpyObj('PreMigrationBackupService', [
       'createPreMigrationBackup',
@@ -56,9 +58,11 @@ describe('CleanSlateService', () => {
 
     // Setup default mock responses
     mockStateSnapshotService.getStateSnapshotAsync.and.resolveTo(mockState as any);
+    mockClientIdService.loadClientId.and.resolveTo('ePrior');
     mockClientIdService.generateNewClientId.and.resolveTo('eNewC');
+    mockClientIdService.persistClientId.and.resolveTo();
     mockPreMigrationBackupService.createPreMigrationBackup.and.resolveTo();
-    mockOpLogStore.runDestructiveStateReplacement.and.resolveTo(1);
+    mockOpLogStore.runDestructiveStateReplacement.and.resolveTo();
     mockOpLogStore.getVectorClock.and.resolveTo(null);
     mockOpLogStore.getUnsynced.and.resolveTo([]);
   });
@@ -220,6 +224,51 @@ describe('CleanSlateService', () => {
       ).toBeRejectedWith(
         jasmine.objectContaining({ message: 'Atomic replacement failed' }),
       );
+    });
+
+    it('should roll back the rotated clientId if the destructive replacement fails', async () => {
+      // The clientId lives in a separate IndexedDB database (`pf`) that
+      // cannot share the atomic SUP_OPS transaction. Without rollback, a
+      // failed clean-slate leaves `pf` with the NEW clientId while OPS /
+      // vector_clock still reference the OLD one — a state-divergence
+      // scenario that breaks vector-clock continuity on the next sync.
+      mockClientIdService.loadClientId.and.resolveTo('ePrior');
+      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
+        new Error('Atomic replacement failed'),
+      );
+
+      await expectAsync(
+        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
+      ).toBeRejected();
+
+      expect(mockClientIdService.persistClientId).toHaveBeenCalledWith('ePrior');
+    });
+
+    it('should not attempt rollback when there was no prior clientId', async () => {
+      // Wholly fresh device — no prior clientId to restore.
+      mockClientIdService.loadClientId.and.resolveTo(null);
+      mockOpLogStore.runDestructiveStateReplacement.and.rejectWith(
+        new Error('Atomic replacement failed'),
+      );
+
+      await expectAsync(
+        service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED'),
+      ).toBeRejected();
+
+      expect(mockClientIdService.persistClientId).not.toHaveBeenCalled();
+    });
+
+    it('should pass snapshotEntityKeys derived from current state', async () => {
+      // Without snapshotEntityKeys, the persisted state_cache singleton looks
+      // like the "old snapshot format" to remote-ops-processing, which
+      // triggers an unnecessary background recompaction after every
+      // clean-slate. Callers must pass it.
+      await service.createCleanSlate('ENCRYPTION_CHANGE', 'PASSWORD_CHANGED');
+
+      const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
+        .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
+      expect(args.snapshotEntityKeys).toBeDefined();
+      expect(Array.isArray(args.snapshotEntityKeys)).toBe(true);
     });
   });
 });
