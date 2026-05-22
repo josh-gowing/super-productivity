@@ -1230,9 +1230,22 @@ const createGutter = (): HTMLDivElement => {
     <button class="block-gutter-btn" data-action="grip" title="Drag to move; click for menu">
       ${iconSvg('drag_indicator')}
     </button>
+    <button class="block-gutter-btn" data-action="details" title="Open task details">
+      ${iconSvg('open_in_new')}
+    </button>
   `;
   g.style.display = 'none';
   document.body.appendChild(g);
+
+  // "Open task details" — only shown for task chips (see positionGutter).
+  // Opens the host's task-detail panel via the PluginAPI bridge.
+  g.querySelector('[data-action="details"]')?.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const taskId = hoveredBlock?.dataset.taskId;
+    if (!taskId) return;
+    PluginAPI.selectTask(taskId).catch((err) => logErr('selectTask failed', err));
+  });
 
   g.querySelector('[data-action="add"]')?.addEventListener('mousedown', (ev) => {
     ev.preventDefault();
@@ -1268,10 +1281,17 @@ const positionGutter = (block: HTMLElement | null): void => {
     return;
   }
   const rect = block.getBoundingClientRect();
+  // The "open details" button is only meaningful for task chips.
+  const detailsBtn = gutterEl.querySelector<HTMLElement>('[data-action="details"]');
+  if (detailsBtn) {
+    detailsBtn.style.display = block.classList.contains('task-ref') ? '' : 'none';
+  }
   gutterEl.style.display = 'flex';
   gutterEl.style.top = `${rect.top + window.scrollY}px`;
-  gutterEl.style.left = `${rect.left + window.scrollX - 52}px`;
   gutterEl.style.height = `${Math.max(28, rect.height)}px`;
+  // Right-align the gutter just left of the block; measure its own width so
+  // the layout holds whether or not the details button is showing.
+  gutterEl.style.left = `${rect.left + window.scrollX - gutterEl.offsetWidth + 6}px`;
   hoveredBlock = block;
 };
 

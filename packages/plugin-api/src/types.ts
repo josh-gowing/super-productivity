@@ -469,6 +469,13 @@ export interface PluginAPI {
 
   getCurrentContextTasks(): Promise<Task[]>;
 
+  /**
+   * Select a task, opening its detail panel in the app's right-hand panel.
+   * Works regardless of the active view — including while a plugin embed
+   * occupies the work-view body. Accepts a task or subtask id.
+   */
+  selectTask(taskId: string): Promise<void>;
+
   reInitData(): Promise<void>;
   updateTask(taskId: string, updates: Partial<Task>): Promise<void>;
 

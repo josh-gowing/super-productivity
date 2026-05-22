@@ -303,6 +303,7 @@ export const createPluginApiScript = (config: PluginIframeConfig): string => {
           getTasks: () => callApi('getTasks'),
           getArchivedTasks: () => callApi('getArchivedTasks'),
           getCurrentContextTasks: () => callApi('getCurrentContextTasks'),
+          selectTask: (taskId) => callApi('selectTask', [taskId]),
           reInitData: () => callApi('reInitData'),
           updateTask: (taskId, updates) => callApi('updateTask', [taskId, updates]),
           addTask: (taskData) => callApi('addTask', [taskData]),

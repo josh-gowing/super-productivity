@@ -940,6 +940,25 @@ export class PluginBridgeService implements OnDestroy {
   }
 
   /**
+   * Select a task, opening its detail panel in the right-hand panel. Works
+   * regardless of the active view, including while a plugin embed occupies
+   * the work-view body.
+   */
+  async selectTask(taskId: string): Promise<void> {
+    typia.assert<string>(taskId);
+
+    const task = await this._taskService.getByIdOnce$(taskId).pipe(first()).toPromise();
+    if (!task) {
+      throw new Error(
+        this._translateService.instant(T.PLUGINS.TASK_NOT_FOUND, { taskId }),
+      );
+    }
+
+    this._taskService.setSelectedId(taskId);
+    PluginLog.log('PluginBridge: Task selected', { taskId });
+  }
+
+  /**
    * Batch update tasks for a project
    * Only generate IDs here - let the reducer handle all validation
    * Large batches are automatically chunked to prevent oversized operation payloads

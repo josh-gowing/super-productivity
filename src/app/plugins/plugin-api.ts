@@ -270,6 +270,11 @@ export class PluginAPI implements PluginAPIInterface {
     return this._pluginBridge.reorderTasks(taskIds, contextId, contextType);
   }
 
+  async selectTask(taskId: string): Promise<void> {
+    PluginLog.log(`Plugin ${this._pluginId} requested to select task ${taskId}`);
+    return this._pluginBridge.selectTask(taskId);
+  }
+
   async batchUpdateForProject(request: BatchUpdateRequest): Promise<BatchUpdateResult> {
     PluginLog.log(
       `Plugin ${this._pluginId} requested batch update for project ${(request as { projectId: string }).projectId}`,

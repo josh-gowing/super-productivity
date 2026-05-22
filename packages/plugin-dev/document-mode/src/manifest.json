@@ -12,6 +12,8 @@
     "updateTask",
     "addTask",
     "deleteTask",
+    "reorderTasks",
+    "selectTask",
     "persistDataSynced",
     "loadSyncedData",
     "registerHook"
