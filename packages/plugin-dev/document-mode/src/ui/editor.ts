@@ -132,6 +132,33 @@ const deleteTaskTolerant = async (taskId: string): Promise<void> => {
  * from the host without clobbering an active edit.
  */
 /**
+ * Seed `taskCache` with a freshly-created task so its chip renders (and is
+ * editable) immediately, without waiting for a full `getTasks()` round-trip.
+ * The host's ANY_TASK_UPDATE echo for the add reconciles the real entity
+ * shortly after; this only bridges the gap so fast typing isn't dropped.
+ */
+const seedTaskCache = (
+  taskId: string,
+  title: string,
+  ctx: ActiveWorkContext,
+  parentId: string | null = null,
+): void => {
+  if (taskCache.has(taskId)) return;
+  taskCache.set(taskId, {
+    id: taskId,
+    title,
+    isDone: false,
+    projectId: ctx.type === 'PROJECT' ? ctx.id : null,
+    parentId,
+    tagIds: [],
+    subTaskIds: [],
+    timeEstimate: 0,
+    timeSpent: 0,
+    created: Date.now(),
+  });
+};
+
+/**
  * Helper invoked from keyboard shortcuts to create a new empty task and
  * insert a taskRef pointing at it. Hoisted so keybindings inside
  * TaskRefNode can call it without needing the editor closure variable
@@ -139,12 +166,13 @@ const deleteTaskTolerant = async (taskId: string): Promise<void> => {
  */
 const createTaskAfter = async (insertPos: number): Promise<void> => {
   if (!editor || !currentCtx) return;
+  const ctx = currentCtx;
   try {
     const taskId = await PluginAPI.addTask({
       title: '',
-      projectId: currentCtx.type === 'PROJECT' ? currentCtx.id : null,
+      projectId: ctx.type === 'PROJECT' ? ctx.id : null,
     });
-    await refreshTaskCache();
+    seedTaskCache(taskId, '', ctx);
     editor
       .chain()
       .focus()
@@ -170,13 +198,14 @@ const createSubTaskAfter = async (
   parentTaskId: string,
 ): Promise<void> => {
   if (!editor || !currentCtx) return;
+  const ctx = currentCtx;
   try {
     const taskId = await PluginAPI.addTask({
       title: '',
       parentId: parentTaskId,
-      projectId: currentCtx.type === 'PROJECT' ? currentCtx.id : null,
+      projectId: ctx.type === 'PROJECT' ? ctx.id : null,
     });
-    await refreshTaskCache();
+    seedTaskCache(taskId, '', ctx, parentTaskId);
     editor
       .chain()
       .focus()
@@ -805,7 +834,7 @@ const insertItems = (): MenuItem[] => {
             title: '',
             projectId: ctxAtStart.type === 'PROJECT' ? ctxAtStart.id : null,
           });
-          await refreshTaskCache();
+          seedTaskCache(taskId, '', ctxAtStart);
           // Skip the doc insert if the user switched contexts during the
           // host round-trip — the task is still saved in the host, it just
           // doesn't belong in this editor doc.
@@ -1589,6 +1618,75 @@ const moveBlock = (nodePos: number, direction: 'up' | 'down'): void => {
   moveContentSliceToIndex(idx, sliceLenAt(idx), targetIdx);
 };
 
+/**
+ * Promote a paragraph / heading into a task chip: create a host task whose
+ * title is the block's text, then swap the block for a taskRef. Bails if the
+ * doc shifted under the host round-trip (the task is still created and
+ * surfaces via reconcile) so a stale position can't replace the wrong range.
+ */
+const turnBlockIntoTask = async (nodePos: number): Promise<void> => {
+  if (!editor || !currentCtx) return;
+  const ed = editor;
+  const ctx = currentCtx;
+  const node = ed.state.doc.nodeAt(nodePos);
+  if (!node) return;
+  const nodeName = node.type.name;
+  const title = node.textContent;
+  try {
+    const taskId = await PluginAPI.addTask({
+      title,
+      projectId: ctx.type === 'PROJECT' ? ctx.id : null,
+    });
+    seedTaskCache(taskId, title, ctx);
+    if (currentCtx?.id !== ctx.id) return;
+    const current = ed.state.doc.nodeAt(nodePos);
+    if (!current || current.type.name !== nodeName || current.textContent !== title) {
+      return;
+    }
+    ed.chain()
+      .focus()
+      .insertContentAt(
+        { from: nodePos, to: nodePos + current.nodeSize },
+        taskNodeJSON(taskId, 'taskRef', lookupTask) as Parameters<
+          typeof ed.commands.insertContentAt
+        >[1],
+      )
+      .run();
+  } catch (err) {
+    logErr('turnBlockIntoTask failed', err);
+  }
+};
+
+/**
+ * Delete a task chip — and, for a parent, its whole subtask group — from
+ * both the document and the host. Removing the chip without deleting the
+ * task would leave the task alive, so it would reappear on the next reload.
+ */
+const deleteTaskChipGroup = (blockIdx: number): void => {
+  if (!editor) return;
+  const ed = editor;
+  const doc = ed.state.doc;
+  if (blockIdx < 0 || blockIdx >= doc.childCount) return;
+  const len = Math.min(sliceLenAt(blockIdx), doc.childCount - blockIdx);
+  const ids: string[] = [];
+  let fromPos = 0;
+  for (let i = 0; i < blockIdx; i++) fromPos += doc.child(i).nodeSize;
+  let size = 0;
+  for (let i = 0; i < len; i++) {
+    const child = doc.child(blockIdx + i);
+    size += child.nodeSize;
+    if (isTaskNode(child.type.name) && child.attrs.taskId) {
+      ids.push(child.attrs.taskId as string);
+    }
+  }
+  // Remove the chips from the doc first (instant feedback), then delete the
+  // host tasks. deleteTaskTolerant absorbs a subtask the host already
+  // removed by cascading the parent delete.
+  ed.view.dispatch(ed.state.tr.delete(fromPos, fromPos + size));
+  ed.view.focus();
+  for (const id of ids) void deleteTaskTolerant(id);
+};
+
 const openBlockMenu = (anchorRect: DOMRect): void => {
   if (!editor || !hoveredBlock) return;
   const ed = editor;
@@ -1598,35 +1696,53 @@ const openBlockMenu = (anchorRect: DOMRect): void => {
   if ($pos.depth === 0) return;
   const nodePos = $pos.before($pos.depth);
   const blockIdx = $pos.index(0);
+  const node = ed.state.doc.nodeAt(nodePos);
+  if (!node) return;
+  const nodeName = node.type.name;
+  const isTask = isTaskNode(nodeName);
   const childCount = ed.state.doc.childCount;
   const canMoveUp = blockIdx > 0;
   const canMoveDown = blockIdx < childCount - 1;
 
-  const items: MenuItem[] = [
-    {
-      label: 'Turn into paragraph',
-      icon: 'segment',
-      action: () => ed.chain().focus().setNodeSelection(nodePos).setParagraph().run(),
-    },
-    {
-      label: 'Turn into H1',
-      icon: 'title',
-      action: () =>
-        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 1 }).run(),
-    },
-    {
-      label: 'Turn into H2',
-      icon: 'text_fields',
-      action: () =>
-        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 2 }).run(),
-    },
-    {
-      label: 'Turn into H3',
-      icon: 'short_text',
-      action: () =>
-        ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 3 }).run(),
-    },
-  ];
+  const items: MenuItem[] = [];
+
+  // Turn-into options are text-block only: a task chip already *is* the task
+  // form, and converting it to text would orphan the host task.
+  if (!isTask) {
+    items.push(
+      {
+        label: 'Turn into paragraph',
+        icon: 'segment',
+        action: () => ed.chain().focus().setNodeSelection(nodePos).setParagraph().run(),
+      },
+      {
+        label: 'Turn into H1',
+        icon: 'title',
+        action: () =>
+          ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 1 }).run(),
+      },
+      {
+        label: 'Turn into H2',
+        icon: 'text_fields',
+        action: () =>
+          ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 2 }).run(),
+      },
+      {
+        label: 'Turn into H3',
+        icon: 'short_text',
+        action: () =>
+          ed.chain().focus().setNodeSelection(nodePos).setHeading({ level: 3 }).run(),
+      },
+    );
+    // Promote a paragraph / heading into a task — its text becomes the title.
+    if (nodeName === 'paragraph' || nodeName === 'heading') {
+      items.push({
+        label: 'Turn into task',
+        icon: 'check_circle_outline',
+        action: () => void turnBlockIntoTask(nodePos),
+      });
+    }
+  }
 
   if (canMoveUp) {
     items.push({
@@ -1643,27 +1759,34 @@ const openBlockMenu = (anchorRect: DOMRect): void => {
     });
   }
 
-  items.push(
-    {
+  // Duplicate is text-block only: cloning a chip would place a second node
+  // with the same taskId in the doc and break every taskId-keyed invariant.
+  if (!isTask) {
+    items.push({
       label: 'Duplicate',
       icon: 'content_copy',
       action: () => {
-        const node = ed.state.doc.nodeAt(nodePos);
-        if (!node) return;
+        const n = ed.state.doc.nodeAt(nodePos);
+        if (!n) return;
         ed.chain()
           .focus()
-          .insertContentAt(nodePos + node.nodeSize, node.toJSON())
+          .insertContentAt(nodePos + n.nodeSize, n.toJSON())
           .run();
       },
-    },
-    {
-      label: 'Delete',
-      icon: 'delete',
-      action: () => {
+    });
+  }
+
+  items.push({
+    label: isTask ? 'Delete task' : 'Delete',
+    icon: 'delete',
+    action: () => {
+      if (isTask) {
+        deleteTaskChipGroup(blockIdx);
+      } else {
         ed.chain().focus().setNodeSelection(nodePos).deleteSelection().run();
-      },
+      }
     },
-  );
+  });
 
   menuActiveIndex = 0;
   menuFilter = '';
