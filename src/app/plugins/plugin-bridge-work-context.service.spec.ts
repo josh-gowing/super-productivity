@@ -81,11 +81,9 @@ describe('PluginBridgeService.workContext — header buttons + embed slot', () =
     activeCtx$: BehaviorSubject<WorkContext | null>;
   } => {
     const activeCtx$ = new BehaviorSubject<WorkContext | null>(initialCtx);
-    const workContextServiceSpy = jasmine.createSpyObj(
-      'WorkContextService',
-      ['activeWorkContext$'],
-      { activeWorkContext$: activeCtx$.asObservable() },
-    );
+    const workContextServiceSpy = jasmine.createSpyObj('WorkContextService', [], {
+      activeWorkContext$: activeCtx$.asObservable(),
+    });
 
     const cfgSignal = signal({ ...DEFAULT_GLOBAL_CONFIG });
     const globalConfigSpy = {
