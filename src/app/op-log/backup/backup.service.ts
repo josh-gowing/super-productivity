@@ -228,9 +228,6 @@ export class BackupService {
       OpLog.normal('BackupService: Replacing op-log + state cache atomically');
       await this._opLogStore.runDestructiveStateReplacement({
         syncImportOp: op,
-        newVectorClock: newClock,
-        newState: importedData,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
         snapshotEntityKeys: extractEntityKeysFromState(importedData),
         archiveYoung: importedData.archiveYoung,
         archiveOld: importedData.archiveOld,

@@ -215,10 +215,6 @@ describe('BackupService', () => {
       const appendedPayload = args.syncImportOp.payload as any;
       expect(appendedPayload.globalConfig.misc.startOfNextDay).toBe(4);
       expect(appendedPayload.globalConfig.misc.startOfNextDayTime).toBe('04:00');
-
-      const savedState = args.newState as any;
-      expect(savedState.globalConfig.misc.startOfNextDay).toBe(4);
-      expect(savedState.globalConfig.misc.startOfNextDayTime).toBe('04:00');
     });
 
     it('should pass archiveYoung to the atomic replacement when present in backup', async () => {
@@ -312,7 +308,7 @@ describe('BackupService', () => {
 
       const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
         .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
-      expect(args.newVectorClock).toEqual({ newClientId: 1 });
+      expect(args.syncImportOp.vectorClock).toEqual({ newClientId: 1 });
     });
 
     it('should pass a fresh clock to the atomic helper on force-import', async () => {
@@ -326,7 +322,7 @@ describe('BackupService', () => {
 
       const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
         .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
-      expect(args.newVectorClock).toEqual({ newForceClient: 1 });
+      expect(args.syncImportOp.vectorClock).toEqual({ newForceClient: 1 });
     });
 
     /**

@@ -133,9 +133,6 @@ export class CleanSlateService {
           OpLog.normal('[CleanSlate] Replacing op-log + state cache atomically');
           await this.opLogStore.runDestructiveStateReplacement({
             syncImportOp,
-            newVectorClock,
-            newState: currentState,
-            schemaVersion: CURRENT_SCHEMA_VERSION,
             snapshotEntityKeys: extractEntityKeysFromState(currentState),
           });
 

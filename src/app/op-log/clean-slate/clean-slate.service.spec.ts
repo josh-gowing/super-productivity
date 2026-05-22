@@ -99,10 +99,6 @@ describe('CleanSlateService', () => {
       expect(appendedOp.clientId).toBe('eNewC');
       expect(appendedOp.vectorClock).toEqual({ eNewC: 1 });
       expect(appendedOp.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
-
-      expect(args.newVectorClock).toEqual({ eNewC: 1 });
-      expect(args.newState).toBe(mockState);
-      expect(args.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     });
 
     it('should flush pending writes and hold the op-log lock during replacement', async () => {
@@ -204,7 +200,6 @@ describe('CleanSlateService', () => {
       const args = mockOpLogStore.runDestructiveStateReplacement.calls.mostRecent()
         .args[0] as Parameters<typeof mockOpLogStore.runDestructiveStateReplacement>[0];
       expect(args.syncImportOp.vectorClock).toEqual({ eNewC: 1 });
-      expect(args.newVectorClock).toEqual({ eNewC: 1 });
     });
 
     it('should create operation with valid UUIDv7', async () => {

@@ -199,56 +199,6 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       this._initPromise = undefined;
     });
     this._db = db;
-    void this._verifyStateCacheConsistencyOnBoot();
-  }
-
-  /**
-   * One-shot forensic check on first DB open: verify that
-   * `state_cache.lastAppliedOpSeq` references an op that actually exists in
-   * OPS. The atomic `runDestructiveStateReplacement` guarantees this
-   * invariant for any code path that writes via the helper — this check
-   * surfaces violations from older partial-state recoveries (pre-#7709
-   * data still on disk after upgrade) or from any future code path that
-   * bypasses the helper.
-   *
-   * Counts-only payload. Never blocks initialization — observability only.
-   */
-  private async _verifyStateCacheConsistencyOnBoot(): Promise<void> {
-    try {
-      const stateCache = await this.db.get(STORE_NAMES.STATE_CACHE, SINGLETON_KEY);
-      if (!stateCache || typeof stateCache.lastAppliedOpSeq !== 'number') {
-        return;
-      }
-      if (stateCache.lastAppliedOpSeq <= 0) {
-        return;
-      }
-      const referencedOp = await this.db.get(
-        STORE_NAMES.OPS,
-        stateCache.lastAppliedOpSeq,
-      );
-      if (referencedOp) {
-        return;
-      }
-      const opsCount = await this.db.count(STORE_NAMES.OPS);
-      const vcClock = await this.db.get(STORE_NAMES.VECTOR_CLOCK, SINGLETON_KEY);
-      Log.critical(
-        '[OpLogStore] state_cache.lastAppliedOpSeq references missing op — possible partial destructive write',
-        {
-          referencedSeq: stateCache.lastAppliedOpSeq,
-          opsCount,
-          stateCacheVectorClockSize: stateCache.vectorClock
-            ? Object.keys(stateCache.vectorClock).length
-            : 0,
-          vectorClockStoreSize: vcClock?.clock ? Object.keys(vcClock.clock).length : 0,
-          schemaVersion: stateCache.schemaVersion ?? null,
-        },
-      );
-    } catch (e) {
-      // Observability only — must not block init. Log and move on.
-      Log.warn('[OpLogStore] Boot-time state_cache consistency check failed to run', {
-        name: (e as Error | undefined)?.name,
-      });
-    }
   }
 
   /**
@@ -1625,38 +1575,34 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
    * including the no-prior-clientId edge case, where the rotated id is
    * intentionally left in `pf` on failure (see ClientIdService.withRotation).
    *
-   * Payload duplication trade-off: `syncImportOp.payload` (full state) is
-   * written to OPS, and the structurally identical `newState` is written to
-   * STATE_CACHE in the same tx. Both writes are required: OPS holds the
-   * payload the uploader sends in the snapshot endpoint; STATE_CACHE is what
-   * `isWhollyFreshClient` reads on next launch. Eliminating the duplication
-   * would require either lazy hydration of the OPS payload from STATE_CACHE
-   * at upload time (unsafe if compaction advances STATE_CACHE past this seq)
-   * or a dedicated payload-staging store; both add complexity disproportionate
-   * to the cost of one extra structured-clone on an infrequent operation.
+   * The new baseline is taken entirely from `syncImportOp`: its `payload` is
+   * written to OPS (the snapshot the uploader sends) and re-used as the
+   * STATE_CACHE state (what `isWhollyFreshClient` reads next launch); its
+   * `vectorClock` and `schemaVersion` populate both stores. A single source
+   * object makes it impossible for OPS and STATE_CACHE to disagree.
    */
   async runDestructiveStateReplacement(opts: {
     syncImportOp: Operation;
-    newVectorClock: VectorClock;
-    newState: unknown;
-    schemaVersion: number;
     snapshotEntityKeys: string[];
     archiveYoung?: ArchiveStoreEntry['data'];
     archiveOld?: ArchiveStoreEntry['data'];
   }): Promise<void> {
     await this._ensureInit();
 
+    const { syncImportOp, snapshotEntityKeys, archiveYoung, archiveOld } = opts;
+    const newState = syncImportOp.payload;
+    const newVectorClock = syncImportOp.vectorClock;
     const compactedAt = Date.now();
-    const compactOp = encodeOperation(opts.syncImportOp);
+    const compactOp = encodeOperation(syncImportOp);
     const storeNames: OpLogStoreName[] = [
       STORE_NAMES.OPS,
       STORE_NAMES.STATE_CACHE,
       STORE_NAMES.VECTOR_CLOCK,
     ];
-    if (opts.archiveYoung !== undefined) {
+    if (archiveYoung != null) {
       storeNames.push(STORE_NAMES.ARCHIVE_YOUNG);
     }
-    if (opts.archiveOld !== undefined) {
+    if (archiveOld != null) {
       storeNames.push(STORE_NAMES.ARCHIVE_OLD);
     }
     const tx = this.db.transaction(storeNames, 'readwrite');
@@ -1677,33 +1623,30 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       };
       const seq = (await opsStore.add(entry as StoredOperationLogEntry)) as number;
 
-      await vcStore.put(
-        { clock: opts.newVectorClock, lastUpdate: Date.now() },
-        SINGLETON_KEY,
-      );
+      await vcStore.put({ clock: newVectorClock, lastUpdate: Date.now() }, SINGLETON_KEY);
 
       await stateCacheStore.put({
         id: SINGLETON_KEY,
-        state: opts.newState,
+        state: newState,
         lastAppliedOpSeq: seq,
-        vectorClock: opts.newVectorClock,
+        vectorClock: newVectorClock,
         compactedAt,
-        schemaVersion: opts.schemaVersion,
-        snapshotEntityKeys: opts.snapshotEntityKeys,
+        schemaVersion: syncImportOp.schemaVersion,
+        snapshotEntityKeys,
       });
 
-      if (opts.archiveYoung !== undefined) {
+      if (archiveYoung != null) {
         await tx.objectStore(STORE_NAMES.ARCHIVE_YOUNG).put({
           id: SINGLETON_KEY,
-          data: opts.archiveYoung,
+          data: archiveYoung,
           lastModified: compactedAt,
         });
       }
 
-      if (opts.archiveOld !== undefined) {
+      if (archiveOld != null) {
         await tx.objectStore(STORE_NAMES.ARCHIVE_OLD).put({
           id: SINGLETON_KEY,
-          data: opts.archiveOld,
+          data: archiveOld,
           lastModified: compactedAt,
         });
       }
@@ -1713,7 +1656,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       this._appliedOpIdsCache = null;
       this._cacheLastSeq = 0;
       this._invalidateUnsyncedCache();
-      this._vectorClockCache = opts.newVectorClock;
+      this._vectorClockCache = newVectorClock;
     } catch (e) {
       // idb auto-aborts the tx on any rejected request, but a spy that
       // throws synchronously instead of rejecting the IDB request (used by
