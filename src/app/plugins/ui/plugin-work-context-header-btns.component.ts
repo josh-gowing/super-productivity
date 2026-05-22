@@ -11,6 +11,8 @@ import { PluginWorkContextHeaderBtnCfg } from '../plugin-api.model';
     @for (button of buttons(); track button.pluginId + button.label) {
       <button
         mat-icon-button
+        [class.isActive]="button.pluginId === activeEmbedPluginId()"
+        [attr.aria-pressed]="button.pluginId === activeEmbedPluginId()"
         [matTooltip]="button.label"
         (click)="onClick(button)"
       >
@@ -23,6 +25,20 @@ import { PluginWorkContextHeaderBtnCfg } from '../plugin-api.model';
       :host {
         display: contents;
       }
+
+      /* Toggled state: the button's plugin currently owns the work-view
+         embed (e.g. Document Mode is on for this context). A neutral ink
+         fill — stronger than the standard selected overlay so it reads as
+         a deliberate toggle rather than a hover, and distinct from the
+         accent colour reserved for time tracking. */
+      button.isActive {
+        background: rgba(var(--ink-on-channel), 0.18);
+        transition: background var(--transition-standard);
+      }
+
+      button.isActive:hover:not(:disabled) {
+        background: rgba(var(--ink-on-channel), 0.26);
+      }
     `,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -32,6 +48,13 @@ export class PluginWorkContextHeaderBtnsComponent {
   private readonly _pluginBridge = inject(PluginBridgeService);
 
   readonly buttons = this._pluginBridge.workContextHeaderButtons;
+
+  /**
+   * The plugin currently embedded in the work-view body, or null. A header
+   * button renders toggled when its plugin owns that embed — which is how
+   * Document Mode's button reflects its on/off state.
+   */
+  readonly activeEmbedPluginId = this._pluginBridge.workContextEmbedPluginId;
 
   async onClick(button: PluginWorkContextHeaderBtnCfg): Promise<void> {
     const ctx = await this._pluginBridge.getActiveWorkContext();
