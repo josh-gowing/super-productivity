@@ -375,6 +375,15 @@ export class GlobalThemeService {
       }
     });
 
+    effect(() => {
+      const misc = this._globalConfigService.misc();
+      if (misc?.isVerticalActionBar) {
+        this.document.body.classList.add(BodyClass.isVerticalActionBar);
+      } else {
+        this.document.body.classList.remove(BodyClass.isVerticalActionBar);
+      }
+    });
+
     // Add/remove hasBgImage class to body when background image changes
     effect(() => {
       if (this.backgroundImg()) {
