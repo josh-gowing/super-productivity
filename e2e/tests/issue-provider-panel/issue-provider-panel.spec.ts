@@ -5,11 +5,6 @@ const PANEL_BTN = '.e2e-toggle-issue-provider-panel';
 
 test.describe('Issue Provider Panel', () => {
   test('should open all dialogs without error', async ({ page, workViewPage }) => {
-    const pageErrors: string[] = [];
-    page.on('pageerror', (error) => {
-      pageErrors.push(error.message);
-    });
-
     // Wait for work view to be ready
     await workViewPage.waitForTaskList();
 
@@ -25,6 +20,15 @@ test.describe('Issue Provider Panel', () => {
       .locator('issue-provider-setup-overview button')
       .first()
       .waitFor({ state: 'visible', timeout: 5000 });
+
+    // Start capturing page errors only after the panel is settled so we don't
+    // pick up unrelated startup noise (vite overlay, lazy-chunk warnings, etc.)
+    // that the surrounding suite tolerates.
+    const pageErrors: string[] = [];
+    const onPageError = (error: Error): void => {
+      pageErrors.push(error.message);
+    };
+    page.on('pageerror', onPageError);
 
     // Get all buttons in the issue provider setup overview
     const setupButtons = page.locator('issue-provider-setup-overview button');
@@ -60,6 +64,7 @@ test.describe('Issue Provider Panel', () => {
     }
 
     expect(openedDialogCount).toBe(buttonCount);
+    page.off('pageerror', onPageError);
     await expectNoGlobalError(page);
     expect(pageErrors).toEqual([]);
   });

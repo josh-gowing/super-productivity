@@ -71,9 +71,13 @@ const getTaskStateByTitle = async (
       : null;
   }, taskTitle);
 
+// Mirrors BasePage.addTask but skips the "wait for the task in the today list"
+// step that would time out for tasks scheduled for a future day. Caller is
+// expected to pre-bake the testPrefix into `rawTaskInput` since BasePage's
+// internal prefix logic is not reused here.
 const addTaskWithoutWaitingForTodayList = async (
   page: Page,
-  taskTitle: string,
+  rawTaskInput: string,
 ): Promise<void> => {
   const inputEl = page.locator('add-task-bar.global input');
   const isInputVisible = await inputEl
@@ -88,7 +92,7 @@ const addTaskWithoutWaitingForTodayList = async (
   await input.waitFor({ state: 'visible', timeout: 10000 });
   await input.click();
   await input.clear();
-  await input.fill(taskTitle);
+  await input.fill(rawTaskInput);
   await page.locator('.e2e-add-task-submit').click();
 };
 
@@ -221,7 +225,9 @@ test.describe('Scheduled Task Operations', () => {
   }) => {
     await workViewPage.waitForTaskList();
 
-    // Create task with @tomorrow short syntax
+    // Create task with @tomorrow short syntax. workViewPage.addTask cannot be
+    // used because it waits for the new task in the today list and tomorrow's
+    // task does not show up there.
     const taskTitle = `${testPrefix}-Tomorrow Task`;
     await addTaskWithoutWaitingForTodayList(page, `${taskTitle} @tomorrow`);
 

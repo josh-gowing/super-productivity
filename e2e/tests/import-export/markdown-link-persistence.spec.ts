@@ -71,17 +71,16 @@ const waitForLocalOpsToPersist = async (page: Page, minCount: number): Promise<v
     .poll(
       () =>
         page.evaluate(async (expectedMinCount) => {
-          type CompactOperation = {
-            e?: string;
-            o?: string;
-          };
-          type Operation = {
-            entityType?: string;
-            opType?: string;
-          };
+          // Ops are persisted in either compact ({e, o}) or full ({entityType, opType})
+          // form depending on writer version — accept both.
           type StoredOperation = {
             source?: string;
-            op?: CompactOperation | Operation;
+            op?: {
+              e?: string;
+              o?: string;
+              entityType?: string;
+              opType?: string;
+            };
           };
 
           const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -97,9 +96,8 @@ const waitForLocalOpsToPersist = async (page: Page, minCount: number): Promise<v
               const request = store.getAll();
               request.onsuccess = (): void => {
                 const ops = (request.result as StoredOperation[]).filter((entry) => {
-                  const op = entry.op;
-                  const entityType = op && ('e' in op ? op.e : op.entityType);
-                  const opType = op && ('o' in op ? op.o : op.opType);
+                  const entityType = entry.op?.e ?? entry.op?.entityType;
+                  const opType = entry.op?.o ?? entry.op?.opType;
                   return (
                     entry.source === 'local' &&
                     ((entityType === 'GLOBAL_CONFIG' && opType === 'UPD') ||
@@ -188,7 +186,7 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
       '[Website](https://example.com/)',
     );
     expect(persistedTaskState).not.toBeNull();
-    expect(persistedTaskState.title).toContain('[Website](https://example.com/)');
+    expect(persistedTaskState!.title).toContain('[Website](https://example.com/)');
 
     await page.reload();
     await page.waitForLoadState('networkidle');
@@ -204,7 +202,7 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
       '[Website](https://example.com/)',
     );
     expect(persistedTaskStateAfterReload).not.toBeNull();
-    expect(persistedTaskStateAfterReload.title).toContain(
+    expect(persistedTaskStateAfterReload!.title).toContain(
       '[Website](https://example.com/)',
     );
   });
@@ -288,9 +286,9 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
 
     const extractedTaskState = await getExtractedWebsiteTaskState(page);
     expect(extractedTaskState).not.toBeNull();
-    expect(extractedTaskState.title).toContain('Website');
-    expect(extractedTaskState.title).not.toContain('https://example.com/');
-    expect(extractedTaskState.title).not.toContain('[Website]');
+    expect(extractedTaskState!.title).toContain('Website');
+    expect(extractedTaskState!.title).not.toContain('https://example.com/');
+    expect(extractedTaskState!.title).not.toContain('[Website]');
 
     // Reload and verify the app still works
     await page.reload();
@@ -305,9 +303,9 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
 
     const extractedTaskStateAfterReload = await getExtractedWebsiteTaskState(page);
     expect(extractedTaskStateAfterReload).not.toBeNull();
-    expect(extractedTaskStateAfterReload.title).toContain('Website');
-    expect(extractedTaskStateAfterReload.title).not.toContain('https://example.com/');
-    expect(extractedTaskStateAfterReload.title).not.toContain('[Website]');
+    expect(extractedTaskStateAfterReload!.title).toContain('Website');
+    expect(extractedTaskStateAfterReload!.title).not.toContain('https://example.com/');
+    expect(extractedTaskStateAfterReload!.title).not.toContain('[Website]');
   });
 
   test('malformed title from extract mode should survive reload', async ({
@@ -330,7 +328,7 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
 
     const persistedTaskState = await getTaskStateByTitle(page, malformedTitle);
     expect(persistedTaskState).not.toBeNull();
-    expect(persistedTaskState.title).toContain(malformedTitle);
+    expect(persistedTaskState!.title).toContain(malformedTitle);
 
     await page.reload();
     await page.waitForLoadState('networkidle');
@@ -342,6 +340,6 @@ test.describe('@markdown-link Markdown link persistence (issue #7032)', () => {
 
     const persistedTaskStateAfterReload = await getTaskStateByTitle(page, malformedTitle);
     expect(persistedTaskStateAfterReload).not.toBeNull();
-    expect(persistedTaskStateAfterReload.title).toContain(malformedTitle);
+    expect(persistedTaskStateAfterReload!.title).toContain(malformedTitle);
   });
 });
