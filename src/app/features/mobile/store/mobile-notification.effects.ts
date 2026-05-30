@@ -37,6 +37,16 @@ const DELAY_SCHEDULE = 5000;
 // this window. See #7850.
 const REPEAT_LOOKAHEAD_DAYS = 14;
 
+// Upper bound on how many recurring reminders we pre-schedule in one pass.
+// iOS caps pending local notifications at 64 GLOBALLY (across every reminder
+// effect), silently dropping the rest, and it keeps the soonest-firing ones.
+// We pre-schedule at most one occurrence per config, so this only bites a user
+// with an unusually large number of timed recurring tasks — but when it does we
+// want to deterministically keep the most imminent ones (matching iOS's own
+// keep-soonest behaviour) and leave headroom for the live/due-date effects,
+// rather than letting the OS choose for us. Truncation is logged, never silent.
+const REPEAT_MAX_SCHEDULED = 32;
+
 // Settle window for the recurring-reminder scheduler. Instance creation
 // dispatches addTask → updateTaskRepeatCfg → scheduleTaskWithTime back-to-back,
 // which the store surfaces as several intermediate emissions. Debouncing
@@ -561,6 +571,18 @@ export class MobileNotificationEffects {
           title: cfg.title || '',
         });
       }
+    }
+
+    // Keep the soonest-firing occurrences when over the cap (see
+    // REPEAT_MAX_SCHEDULED). The day loop already yields roughly ascending
+    // order, but sort explicitly so the cap is deterministic.
+    result.sort((a, b) => a.triggerAtMs - b.triggerAtMs);
+    if (result.length > REPEAT_MAX_SCHEDULED) {
+      Log.log('MobileEffects: capping pre-scheduled repeat reminders', {
+        total: result.length,
+        cap: REPEAT_MAX_SCHEDULED,
+      });
+      return result.slice(0, REPEAT_MAX_SCHEDULED);
     }
 
     return result;

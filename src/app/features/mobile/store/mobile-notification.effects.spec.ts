@@ -745,5 +745,32 @@ describe('MobileNotificationEffects', () => {
         generateNotificationId(tomorrowId),
       );
     }));
+
+    it('caps pre-scheduled reminders, keeping the soonest-firing (iOS 64-pending limit)', fakeAsync(() => {
+      // More configs than the cap (REPEAT_MAX_SCHEDULED = 32 in the effect),
+      // each due tomorrow at a distinct clock time 30 min apart (00:00 → 19:30).
+      const cfgs = Array.from({ length: 40 }, (_, i) => {
+        const h = String(Math.floor(i / 2)).padStart(2, '0');
+        const m = i % 2 === 0 ? '00' : '30';
+        return mkDailyCfg({ id: `cfg${i}`, startTime: `${h}:${m}` });
+      });
+      store.overrideSelector(selectActiveTaskRepeatCfgs, cfgs);
+      subscribeRepeatReminders();
+
+      tick(REPEAT_SETTLE_MS + 1);
+
+      // Bounded to the cap, not the full 40.
+      expect(reminderServiceSpy.scheduleReminder).toHaveBeenCalledTimes(32);
+      // Soonest kept, last-within-cap kept, first-over-cap dropped.
+      expect(reminderServiceSpy.scheduleReminder).toHaveBeenCalledWith(
+        jasmine.objectContaining({ triggerAtMs: triggerFor(1, '00:00') }),
+      );
+      expect(reminderServiceSpy.scheduleReminder).toHaveBeenCalledWith(
+        jasmine.objectContaining({ triggerAtMs: triggerFor(1, '15:30') }),
+      );
+      expect(reminderServiceSpy.scheduleReminder).not.toHaveBeenCalledWith(
+        jasmine.objectContaining({ triggerAtMs: triggerFor(1, '16:00') }),
+      );
+    }));
   });
 });
