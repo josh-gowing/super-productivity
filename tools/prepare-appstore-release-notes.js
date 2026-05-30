@@ -1,0 +1,81 @@
+#!/usr/bin/env node
+// Derive a plain-text "What's New" file for App Store Connect from the
+// generated GitHub release notes (build/release-notes.md).
+//
+// App Store Connect release notes are plain text (no markdown), so this strips
+// headings, emphasis and links and drops the GitHub-only downloads footer. The
+// result is written for the App Store deliver lanes (fastlane/Fastfile).
+//
+// Usage: node tools/prepare-appstore-release-notes.js [outFile] [locale]
+//   outFile  defaults to fastlane/appstore_metadata/<locale>/release_notes.txt
+//   locale   defaults to en-US
+
+const fs = require('fs');
+const path = require('path');
+
+const ROOT_DIR = path.join(__dirname, '..');
+const SOURCE_FILE = path.join(ROOT_DIR, 'build', 'release-notes.md');
+// App Store Connect caps "What's New" at 4000 characters.
+const MAX_CHARS = 4000;
+
+const locale = process.argv[3] || 'en-US';
+const outFile =
+  process.argv[2] ||
+  path.join(ROOT_DIR, 'fastlane', 'appstore_metadata', locale, 'release_notes.txt');
+
+// GitHub-only footer lines that don't belong in an App Store "What's New".
+const FOOTER_PATTERNS = [
+  /check the wiki/i,
+  /current downloads/i,
+  /download (links|options)/i,
+  /releases\/latest/i,
+  /^\s*for the latest version/i,
+  /^\s*visit:?\s*$/i,
+  /^\s*https?:\/\/\S+\s*$/i,
+];
+
+const toPlainText = (markdown) =>
+  markdown
+    .split('\n')
+    .filter((line) => !FOOTER_PATTERNS.some((re) => re.test(line)))
+    .map((line) =>
+      line
+        // headings: "## Features" -> "Features"
+        .replace(/^#{1,6}\s*/, '')
+        // bold/italic markers
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/(^|\s)[*_](\S.*?\S)[*_]/g, '$1$2')
+        // links: "[text](url)" -> "text"
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        // list bullets: "- item" / "* item" -> "• item"
+        .replace(/^\s*[-*]\s+/, '• '),
+    )
+    .join('\n')
+    // collapse 3+ blank lines down to a single blank line
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+// Always ensure the deliver metadata dir exists so the App Store lanes never
+// fail on a missing metadata_path; an empty dir simply leaves "What's New"
+// untouched in App Store Connect.
+fs.mkdirSync(path.dirname(outFile), { recursive: true });
+
+if (!fs.existsSync(SOURCE_FILE)) {
+  console.error(`No release notes source found at ${SOURCE_FILE}; skipping.`);
+  process.exit(0);
+}
+
+let text = toPlainText(fs.readFileSync(SOURCE_FILE, 'utf8'));
+
+if (!text) {
+  console.error('Release notes are empty after processing; skipping.');
+  process.exit(0);
+}
+
+if (text.length > MAX_CHARS) {
+  text = `${text.slice(0, MAX_CHARS - 1).trimEnd()}…`;
+}
+
+fs.mkdirSync(path.dirname(outFile), { recursive: true });
+fs.writeFileSync(outFile, `${text}\n`, 'utf8');
+console.log(`Wrote App Store release notes (${text.length} chars) to ${outFile}`);
