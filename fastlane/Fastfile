@@ -64,9 +64,6 @@ def deliver_options(extra)
     # skip_metadata; see the header comment.)
     metadata_path: ENV.fetch('METADATA_PATH', 'fastlane/appstore_metadata'),
     skip_screenshots: true,
-    # Wait for App Store Connect to finish processing the upload before the
-    # version can be submitted.
-    wait_for_uploaded_build: true,
     submit_for_review: submit_for_review?,
     automatic_release: true,
     # Precheck inspects listing metadata we don't manage from here.
