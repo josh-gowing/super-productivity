@@ -33,6 +33,30 @@ export interface DbKeyRange {
 
 export type DbTxMode = 'readonly' | 'readwrite';
 
+/** Iteration direction over a store's primary key or an index. */
+export type DbCursorDirection = 'next' | 'prev';
+
+/**
+ * Per-entry decision returned from a {@link OpLogDbAdapter.iterate} visitor.
+ * - `continue` — keep iterating;
+ * - `stop` — end iteration (the common "find latest / first match" case);
+ * - `delete` — delete the current entry and keep iterating (the cursor-delete
+ *   pattern the op-log store uses to prune full-state ops);
+ * - `delete-stop` — delete the current entry and end iteration.
+ *
+ * These four cases cover every cursor use in the IndexedDB store and each maps
+ * onto a SQLite `SELECT … ORDER BY … (LIMIT)` (+ `DELETE`) without a live
+ * cursor handle.
+ */
+export type DbCursorAction = 'continue' | 'stop' | 'delete' | 'delete-stop';
+
+export interface DbIterateOptions {
+  /** Iterate over this index instead of the primary key. */
+  index?: string;
+  /** Default `next` (ascending). `prev` walks descending — e.g. latest first. */
+  direction?: DbCursorDirection;
+}
+
 /**
  * Operations available inside a {@link OpLogDbAdapter.transaction} callback.
  *
@@ -55,6 +79,16 @@ export interface OpLogTx {
     key: DbKey | DbKey[],
   ): Promise<T | undefined>;
   getAllFromIndex<T>(store: string, index: string, range?: DbKeyRange): Promise<T[]>;
+  /**
+   * Walk entries in key (or index) order, invoking `visit` per entry. See
+   * {@link DbCursorAction} for how to continue / stop / delete. Used for
+   * latest-entry lookups and predicate-driven pruning.
+   */
+  iterate<T>(
+    store: string,
+    options: DbIterateOptions,
+    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+  ): Promise<void>;
 }
 
 /**
@@ -71,6 +105,12 @@ export interface OpLogDbAdapter {
    */
   init(): Promise<void>;
 
+  /**
+   * Close the underlying connection and drop the cached handle. A subsequent
+   * operation re-opens transparently. Mainly a teardown hook.
+   */
+  close(): void;
+
   add(store: string, value: unknown): Promise<number>;
   put(store: string, value: unknown, key?: DbKey): Promise<void>;
   get<T>(store: string, key: DbKey): Promise<T | undefined>;
@@ -85,6 +125,13 @@ export interface OpLogDbAdapter {
   ): Promise<T | undefined>;
   getAllFromIndex<T>(store: string, index: string, range?: DbKeyRange): Promise<T[]>;
   countFromIndex(store: string, index: string, range?: DbKeyRange): Promise<number>;
+
+  /** See {@link OpLogTx.iterate}. */
+  iterate<T>(
+    store: string,
+    options: DbIterateOptions,
+    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+  ): Promise<void>;
 
   /**
    * Run `fn` as a single atomic transaction over `stores`. The transaction
