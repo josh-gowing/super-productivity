@@ -14,8 +14,8 @@
 
 import { IDBPDatabase, openDB } from 'idb';
 import {
-  DbCursorAction,
   DbCursorDirection,
+  DbCursorVisitor,
   DbIterateOptions,
   DbKey,
   DbKeyRange,
@@ -49,19 +49,21 @@ const ADAPTER_NOT_INITIALIZED =
  */
 interface IdbCursorLike {
   readonly value: unknown;
+  readonly primaryKey: IDBValidKey;
   delete(): Promise<void>;
   continue(): Promise<IdbCursorLike | null>;
 }
 
 interface IdbCursorSourceLike {
   openCursor(
-    query?: IDBKeyRange | null,
+    query?: IDBKeyRange | IDBValidKey | null,
     direction?: DbCursorDirection,
   ): Promise<IdbCursorLike | null>;
 }
 
 interface IdbIndexLike extends IdbCursorSourceLike {
   get(key: IDBValidKey): Promise<unknown>;
+  getKey(key: IDBValidKey): Promise<IDBValidKey | undefined>;
   getAll(query?: IDBKeyRange): Promise<unknown[]>;
 }
 
@@ -69,7 +71,8 @@ interface IdbStoreLike extends IdbCursorSourceLike {
   add(value: unknown, key?: IDBValidKey): Promise<IDBValidKey>;
   put(value: unknown, key?: IDBValidKey): Promise<IDBValidKey>;
   get(key: IDBValidKey): Promise<unknown>;
-  getAll(): Promise<unknown[]>;
+  getAll(query?: IDBKeyRange): Promise<unknown[]>;
+  count(query?: IDBKeyRange): Promise<number>;
   delete(key: IDBValidKey): Promise<void>;
   clear(): Promise<void>;
   index(name: string): IdbIndexLike;
@@ -87,16 +90,19 @@ const storeOf = (tx: IdbTxLike, store: string): IdbStoreLike =>
 /**
  * Walk a store (or index) with cursor semantics, honoring
  * {@link DbCursorAction}. Shared by every cursor caller in this file so the
- * stop/delete handling lives in exactly one place.
+ * stop/delete handling lives in exactly one place. The visitor is synchronous
+ * by contract, so no `await` happens between entries — the transaction stays
+ * alive across the walk (see {@link DbCursorVisitor}).
  */
 const walkCursor = async <T>(
   source: IdbCursorSourceLike,
-  direction: DbCursorDirection,
-  visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+  options: DbIterateOptions,
+  visit: DbCursorVisitor<T>,
 ): Promise<void> => {
-  let cursor = await source.openCursor(null, direction);
+  const query = options.query !== undefined ? (options.query as IDBValidKey) : null;
+  let cursor = await source.openCursor(query, options.direction ?? 'next');
   while (cursor) {
-    const action = await visit(cursor.value as T);
+    const action = visit(cursor.value as T, cursor.primaryKey as DbKey);
     if (action === 'delete' || action === 'delete-stop') {
       await cursor.delete();
     }
@@ -244,8 +250,8 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
     return (await this._database.get(store, key)) as T | undefined;
   }
 
-  async getAll<T>(store: string): Promise<T[]> {
-    return (await this._database.getAll(store)) as T[];
+  async getAll<T>(store: string, range?: DbKeyRange): Promise<T[]> {
+    return (await this._database.getAll(store, toIdbKeyRange(range))) as T[];
   }
 
   async delete(store: string, key: DbKey): Promise<void> {
@@ -256,6 +262,10 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
     await this._database.clear(store);
   }
 
+  async count(store: string, range?: DbKeyRange): Promise<number> {
+    return this._database.count(store, toIdbKeyRange(range));
+  }
+
   async getFromIndex<T>(
     store: string,
     index: string,
@@ -263,6 +273,16 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
   ): Promise<T | undefined> {
     return (await this._database.getFromIndex(store, index, key as IDBValidKey)) as
       | T
+      | undefined;
+  }
+
+  async getKeyFromIndex(
+    store: string,
+    index: string,
+    key: DbKey | DbKey[],
+  ): Promise<DbKey | undefined> {
+    return (await this._database.getKeyFromIndex(store, index, key as IDBValidKey)) as
+      | DbKey
       | undefined;
   }
 
@@ -289,7 +309,7 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
   async iterate<T>(
     store: string,
     options: DbIterateOptions,
-    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+    visit: DbCursorVisitor<T>,
   ): Promise<void> {
     // A cursor that may delete needs a readwrite transaction.
     const tx = this._database.transaction(store, 'readwrite');
@@ -297,7 +317,7 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
     const source: IdbCursorSourceLike = options.index
       ? objectStore.index(options.index)
       : objectStore;
-    await walkCursor(source, options.direction ?? 'next', visit);
+    await walkCursor(source, options, visit);
     await tx.done;
   }
 
@@ -346,8 +366,8 @@ class IdbOpLogTx implements OpLogTx {
     return (await storeOf(this._tx, store).get(key as IDBValidKey)) as T | undefined;
   }
 
-  async getAll<T>(store: string): Promise<T[]> {
-    return (await storeOf(this._tx, store).getAll()) as T[];
+  async getAll<T>(store: string, range?: DbKeyRange): Promise<T[]> {
+    return (await storeOf(this._tx, store).getAll(toIdbKeyRange(range))) as T[];
   }
 
   async delete(store: string, key: DbKey): Promise<void> {
@@ -368,6 +388,16 @@ class IdbOpLogTx implements OpLogTx {
       .get(key as IDBValidKey)) as T | undefined;
   }
 
+  async getKeyFromIndex(
+    store: string,
+    index: string,
+    key: DbKey | DbKey[],
+  ): Promise<DbKey | undefined> {
+    return (await storeOf(this._tx, store)
+      .index(index)
+      .getKey(key as IDBValidKey)) as DbKey | undefined;
+  }
+
   async getAllFromIndex<T>(
     store: string,
     index: string,
@@ -381,12 +411,12 @@ class IdbOpLogTx implements OpLogTx {
   async iterate<T>(
     store: string,
     options: DbIterateOptions,
-    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+    visit: DbCursorVisitor<T>,
   ): Promise<void> {
     const objectStore = storeOf(this._tx, store);
     const source: IdbCursorSourceLike = options.index
       ? objectStore.index(options.index)
       : objectStore;
-    await walkCursor(source, options.direction ?? 'next', visit);
+    await walkCursor(source, options, visit);
   }
 }

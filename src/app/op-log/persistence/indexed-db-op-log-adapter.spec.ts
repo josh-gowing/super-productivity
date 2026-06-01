@@ -2,7 +2,6 @@ import 'fake-indexeddb/auto';
 import { IndexedDbOpLogAdapter } from './indexed-db-op-log-adapter';
 import { OP_LOG_DB_SCHEMA } from './op-log-db-schema';
 import { STORE_NAMES, OPS_INDEXES, SINGLETON_KEY } from './db-keys.const';
-import { DbCursorAction } from './op-log-db-adapter';
 
 /**
  * Verifies IndexedDbOpLogAdapter against a real (faked) IndexedDB: CRUD,
@@ -96,21 +95,40 @@ describe('IndexedDbOpLogAdapter', () => {
     expect(s1).toBeGreaterThan(0);
   });
 
-  it('iterate(prev) visits in descending key order and stops on demand', async () => {
-    await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
+  it('iterate(prev) visits in descending key order and exposes the primary key', async () => {
+    const s1 = await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
     await adapter.add(STORE_NAMES.OPS, makeOpEntry('b', 'local'));
-    await adapter.add(STORE_NAMES.OPS, makeOpEntry('c', 'local'));
+    const s3 = await adapter.add(STORE_NAMES.OPS, makeOpEntry('c', 'local'));
 
+    const visited: Array<{ id: string; key: number }> = [];
+    await adapter.iterate<{ op: { id: string } }>(
+      STORE_NAMES.OPS,
+      { direction: 'prev' },
+      (v, key) => {
+        visited.push({ id: v.op.id, key: key as number });
+        return 'continue';
+      },
+    );
+    // Full descending walk proves continue() advances in 'prev' order, and the
+    // exposed primary key matches the auto-increment seq (the getLastSeq use).
+    expect(visited.map((x) => x.id)).toEqual(['c', 'b', 'a']);
+    expect(visited[0].key).toBe(s3);
+    expect(visited[2].key).toBe(s1);
+  });
+
+  it('iterate(prev) stop returns only the latest entry', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('c', 'local'));
     const visited: string[] = [];
     await adapter.iterate<{ op: { id: string } }>(
       STORE_NAMES.OPS,
       { direction: 'prev' },
       (v) => {
         visited.push(v.op.id);
-        return 'stop' as DbCursorAction;
+        return 'stop';
       },
     );
-    expect(visited).toEqual(['c']); // latest first, stopped immediately
+    expect(visited).toEqual(['c']);
   });
 
   it("iterate with 'delete' prunes matching entries and keeps going", async () => {
@@ -121,15 +139,116 @@ describe('IndexedDbOpLogAdapter', () => {
     await adapter.iterate<{ op: { id: string }; source: string }>(
       STORE_NAMES.OPS,
       {},
-      (v) => (v.source === 'remote' ? 'delete' : 'continue') as DbCursorAction,
+      (v) => (v.source === 'remote' ? 'delete' : 'continue'),
     );
 
     const remaining = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
     expect(remaining.map((r) => r.op.id).sort()).toEqual(['keep1', 'keep2']);
   });
 
+  it("iterate 'delete-stop' deletes exactly one entry then stops", async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('first', 'remote'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('second', 'remote'));
+
+    let visitCount = 0;
+    await adapter.iterate<{ op: { id: string } }>(STORE_NAMES.OPS, {}, () => {
+      visitCount++;
+      return 'delete-stop';
+    });
+
+    expect(visitCount).toBe(1);
+    const remaining = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
+    expect(remaining.map((r) => r.op.id)).toEqual(['second']);
+  });
+
+  it('iterate over an index positioned at an exact key deletes that entry', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('alpha', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('beta', 'local'));
+
+    // Mirrors clearFullStateOpsExcept: open the byId index at a specific id.
+    const seen: string[] = [];
+    await adapter.iterate<{ op: { id: string } }>(
+      STORE_NAMES.OPS,
+      { index: OPS_INDEXES.BY_ID, query: 'beta' },
+      (v) => {
+        seen.push(v.op.id);
+        return 'delete-stop';
+      },
+    );
+
+    expect(seen).toEqual(['beta']); // query restricted the walk to the match
+    const remaining = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
+    expect(remaining.map((r) => r.op.id)).toEqual(['alpha']);
+  });
+
+  it('getKeyFromIndex returns the primary key for a unique index hit (and undefined on miss)', async () => {
+    const seq = await adapter.add(STORE_NAMES.OPS, makeOpEntry('probe', 'local'));
+    const key = await adapter.getKeyFromIndex(
+      STORE_NAMES.OPS,
+      OPS_INDEXES.BY_ID,
+      'probe',
+    );
+    expect(key).toBe(seq);
+    const miss = await adapter.getKeyFromIndex(
+      STORE_NAMES.OPS,
+      OPS_INDEXES.BY_ID,
+      'nope',
+    );
+    expect(miss).toBeUndefined();
+  });
+
+  it('getAll with a primary-key range filters by seq (getOpsAfterSeq pattern)', async () => {
+    const s1 = await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('b', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('c', 'local'));
+
+    const after = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS, {
+      lower: s1,
+      lowerOpen: true,
+    });
+    expect(after.map((r) => r.op.id)).toEqual(['b', 'c']);
+  });
+
+  it('count reflects a primary-key range', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
+    const s2 = await adapter.add(STORE_NAMES.OPS, makeOpEntry('b', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('c', 'local'));
+    expect(await adapter.count(STORE_NAMES.OPS)).toBe(3);
+    expect(await adapter.count(STORE_NAMES.OPS, { lower: s2 })).toBe(2);
+  });
+
+  it('getAllFromIndex matches a compound-index exact key (bySourceAndStatus)', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('p1', 'remote', 'pending'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('a1', 'remote', 'applied'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('p2', 'remote', 'pending'));
+
+    // Exact compound-key match expressed as a degenerate [k, k] range.
+    const pending = await adapter.getAllFromIndex<{ op: { id: string } }>(
+      STORE_NAMES.OPS,
+      OPS_INDEXES.BY_SOURCE_AND_STATUS,
+      { lower: ['remote', 'pending'], upper: ['remote', 'pending'] },
+    );
+    expect(pending.map((r) => r.op.id).sort()).toEqual(['p1', 'p2']);
+  });
+
+  it('delete() and clear() remove entries', async () => {
+    const seq = await adapter.add(STORE_NAMES.OPS, makeOpEntry('x', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('y', 'local'));
+    await adapter.delete(STORE_NAMES.OPS, seq);
+    expect((await adapter.getAll(STORE_NAMES.OPS)).length).toBe(1);
+    await adapter.clear(STORE_NAMES.OPS);
+    expect((await adapter.getAll(STORE_NAMES.OPS)).length).toBe(0);
+  });
+
+  it('get() / getFromIndex() return undefined for a miss', async () => {
+    expect(await adapter.get(STORE_NAMES.OPS, 999)).toBeUndefined();
+    expect(
+      await adapter.getFromIndex(STORE_NAMES.OPS, OPS_INDEXES.BY_ID, 'absent'),
+    ).toBeUndefined();
+  });
+
   describe('transaction()', () => {
-    it('commits a multi-store write atomically', async () => {
+    it('commits a multi-store write atomically with the exact values written', async () => {
       await adapter.transaction(
         [STORE_NAMES.OPS, STORE_NAMES.VECTOR_CLOCK],
         'readwrite',
@@ -143,14 +262,20 @@ describe('IndexedDbOpLogAdapter', () => {
         },
       );
 
-      const op = await adapter.getFromIndex(STORE_NAMES.OPS, OPS_INDEXES.BY_ID, 'tx');
-      const vc = await adapter.get(STORE_NAMES.VECTOR_CLOCK, SINGLETON_KEY);
-      expect(op).toBeTruthy();
-      expect(vc).toBeTruthy();
+      const op = await adapter.getFromIndex<{ op: { id: string } }>(
+        STORE_NAMES.OPS,
+        OPS_INDEXES.BY_ID,
+        'tx',
+      );
+      const vc = await adapter.get<{ clock: Record<string, number> }>(
+        STORE_NAMES.VECTOR_CLOCK,
+        SINGLETON_KEY,
+      );
+      expect(op?.op.id).toBe('tx');
+      expect(vc?.clock['c']).toBe(1);
     });
 
-    it('rolls back ALL writes when the body throws (no partial commit)', async () => {
-      // Seed one row so we can prove the clear() inside the tx is undone too.
+    it('rolls back an add + put when the body throws (no partial commit)', async () => {
       await adapter.put(
         STORE_NAMES.VECTOR_CLOCK,
         { clock: { seed: 9 }, lastUpdate: 0 },
@@ -173,19 +298,111 @@ describe('IndexedDbOpLogAdapter', () => {
         ),
       ).toBeRejectedWithError('boom');
 
-      // OPS write rolled back...
       const op = await adapter.getFromIndex(
         STORE_NAMES.OPS,
         OPS_INDEXES.BY_ID,
         'shouldVanish',
       );
       expect(op).toBeUndefined();
-      // ...and the vector clock still holds the seeded value, not the aborted one.
       const vc = await adapter.get<{ clock: Record<string, number> }>(
         STORE_NAMES.VECTOR_CLOCK,
         SINGLETON_KEY,
       );
       expect(vc?.clock['seed']).toBe(9);
+    });
+
+    it('rolls back a destructive clear() + delete() on throw (runDestructiveStateReplacement shape)', async () => {
+      // Seed data that the aborted transaction will try to wipe.
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('survivor1', 'local'));
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('survivor2', 'local'));
+      await adapter.put(
+        STORE_NAMES.VECTOR_CLOCK,
+        { clock: { keep: 7 }, lastUpdate: 0 },
+        SINGLETON_KEY,
+      );
+
+      await expectAsync(
+        adapter.transaction(
+          [STORE_NAMES.OPS, STORE_NAMES.VECTOR_CLOCK],
+          'readwrite',
+          async (tx) => {
+            await tx.clear(STORE_NAMES.OPS); // destructive: wipe the log
+            await tx.delete(STORE_NAMES.VECTOR_CLOCK, SINGLETON_KEY);
+            await tx.add(STORE_NAMES.OPS, makeOpEntry('newBaseline', 'local'));
+            throw new Error('interrupted');
+          },
+        ),
+      ).toBeRejectedWithError('interrupted');
+
+      // Everything must be exactly as seeded — clear AND delete rolled back.
+      const ops = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
+      expect(ops.map((o) => o.op.id).sort()).toEqual(['survivor1', 'survivor2']);
+      const vc = await adapter.get<{ clock: Record<string, number> }>(
+        STORE_NAMES.VECTOR_CLOCK,
+        SINGLETON_KEY,
+      );
+      expect(vc?.clock['keep']).toBe(7);
+    });
+
+    it('aborts the whole transaction when an inner op rejects (duplicate add)', async () => {
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('dup', 'local'));
+
+      await expectAsync(
+        adapter.transaction([STORE_NAMES.OPS], 'readwrite', async (tx) => {
+          await tx.add(STORE_NAMES.OPS, makeOpEntry('fresh', 'local'));
+          // Unique byId violation rejects and aborts the tx.
+          await tx.add(STORE_NAMES.OPS, makeOpEntry('dup', 'local'));
+        }),
+      ).toBeRejected();
+
+      // 'fresh' must have been rolled back with the failed duplicate.
+      const fresh = await adapter.getFromIndex(
+        STORE_NAMES.OPS,
+        OPS_INDEXES.BY_ID,
+        'fresh',
+      );
+      expect(fresh).toBeUndefined();
+    });
+
+    it('exposes transactional reads, index reads and cursor iteration', async () => {
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('r1', 'remote', 'pending'));
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('r2', 'remote', 'pending'));
+
+      const collected = await adapter.transaction(
+        [STORE_NAMES.OPS],
+        'readwrite',
+        async (tx) => {
+          const byIndex = await tx.getFromIndex<{ op: { id: string } }>(
+            STORE_NAMES.OPS,
+            OPS_INDEXES.BY_ID,
+            'r1',
+          );
+          const all = await tx.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
+          const ids: string[] = [];
+          await tx.iterate<{ op: { id: string } }>(STORE_NAMES.OPS, {}, (v) => {
+            ids.push(v.op.id);
+            return 'continue';
+          });
+          return { byIndexId: byIndex?.op.id, allCount: all.length, ids };
+        },
+      );
+
+      expect(collected.byIndexId).toBe('r1');
+      expect(collected.allCount).toBe(2);
+      expect(collected.ids.sort()).toEqual(['r1', 'r2']);
+    });
+
+    it('supports readonly transactions for reads', async () => {
+      await adapter.add(STORE_NAMES.OPS, makeOpEntry('ro', 'local'));
+      const id = await adapter.transaction([STORE_NAMES.OPS], 'readonly', async (tx) => {
+        const entry = await tx.getFromIndex<{ op: { id: string } }>(
+          STORE_NAMES.OPS,
+          OPS_INDEXES.BY_ID,
+          'ro',
+        );
+        return entry?.op.id;
+      });
+      expect(id).toBe('ro');
     });
   });
 
@@ -196,5 +413,56 @@ describe('IndexedDbOpLogAdapter', () => {
     const seq = await fresh.add(STORE_NAMES.OPS, makeOpEntry('concurrent', 'local'));
     expect(seq).toBeGreaterThan(0);
     fresh.close();
+  });
+
+  it('throws ADAPTER_NOT_INITIALIZED after close(), then init() re-opens', async () => {
+    adapter.close();
+    // No auto-reopen on a bare op — the documented behavioral cliff.
+    await expectAsync(adapter.get(STORE_NAMES.OPS, 1)).toBeRejectedWithError(
+      /not initialized/i,
+    );
+    await adapter.init();
+    const seq = await adapter.add(STORE_NAMES.OPS, makeOpEntry('reopened', 'local'));
+    expect(seq).toBeGreaterThan(0);
+  });
+
+  describe('open retry (via _openDbOnce seam)', () => {
+    // Access the private seam without `any`, mirroring the existing store spec.
+    type Seam = { _openDbOnce: () => Promise<unknown> };
+    const seamOf = (a: IndexedDbOpLogAdapter): Seam => a as unknown as Seam;
+
+    // These exercise real exponential-backoff delays, so they get a generous
+    // timeout (the non-lock budget sleeps ~1+2+4s before giving up).
+    it('retries a transient lock-related open failure, then succeeds', async () => {
+      const a = new IndexedDbOpLogAdapter();
+      const real = seamOf(a)._openDbOnce.bind(a);
+      let calls = 0;
+      spyOn(seamOf(a), '_openDbOnce').and.callFake(() => {
+        calls++;
+        if (calls === 1) {
+          // InvalidStateError is classified lock-related -> full retry budget.
+          return Promise.reject(
+            new DOMException('backing store locked', 'InvalidStateError'),
+          );
+        }
+        return real();
+      });
+
+      await a.init();
+      expect(calls).toBe(2);
+      const seq = await a.add(STORE_NAMES.OPS, makeOpEntry('afterRetry', 'local'));
+      expect(seq).toBeGreaterThan(0);
+      a.close();
+    }, 10000);
+
+    it('wraps an exhausted non-lock failure in IndexedDBOpenError', async () => {
+      const a = new IndexedDbOpLogAdapter();
+      spyOn(seamOf(a), '_openDbOnce').and.callFake(() =>
+        // A non-lock error fails fast but still exhausts its (shorter) budget.
+        Promise.reject(new DOMException('boom', 'UnknownError')),
+      );
+
+      await expectAsync(a.init()).toBeRejectedWithError(/IndexedDB/i);
+    }, 15000);
   });
 });

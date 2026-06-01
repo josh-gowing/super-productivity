@@ -50,11 +50,31 @@ export type DbCursorDirection = 'next' | 'prev';
  */
 export type DbCursorAction = 'continue' | 'stop' | 'delete' | 'delete-stop';
 
+/**
+ * Visitor invoked once per entry during {@link OpLogDbAdapter.iterate}.
+ *
+ * MUST be synchronous. IndexedDB keeps a transaction alive only while a request
+ * is pending in the current microtask turn; awaiting real I/O inside a cursor
+ * walk lets the transaction auto-commit and the next `cursor.continue()` throw
+ * `TransactionInactiveError`. A synchronous visitor is also the only shape a
+ * buffered SQLite implementation can honor without materializing the whole
+ * result set. Both `value` and `key` (primary key, or index key when iterating
+ * an index) are provided so callers like `getLastSeq` need not dig the key out
+ * of the value.
+ */
+export type DbCursorVisitor<T> = (value: T, key: DbKey) => DbCursorAction;
+
 export interface DbIterateOptions {
   /** Iterate over this index instead of the primary key. */
   index?: string;
   /** Default `next` (ascending). `prev` walks descending — e.g. latest first. */
   direction?: DbCursorDirection;
+  /**
+   * Restrict the walk to entries matching this exact key (or, for a compound
+   * index, this key tuple). Mirrors `openCursor(key)` — used to position an
+   * index cursor at a specific value for keyed deletes.
+   */
+  query?: DbKey | DbKey[];
 }
 
 /**
@@ -70,7 +90,8 @@ export interface OpLogTx {
   /** Insert/replace a value, optionally at an explicit key (for keyless stores). */
   put(store: string, value: unknown, key?: DbKey): Promise<void>;
   get<T>(store: string, key: DbKey): Promise<T | undefined>;
-  getAll<T>(store: string): Promise<T[]>;
+  /** Get all values, optionally restricted to a primary-key range. */
+  getAll<T>(store: string, range?: DbKeyRange): Promise<T[]>;
   delete(store: string, key: DbKey): Promise<void>;
   clear(store: string): Promise<void>;
   getFromIndex<T>(
@@ -78,16 +99,22 @@ export interface OpLogTx {
     index: string,
     key: DbKey | DbKey[],
   ): Promise<T | undefined>;
+  /** Return the primary key of the first index entry matching `key`, or undefined. */
+  getKeyFromIndex(
+    store: string,
+    index: string,
+    key: DbKey | DbKey[],
+  ): Promise<DbKey | undefined>;
   getAllFromIndex<T>(store: string, index: string, range?: DbKeyRange): Promise<T[]>;
   /**
    * Walk entries in key (or index) order, invoking `visit` per entry. See
-   * {@link DbCursorAction} for how to continue / stop / delete. Used for
-   * latest-entry lookups and predicate-driven pruning.
+   * {@link DbCursorAction} for how to continue / stop / delete and
+   * {@link DbCursorVisitor} for why it must be synchronous.
    */
   iterate<T>(
     store: string,
     options: DbIterateOptions,
-    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+    visit: DbCursorVisitor<T>,
   ): Promise<void>;
 }
 
@@ -114,15 +141,24 @@ export interface OpLogDbAdapter {
   add(store: string, value: unknown): Promise<number>;
   put(store: string, value: unknown, key?: DbKey): Promise<void>;
   get<T>(store: string, key: DbKey): Promise<T | undefined>;
-  getAll<T>(store: string): Promise<T[]>;
+  /** Get all values, optionally restricted to a primary-key range. */
+  getAll<T>(store: string, range?: DbKeyRange): Promise<T[]>;
   delete(store: string, key: DbKey): Promise<void>;
   clear(store: string): Promise<void>;
+  /** Count entries in a store, optionally restricted to a primary-key range. */
+  count(store: string, range?: DbKeyRange): Promise<number>;
 
   getFromIndex<T>(
     store: string,
     index: string,
     key: DbKey | DbKey[],
   ): Promise<T | undefined>;
+  /** Return the primary key of the first index entry matching `key`, or undefined. */
+  getKeyFromIndex(
+    store: string,
+    index: string,
+    key: DbKey | DbKey[],
+  ): Promise<DbKey | undefined>;
   getAllFromIndex<T>(store: string, index: string, range?: DbKeyRange): Promise<T[]>;
   countFromIndex(store: string, index: string, range?: DbKeyRange): Promise<number>;
 
@@ -130,7 +166,7 @@ export interface OpLogDbAdapter {
   iterate<T>(
     store: string,
     options: DbIterateOptions,
-    visit: (value: T) => DbCursorAction | Promise<DbCursorAction>,
+    visit: DbCursorVisitor<T>,
   ): Promise<void>;
 
   /**
