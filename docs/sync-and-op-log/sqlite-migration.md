@@ -1,8 +1,23 @@
 # SQLite Migration Plan — Op-Log Persistence
 
-> Status: **proposal / Phase A in progress**. Tracks the data-loss class behind
-> issue #7892 (Android WebView storage evicted → total data loss with no sync
+> Status: **Phase A in progress**. Tracks the data-loss class behind issue
+> #7892 (Android WebView storage evicted → total data loss with no sync
 > configured).
+>
+> **Progress:**
+>
+> - ✅ `OpLogDbAdapter` / `OpLogTx` port + declarative schema descriptor.
+> - ✅ `IndexedDbOpLogAdapter` (faithful `idb` backend) + 26 specs.
+> - ✅ `adoptConnection()` seam: the adapter shares the store's single
+>   connection, so the store migrates method-by-method with one connection and
+>   no spec breakage.
+> - ✅ Migrated method groups: import-backup; state_cache + migration-safety
+>   backup + compaction counter (incl. the two atomic read-modify-write
+>   methods via `transaction()`).
+> - ⏳ Remaining: the ops-table methods (append\*, getUnsynced, cursors,
+>   `appendWithVectorClockUpdate`, `runDestructiveStateReplacement`),
+>   client_id, profile_data, vector_clock, and `ArchiveStoreService`.
+> - Gate after each group: 170 store unit + 367 op-log integration specs green.
 
 ## 0. Goal & non-goal
 
