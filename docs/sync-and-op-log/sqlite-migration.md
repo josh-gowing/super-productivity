@@ -1,13 +1,13 @@
 # SQLite Migration Plan — Op-Log Persistence
 
-> Status: **Phase A in progress**. Tracks the data-loss class behind issue
-> #7892 (Android WebView storage evicted → total data loss with no sync
-> configured).
+> Status: **Phase A complete; Phase B in progress.** Tracks the data-loss
+> class behind issue #7892 (Android WebView storage evicted → total data loss
+> with no sync configured).
 >
 > **Progress:**
 >
 > - ✅ `OpLogDbAdapter` / `OpLogTx` port + declarative schema descriptor.
-> - ✅ `IndexedDbOpLogAdapter` (faithful `idb` backend) + 26 specs.
+> - ✅ `IndexedDbOpLogAdapter` (faithful `idb` backend) + 30 specs.
 > - ✅ `adoptConnection()` seam: the adapter shares the owning service's single
 >   connection, so each service migrates method-by-method with one connection
 >   and no spec breakage.
@@ -17,10 +17,29 @@
 >   `this.db` calls remain.
 > - ✅ **`ArchiveStoreService` fully migrated** (own adopted connection +
 >   `_withRetryOnClose` re-adopt path).
-> - ⏳ Remaining for Phase B: bind the adapter via DI (so the store/archive take
->   an injected `OpLogDbAdapter` rather than constructing their own), then add
->   `SqliteOpLogAdapter`. The other small IDB consumers (theme, credential,
->   oauth, client-id) are out of the data-loss scope (Phase D).
+> - ✅ **Phase B step 1 — DI:** both services inject `OP_LOG_DB_ADAPTER_FACTORY`
+>   (a factory token; each service gets its own adapter). `adoptConnection` is
+>   now an optional, IDB-only bridge method on the interface.
+> - ✅ **Phase B step 2 (skeleton) — `SqliteOpLogAdapter`:** dependency-free
+>   schema→table planning + DDL (`planTables`/`buildDdl`), `init()` applies it
+>   to a minimal `SqliteDb` port; query methods throw a loud not-implemented
+>   error. 12 specs cover the mapping. The native plugin is intentionally NOT a
+>   dependency yet — see "Open decisions" below.
+> - ⏳ Remaining for Phase B: implement the `SqliteOpLogAdapter` query/tx
+>   methods, add `@capacitor-community/sqlite` + a `SqliteDb` wrapper, and
+>   override `OP_LOG_DB_ADAPTER_FACTORY` to return it when native. The other
+>   small IDB consumers (theme, credential, oauth, client-id) are out of the
+>   data-loss scope (Phase D).
+>
+> **Open decisions (need on-device validation):**
+>
+> - Adding `@capacitor-community/sqlite` is a native dependency that can't be
+>   validated in CI (its web build is WASM-on-IndexedDB, not the native path).
+>   Defer until it can be tested on a real device.
+> - Consider shipping the cheap #7892 safeguards independently and sooner:
+>   diagnostic logging of `navigator.storage.persist()` result on native, and a
+>   periodic Capacitor Filesystem auto-backup (a second copy outside the
+>   evictable WebView store).
 > - Gate after each group: 170 store unit + 3 archive unit + 367 op-log
 >   integration specs green.
 
