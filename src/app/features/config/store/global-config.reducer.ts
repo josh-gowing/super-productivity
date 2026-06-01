@@ -220,6 +220,13 @@ export const globalConfigReducer = createReducer<GlobalConfigState>(
       tasks: {
         ...DEFAULT_GLOBAL_CONFIG.tasks,
         ...appDataComplete.globalConfig.tasks,
+        // Legacy configs stored `null`/`''` (the old "None" default) which no longer
+        // has a matching dropdown option; coerce to the Inbox default so the select
+        // shows a value. Behavior is unchanged — an unset default already routed new
+        // tasks to the Inbox (#7891).
+        defaultProjectId:
+          appDataComplete.globalConfig.tasks?.defaultProjectId ||
+          DEFAULT_GLOBAL_CONFIG.tasks.defaultProjectId,
       },
       shortSyntax: {
         ...DEFAULT_GLOBAL_CONFIG.shortSyntax,
