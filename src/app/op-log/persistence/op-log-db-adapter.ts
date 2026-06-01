@@ -75,6 +75,16 @@ export interface DbIterateOptions {
    * index cursor at a specific value for keyed deletes.
    */
   query?: DbKey | DbKey[];
+  /**
+   * Transaction mode for the (non-transactional) {@link OpLogDbAdapter.iterate}.
+   * Defaults to `'readwrite'` so a visitor may return `delete`/`delete-stop`.
+   * Pass `'readonly'` for pure read scans (latest-entry lookups, applied-id
+   * scans) so they don't take a write lock — read-only IDB transactions run
+   * concurrently, and the SQLite backend avoids `BEGIN IMMEDIATE` for reads.
+   * A `delete` action under a `'readonly'` scan rejects. Ignored by
+   * {@link OpLogTx.iterate}, where the enclosing transaction's mode governs.
+   */
+  mode?: DbTxMode;
 }
 
 /**

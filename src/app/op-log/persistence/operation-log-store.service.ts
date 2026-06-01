@@ -631,7 +631,8 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
     await this._adapter.iterate<StoredOperationLogEntry>(
       STORE_NAMES.OPS,
-      { direction: 'prev' },
+      // Pure read: readonly avoids a write lock on the hot ops store.
+      { direction: 'prev', mode: 'readonly' },
       (value) => {
         const entry = decodeStoredEntry(value);
         const isFullStateOp = isFullStateOpType(entry.op.opType);
@@ -673,7 +674,8 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
     await this._adapter.iterate<StoredOperationLogEntry>(
       STORE_NAMES.OPS,
-      { direction: 'prev' },
+      // Pure read: readonly avoids a write lock on the hot ops store.
+      { direction: 'prev', mode: 'readonly' },
       (value) => {
         const entry = decodeStoredEntry(value);
         const isFullStateOp = isFullStateOpType(entry.op.opType);
@@ -1016,7 +1018,9 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
     let lastSeq = 0;
     await this._adapter.iterate<StoredOperationLogEntry>(
       STORE_NAMES.OPS,
-      { direction: 'prev' },
+      // Pure read on the hottest path (getUnsynced/getAppliedOpIds); readonly
+      // so it doesn't take an exclusive write lock that serializes appends.
+      { direction: 'prev', mode: 'readonly' },
       (_value, key) => {
         lastSeq = key as number;
         return 'stop';
@@ -1043,7 +1047,8 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
     let foundRealSyncedOp = false;
     await this._adapter.iterate<StoredOperationLogEntry>(
       STORE_NAMES.OPS,
-      { index: OPS_INDEXES.BY_SYNCED_AT },
+      // Pure read: readonly avoids a write lock on the hot ops store.
+      { index: OPS_INDEXES.BY_SYNCED_AT, mode: 'readonly' },
       (value) => {
         const op = value.op;
         // Handle both compact format ('e') and full format ('entityType')

@@ -328,8 +328,9 @@ export class IndexedDbOpLogAdapter implements OpLogDbAdapter {
     options: DbIterateOptions,
     visit: DbCursorVisitor<T>,
   ): Promise<void> {
-    // A cursor that may delete needs a readwrite transaction.
-    const tx = this._database.transaction(store, 'readwrite');
+    // Default 'readwrite' so a delete-walk works; callers pass mode:'readonly'
+    // for pure reads to avoid a write lock (see DbIterateOptions.mode).
+    const tx = this._database.transaction(store, options.mode ?? 'readwrite');
     const objectStore = storeOf(tx, store);
     const source: IdbCursorSourceLike = options.index
       ? objectStore.index(options.index)

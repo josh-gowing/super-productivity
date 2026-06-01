@@ -12,7 +12,7 @@
  * `db-keys.const.ts` (names) and `db-upgrade.ts` (until that is retired).
  */
 
-import { STORE_NAMES, OPS_INDEXES } from './db-keys.const';
+import { STORE_NAMES, OPS_INDEXES, DB_NAME, DB_VERSION } from './db-keys.const';
 
 export interface DbIndexSchema {
   name: string;
@@ -40,7 +40,12 @@ export interface OpLogDbSchema {
 }
 
 /**
- * Current `SUP_OPS` schema, mirroring db-upgrade.ts v6.
+ * Current `SUP_OPS` schema, mirroring db-upgrade.ts (currently v6).
+ *
+ * `name`/`version` are reused from `db-keys.const.ts` (not re-literaled) so the
+ * adapter opens at exactly the version `runDbUpgrade` migrates to — a future
+ * `DB_VERSION` bump can't silently desync this descriptor. The store/index shape
+ * below is guarded against drift from `runDbUpgrade` by `op-log-db-schema.spec.ts`.
  *
  * NOTE: the IndexedDB adapter must still apply this via versioned upgrade steps
  * for existing users (it cannot simply create the final shape). The declarative
@@ -48,8 +53,8 @@ export interface OpLogDbSchema {
  * to live next to the adapter until Phase A fully replaces `runDbUpgrade`.
  */
 export const OP_LOG_DB_SCHEMA: OpLogDbSchema = {
-  name: 'SUP_OPS',
-  version: 6,
+  name: DB_NAME,
+  version: DB_VERSION,
   stores: [
     {
       name: STORE_NAMES.OPS,

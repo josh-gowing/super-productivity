@@ -1,7 +1,16 @@
 import 'fake-indexeddb/auto';
+import { fakeAsync, tick } from '@angular/core/testing';
+import { IDBPDatabase, openDB } from 'idb';
 import { IndexedDbOpLogAdapter } from './indexed-db-op-log-adapter';
 import { OP_LOG_DB_SCHEMA } from './op-log-db-schema';
 import { STORE_NAMES, OPS_INDEXES, SINGLETON_KEY } from './db-keys.const';
+import { runDbUpgrade } from './db-upgrade';
+import {
+  IDB_OPEN_RETRIES,
+  IDB_OPEN_RETRIES_NON_LOCK,
+  IDB_OPEN_RETRY_BASE_DELAY_MS,
+} from '../core/operation-log.const';
+import { IndexedDBOpenError } from '../core/errors/indexed-db-open.error';
 
 /**
  * Verifies IndexedDbOpLogAdapter against a real (faked) IndexedDB: CRUD,
@@ -179,6 +188,30 @@ describe('IndexedDbOpLogAdapter', () => {
     expect(seen).toEqual(['beta']); // query restricted the walk to the match
     const remaining = await adapter.getAll<{ op: { id: string } }>(STORE_NAMES.OPS);
     expect(remaining.map((r) => r.op.id)).toEqual(['alpha']);
+  });
+
+  it('iterate(mode:readonly) performs a pure read scan', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('a', 'local'));
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('b', 'local'));
+    const ids: string[] = [];
+    await adapter.iterate<{ op: { id: string } }>(
+      STORE_NAMES.OPS,
+      { mode: 'readonly' },
+      (v) => {
+        ids.push(v.op.id);
+        return 'continue';
+      },
+    );
+    expect(ids.sort()).toEqual(['a', 'b']);
+  });
+
+  it('rejects a delete action under a readonly scan', async () => {
+    await adapter.add(STORE_NAMES.OPS, makeOpEntry('x', 'local'));
+    // A readonly tx must not permit cursor.delete() — surfaces ReadOnlyError
+    // rather than silently mutating, so a misuse fails loudly.
+    await expectAsync(
+      adapter.iterate(STORE_NAMES.OPS, { mode: 'readonly' }, () => 'delete'),
+    ).toBeRejected();
   });
 
   it('getKeyFromIndex returns the primary key for a unique index hit (and undefined on miss)', async () => {
@@ -417,7 +450,9 @@ describe('IndexedDbOpLogAdapter', () => {
 
   it('throws ADAPTER_NOT_INITIALIZED after close(), then init() re-opens', async () => {
     adapter.close();
-    // No auto-reopen on a bare op — the documented behavioral cliff.
+    // No auto-reopen on a bare op — the documented behavioral cliff. (Production
+    // auto-recovery is the store's job via its own _ensureInit, covered in the
+    // store spec; here we only assert the adapter's cliff + explicit re-open.)
     await expectAsync(adapter.get(STORE_NAMES.OPS, 1)).toBeRejectedWithError(
       /not initialized/i,
     );
@@ -426,43 +461,106 @@ describe('IndexedDbOpLogAdapter', () => {
     expect(seq).toBeGreaterThan(0);
   });
 
+  describe('adoptConnection (shared-connection seam)', () => {
+    it('routes ops onto an externally-owned connection without calling init()', async () => {
+      // Mirror the store: it owns the IDBPDatabase and hands it to the adapter.
+      const owner = await openDB(OP_LOG_DB_SCHEMA.name, OP_LOG_DB_SCHEMA.version, {
+        upgrade: (d, oldVersion, _newVersion, tx) => runDbUpgrade(d, oldVersion, tx),
+      });
+      const adopting = new IndexedDbOpLogAdapter();
+      adopting.adoptConnection(owner as unknown as IDBPDatabase);
+
+      const seq = await adopting.add(STORE_NAMES.OPS, makeOpEntry('adopted', 'local'));
+      expect(seq).toBeGreaterThan(0);
+      // Same physical connection — the owner observes the adapter's write.
+      const got = (await owner.get(STORE_NAMES.OPS, seq)) as { op: { id: string } };
+      expect(got.op.id).toBe('adopted');
+
+      // adoptConnection(undefined) is the store's close/versionchange path: it
+      // must return the adapter to the not-initialized cliff, not leave a stale
+      // handle that would operate on a dead connection.
+      adopting.adoptConnection(undefined);
+      await expectAsync(adopting.get(STORE_NAMES.OPS, seq)).toBeRejectedWithError(
+        /not initialized/i,
+      );
+      owner.close();
+    });
+  });
+
   describe('open retry (via _openDbOnce seam)', () => {
     // Access the private seam without `any`, mirroring the existing store spec.
+    // fakeAsync + tick drive the exponential-backoff sleeps virtually (no real
+    // 1+2+4s waits), so we can also assert the exact attempt budget.
     type Seam = { _openDbOnce: () => Promise<unknown> };
     const seamOf = (a: IndexedDbOpLogAdapter): Seam => a as unknown as Seam;
+    const fakeDb = (): IDBPDatabase =>
+      ({ addEventListener: () => {} }) as unknown as IDBPDatabase;
 
-    // These exercise real exponential-backoff delays, so they get a generous
-    // timeout (the non-lock budget sleeps ~1+2+4s before giving up).
-    it('retries a transient lock-related open failure, then succeeds', async () => {
+    it('retries a lock-related open failure, then succeeds', fakeAsync(() => {
       const a = new IndexedDbOpLogAdapter();
-      const real = seamOf(a)._openDbOnce.bind(a);
-      let calls = 0;
-      spyOn(seamOf(a), '_openDbOnce').and.callFake(() => {
-        calls++;
-        if (calls === 1) {
-          // InvalidStateError is classified lock-related -> full retry budget.
-          return Promise.reject(
-            new DOMException('backing store locked', 'InvalidStateError'),
-          );
-        }
-        return real();
+      const db = fakeDb();
+      const openSpy = spyOn(seamOf(a), '_openDbOnce').and.returnValues(
+        // InvalidStateError is classified lock-related -> full retry budget.
+        Promise.reject(new DOMException('backing store locked', 'InvalidStateError')),
+        Promise.resolve(db),
+      );
+
+      let resolved = false;
+      a.init().then(() => {
+        resolved = true;
       });
 
-      await a.init();
-      expect(calls).toBe(2);
-      const seq = await a.add(STORE_NAMES.OPS, makeOpEntry('afterRetry', 'local'));
-      expect(seq).toBeGreaterThan(0);
-      a.close();
-    }, 10000);
+      // Backoff before attempt 2 is BASE * 2^0 = 1s.
+      tick(IDB_OPEN_RETRY_BASE_DELAY_MS);
+      tick();
 
-    it('wraps an exhausted non-lock failure in IndexedDBOpenError', async () => {
+      expect(openSpy).toHaveBeenCalledTimes(2);
+      expect(resolved).toBe(true);
+      expect((a as unknown as { _db?: IDBPDatabase })._db).toBe(db);
+    }));
+
+    it('makes 1 + IDB_OPEN_RETRIES_NON_LOCK attempts on a non-lock error, then wraps in IndexedDBOpenError', fakeAsync(() => {
       const a = new IndexedDbOpLogAdapter();
-      spyOn(seamOf(a), '_openDbOnce').and.callFake(() =>
-        // A non-lock error fails fast but still exhausts its (shorter) budget.
+      const openSpy = spyOn(seamOf(a), '_openDbOnce').and.returnValue(
+        // A non-lock error fails fast: it shrinks the budget after attempt 1.
         Promise.reject(new DOMException('boom', 'UnknownError')),
       );
 
-      await expectAsync(a.init()).toBeRejectedWithError(/IndexedDB/i);
-    }, 15000);
+      let caught: unknown;
+      a.init().catch((e) => {
+        caught = e;
+      });
+
+      // Drain each backoff window (1s, 2s, 4s) for the non-lock budget.
+      for (let i = 1; i <= IDB_OPEN_RETRIES_NON_LOCK; i++) {
+        tick(IDB_OPEN_RETRY_BASE_DELAY_MS * Math.pow(2, i - 1));
+      }
+      tick();
+
+      expect(openSpy).toHaveBeenCalledTimes(1 + IDB_OPEN_RETRIES_NON_LOCK);
+      expect(caught).toBeInstanceOf(IndexedDBOpenError);
+    }));
+
+    it('uses the full lock budget (1 + IDB_OPEN_RETRIES) before giving up', fakeAsync(() => {
+      const a = new IndexedDbOpLogAdapter();
+      const lockErr = new DOMException('Internal error.', 'InvalidStateError');
+      const openSpy = spyOn(seamOf(a), '_openDbOnce').and.returnValue(
+        Promise.reject(lockErr),
+      );
+
+      let caught: unknown;
+      a.init().catch((e) => {
+        caught = e;
+      });
+
+      for (let i = 1; i <= IDB_OPEN_RETRIES; i++) {
+        tick(IDB_OPEN_RETRY_BASE_DELAY_MS * Math.pow(2, i - 1));
+      }
+      tick();
+
+      expect(openSpy).toHaveBeenCalledTimes(1 + IDB_OPEN_RETRIES);
+      expect(openSpy.calls.count()).toBeGreaterThan(1 + IDB_OPEN_RETRIES_NON_LOCK);
+      expect(caught).toBeInstanceOf(IndexedDBOpenError);
+    }));
   });
 });
