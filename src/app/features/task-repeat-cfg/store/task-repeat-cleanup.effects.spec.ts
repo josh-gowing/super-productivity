@@ -13,6 +13,7 @@ import { getDbDateStr } from '../../../util/get-db-date-str';
 import { selectAllTaskRepeatCfgs } from './task-repeat-cfg.selectors';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
 import { DateService } from '../../../core/date/date.service';
+import { TODAY_TAG } from '../../tag/tag.const';
 
 describe('TaskRepeatCleanupEffects', () => {
   let effects: TaskRepeatCleanupEffects;
@@ -274,6 +275,56 @@ describe('TaskRepeatCleanupEffects', () => {
       expect(getDispatchedDeleteIds())
         .withContext('the empty stale overdue instance is removed, today survives')
         .toEqual(['so-yesterday']);
+
+      sub.unsubscribe();
+    }));
+
+    it('deletes an unedited overdue instance of a TODAY-tagged cfg (the virtual tag is not an edit)', fakeAsync(() => {
+      // Generated instances strip the virtual TODAY tag, so an unedited instance
+      // of a TODAY-tagged cfg has fewer tags than the cfg — that must NOT be
+      // treated as a user edit, otherwise the stale duplicate is never reaped.
+      repeatCfgs$.next([
+        {
+          ...skipOverdueCfg('cfg-today-tag'),
+          tagIds: ['tag-a', TODAY_TAG.id],
+        },
+      ]);
+      const yesterdayInstance: Task = {
+        ...DEFAULT_TASK,
+        projectId: 'p1',
+        id: 'today-tag-yesterday',
+        title: 'Water plants',
+        repeatCfgId: 'cfg-today-tag',
+        created: yesterdayMs,
+        dueDay: getDbDateStr(yesterdayMs),
+        isDone: false,
+        timeSpent: 0,
+        tagIds: ['tag-a'],
+      };
+      const todayInstance: Task = {
+        ...DEFAULT_TASK,
+        projectId: 'p1',
+        id: 'today-tag-today',
+        title: 'Water plants',
+        repeatCfgId: 'cfg-today-tag',
+        created: todayMs,
+        dueDay: getDbDateStr(todayMs),
+        isDone: false,
+        timeSpent: 0,
+        tagIds: ['tag-a'],
+      };
+
+      repeatableTasks$.next([
+        wrapWithSubTasks(yesterdayInstance),
+        wrapWithSubTasks(todayInstance),
+      ]);
+
+      const sub = effects.cleanupDuplicateRepeatInstances$.subscribe();
+      tick(3001);
+
+      expect(getDispatchedDeleteIds())
+        .withContext('TODAY-tag-only difference is not a user edit')
+        .toEqual(['today-tag-yesterday']);
 
       sub.unsubscribe();
     }));

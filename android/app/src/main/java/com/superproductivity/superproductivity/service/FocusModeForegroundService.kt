@@ -165,7 +165,7 @@ class FocusModeForegroundService : Service() {
         // newly started services satisfy that contract.
         if (!ensureForegroundNotification()) {
             clearStartPending()
-            clearStopPendingAfterStart()
+            // stopAfterForegroundFailure() clears the pending-stop flag for us.
             reportForegroundFailure()
             stopAfterForegroundFailure(startId)
             return START_NOT_STICKY

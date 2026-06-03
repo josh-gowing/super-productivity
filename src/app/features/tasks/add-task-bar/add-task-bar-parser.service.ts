@@ -5,6 +5,7 @@ import { AddTaskBarStateService } from './add-task-bar-state.service';
 import { SHORT_SYNTAX_TIME_REG_EX, shortSyntax } from '../short-syntax';
 import { ShortSyntaxConfig } from '../../config/global-config.model';
 import { getDbDateStr } from '../../../util/get-db-date-str';
+import { formatTimeHHmm } from '../../../util/format-time-hhmm';
 import { TimeSpentOnDay, TaskReminderOptionId } from '../task.model';
 import { TaskAttachment } from '../task-attachment/task-attachment.model';
 import { millisecondsDiffToRemindOption } from '../util/remind-option-to-milliseconds';
@@ -31,9 +32,7 @@ const _extractDateAndTime = (
   hasTime: boolean,
 ): readonly [string, string | null] => {
   const dateObj = new Date(timestamp);
-  const timeStr = [dateObj.getHours(), dateObj.getMinutes()]
-    .map((v) => v.toString().padStart(2, '0'))
-    .join(':');
+  const timeStr = formatTimeHHmm(dateObj);
 
   return [getDbDateStr(dateObj), hasTime && timeStr !== '00:00' ? timeStr : null];
 };

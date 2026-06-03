@@ -46,6 +46,7 @@ import { devError } from '../../../util/dev-error';
 import { getFirstRepeatOccurrence } from './get-first-repeat-occurrence.util';
 import { getNextRepeatOccurrence } from './get-next-repeat-occurrence.util';
 import { clampPastTimedOccurrence } from './clamp-past-timed-occurrence.util';
+import { isSameSubTaskTemplateContent } from './sub-task-template.util';
 
 const SCHEDULE_AFFECTING_FIELDS: (keyof TaskRepeatCfgCopy)[] = [
   'startDate',
@@ -829,18 +830,7 @@ export class TaskRepeatCfgEffects {
     if (aArr.length !== b.length) {
       return false;
     }
-    for (let i = 0; i < aArr.length; i++) {
-      const ai = aArr[i];
-      const bi = b[i];
-      if (
-        ai.title !== bi.title ||
-        (ai.notes || '') !== (bi.notes || '') ||
-        (ai.timeEstimate || 0) !== (bi.timeEstimate || 0)
-      ) {
-        return false;
-      }
-    }
-    return true;
+    return aArr.every((ai, i) => isSameSubTaskTemplateContent(ai, b[i]));
   }
 
   /**

@@ -9,7 +9,6 @@ import { MatIcon } from '@angular/material/icon';
 import { MatDialog } from '@angular/material/dialog';
 import { TranslatePipe } from '@ngx-translate/core';
 import { combineLatest, firstValueFrom } from 'rxjs';
-import { first } from 'rxjs/operators';
 import { ONBOARDING_PRESETS, OnboardingPreset } from './onboarding-presets.const';
 import { GlobalConfigService } from '../config/global-config.service';
 import { LS } from '../../core/persistence/storage-keys.const';
@@ -19,6 +18,13 @@ import { SyncWrapperService } from '../../imex/sync/sync-wrapper.service';
 
 type DialogSyncCfgComponentType =
   typeof import('../../imex/sync/dialog-sync-cfg/dialog-sync-cfg.component').DialogSyncCfgComponent;
+
+// A brand-new install seeds only the INBOX project (see project.reducer
+// initialProjectState). With headroom for a default project, treat "<= this many
+// projects AND zero tasks" as "sync pulled down nothing", so a returning user is
+// only auto-dismissed from onboarding once their own data actually arrived. This
+// errs on the safe side: a thin restored account just stays on the preset picker.
+const MAX_DEFAULT_PROJECT_COUNT = 2;
 
 @Component({
   selector: 'onboarding-preset-selection',
@@ -83,11 +89,9 @@ export class OnboardingPresetSelectionComponent {
 
     await firstValueFrom(this._syncWrapperService.afterCurrentSyncDoneOrSyncDisabled$);
     const [projectList, taskList] = await firstValueFrom(
-      combineLatest([this._projectService.list$, this._taskService.allTasks$]).pipe(
-        first(),
-      ),
+      combineLatest([this._projectService.list$, this._taskService.allTasks$]),
     );
-    if (projectList.length <= 2 && taskList.length === 0) {
+    if (projectList.length <= MAX_DEFAULT_PROJECT_COUNT && taskList.length === 0) {
       return;
     }
 

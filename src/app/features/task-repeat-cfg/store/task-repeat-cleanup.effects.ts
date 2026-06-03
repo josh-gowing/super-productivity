@@ -17,6 +17,8 @@ import { selectAllTaskRepeatCfgs } from './task-repeat-cfg.selectors';
 import { DateService } from '../../../core/date/date.service';
 import { Log } from '../../../core/log';
 import { DeletedTaskIssueSidecarService } from '../../issue/two-way-sync/deleted-task-issue-sidecar.service';
+import { TODAY_TAG } from '../../tag/tag.const';
+import { isSameSubTaskTemplateContent } from './sub-task-template.util';
 
 const _normalizeText = (v: string | null | undefined): string => (v ?? '').trim();
 
@@ -49,14 +51,9 @@ const _hasSubtaskTemplateEdits = (
     return true;
   }
 
-  return task.subTasks.some((subTask, index) => {
-    const template = templates[index];
-    return (
-      subTask.title !== template.title ||
-      (subTask.timeEstimate ?? 0) !== (template.timeEstimate ?? 0) ||
-      _normalizeText(subTask.notes) !== _normalizeText(template.notes)
-    );
-  });
+  return task.subTasks.some(
+    (subTask, index) => !isSameSubTaskTemplateContent(subTask, templates[index]),
+  );
 };
 
 const _hasUserVisibleRepeatInstanceEdits = (
@@ -71,7 +68,13 @@ const _hasUserVisibleRepeatInstanceEdits = (
     !!task.attachments?.length ||
     _normalizeText(task.notes) !== _normalizeText(cfg.notes) ||
     (cfg.title != null && task.title !== cfg.title) ||
-    !_sameStringSet(task.tagIds, cfg.tagIds) ||
+    // Generated instances strip the virtual TODAY tag (task-repeat-cfg.service),
+    // so compare against the cfg tags with TODAY removed — otherwise every
+    // unedited instance of a TODAY-tagged cfg looks "edited" and never gets reaped.
+    !_sameStringSet(
+      task.tagIds,
+      cfg.tagIds.filter((tagId) => tagId !== TODAY_TAG.id),
+    ) ||
     (task.timeEstimate ?? 0) !== (cfg.defaultEstimate ?? 0) ||
     !!(cfg.projectId && task.projectId !== cfg.projectId) ||
     !!(task.deadlineDay || task.deadlineWithTime || task.deadlineRemindAt) ||

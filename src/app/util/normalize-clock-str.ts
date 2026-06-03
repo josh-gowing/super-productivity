@@ -14,8 +14,7 @@
 export const normalizeClockStr = (v: string): string => {
   const trimmed = v.trim();
   const parts = trimmed.split(':');
-  const hasValidSeconds =
-    parts.length === 3 && /^\d+$/.test(parts[2]) && +parts[2] >= 0 && +parts[2] <= 59;
+  const hasValidSeconds = parts.length === 3 && /^\d+$/.test(parts[2]) && +parts[2] <= 59;
 
   return hasValidSeconds ? parts.slice(0, 2).join(':') : trimmed;
 };
