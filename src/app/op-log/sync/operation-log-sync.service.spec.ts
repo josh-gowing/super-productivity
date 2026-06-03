@@ -1109,6 +1109,100 @@ describe('OperationLogSyncService', () => {
           );
         });
 
+        // #7985: a never-synced file-based client whose store + pending ops contain only
+        // onboarding example tasks must not see the spurious conflict dialog.
+        const exampleCreateEntry = (taskId: string): OperationLogEntry => ({
+          seq: 1,
+          op: {
+            id: `ex-op-${taskId}`,
+            clientId: 'client-A',
+            actionType: ActionType.TASK_SHARED_ADD,
+            opType: OpType.Create,
+            entityType: 'TASK',
+            entityId: taskId,
+            payload: {
+              actionPayload: { task: { id: taskId }, isExampleTask: true },
+              entityChanges: [],
+            },
+            vectorClock: { clientA: 1 },
+            timestamp: Date.now(),
+            schemaVersion: 1,
+          },
+          appliedAt: Date.now(),
+          source: 'local',
+        });
+
+        const fileSnapshotDownloadResult = {
+          newOps: [],
+          hasMore: false,
+          latestSeq: 0,
+          needsFullStateUpload: false,
+          success: true,
+          providerMode: 'fileSnapshotOps',
+          failedFileCount: 0,
+          snapshotState: { tasks: [{ id: 'remote-task' }] },
+          snapshotVectorClock: { clientB: 5 },
+          latestServerSeq: 1,
+        };
+
+        it('does NOT throw LocalDataConflictError when store + pending ops contain only example tasks (#7985)', async () => {
+          opLogStoreSpy.getUnsynced.and.returnValue(
+            Promise.resolve([exampleCreateEntry('ex-task-1')]),
+          );
+          // Store holds ONLY that example task (the marker lives on the op, not the entity).
+          stateSnapshotServiceSpy.getStateSnapshot.and.returnValue({
+            task: { ids: ['ex-task-1'] },
+            project: { ids: [INBOX_PROJECT.id] },
+            tag: { ids: [TODAY_TAG.id] },
+            note: { ids: [] },
+          } as any);
+
+          const syncHydrationServiceSpy = TestBed.inject(
+            SyncHydrationService,
+          ) as jasmine.SpyObj<SyncHydrationService>;
+          syncHydrationServiceSpy.hydrateFromRemoteSync.and.resolveTo();
+
+          downloadServiceSpy.downloadRemoteOps.and.returnValue(
+            Promise.resolve(fileSnapshotDownloadResult as any),
+          );
+
+          const mockProvider = {
+            isReady: () => Promise.resolve(true),
+            supportsOperationSync: true,
+            setLastServerSeq: jasmine.createSpy('setLastServerSeq').and.resolveTo(),
+          } as any;
+
+          await expectAsync(service.downloadRemoteOps(mockProvider)).toBeResolved();
+          expect(syncHydrationServiceSpy.hydrateFromRemoteSync).toHaveBeenCalled();
+        });
+
+        it('still throws LocalDataConflictError when a real task exists alongside example tasks (#7985)', async () => {
+          opLogStoreSpy.getUnsynced.and.returnValue(
+            Promise.resolve([exampleCreateEntry('ex-task-1')]),
+          );
+          // Store has the example task AND a real one — the real task must still be protected.
+          stateSnapshotServiceSpy.getStateSnapshot.and.returnValue({
+            task: { ids: ['ex-task-1', 'real-task-1'] },
+            project: { ids: [INBOX_PROJECT.id] },
+            tag: { ids: [TODAY_TAG.id] },
+            note: { ids: [] },
+          } as any);
+
+          downloadServiceSpy.downloadRemoteOps.and.returnValue(
+            Promise.resolve(fileSnapshotDownloadResult as any),
+          );
+
+          const mockProvider = {
+            isReady: () => Promise.resolve(true),
+            supportsOperationSync: true,
+            setLastServerSeq: jasmine.createSpy('setLastServerSeq').and.resolveTo(),
+          } as any;
+
+          await expectAsync(service.downloadRemoteOps(mockProvider)).toBeRejectedWith(
+            jasmine.any(LocalDataConflictError),
+          );
+        });
+
         it('should include correct context in LocalDataConflictError', async () => {
           const unsyncedEntries: OperationLogEntry[] = [
             {

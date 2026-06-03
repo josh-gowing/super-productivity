@@ -35,6 +35,7 @@ import { getDefaultMainModelData } from '../model/model-config';
 import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { SyncLocalStateService } from './sync-local-state.service';
 import { SyncImportConflictCoordinatorService } from './sync-import-conflict-coordinator.service';
+import { isExampleTaskCreateOp } from '../validation/is-example-task-op.util';
 
 /**
  * Orchestrates synchronization of the Operation Log with remote storage.
@@ -474,14 +475,24 @@ export class OperationLogSyncService {
         // SuperSync→Dropbox, only has a config-change op (not "meaningful"), but the
         // store is full of real data that would be overwritten by old Dropbox state.
         //
-        // Known limitation (#7985): hasMeaningfulStoreData() counts ANY task, including onboarding
-        // example tasks (they carry the isExampleTask marker only on their op-log ops, not
-        // in NgRx state). So a fresh file-based client (Dropbox/WebDAV) that created example
-        // tasks while sync was disabled — or before a slow first sync completed — can still
-        // hit this dialog. afterInitialSyncDoneStrict$ shrinks but does not close that window.
+        // #7985: hasMeaningfulStoreData() counts ANY task, including onboarding example
+        // tasks (they carry the isExampleTask marker only on their op-log ops, not in NgRx
+        // state). Derive the example task ids from the pending example-create ops and let
+        // the store check ignore them, so a fresh file-based client (Dropbox/WebDAV) that
+        // only has example tasks adopts remote silently instead of hitting the spurious
+        // conflict dialog #7976/#7980 removed for the SuperSync path. Scope: this fires only
+        // while the example create ops are still pending (a never-synced file client) —
+        // exactly the reachable scenario. A real (non-example) task / non-INBOX project /
+        // non-system tag / note still reads as meaningful and shows the dialog.
+        const exampleTaskIds = new Set(
+          unsyncedOps
+            .filter(isExampleTaskCreateOp)
+            .map((entry) => entry.op.entityId)
+            .filter((id): id is string => id !== undefined),
+        );
         const hasMeaningfulUserData =
           this.syncImportConflictGateService.hasMeaningfulPendingOps(unsyncedOps) ||
-          this.syncLocalStateService.hasMeaningfulStoreData();
+          this.syncLocalStateService.hasMeaningfulStoreData(exampleTaskIds);
 
         if (hasMeaningfulUserData) {
           // Client has meaningful user data - show conflict dialog

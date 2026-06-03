@@ -1,8 +1,6 @@
 import { inject, Injectable } from '@angular/core';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import {
-  ActionType,
-  extractActionPayload,
   FULL_STATE_OP_TYPES,
   Operation,
   OperationLogEntry,
@@ -10,29 +8,9 @@ import {
 } from '../core/operation.types';
 import { OperationWriteFlushService } from './operation-write-flush.service';
 import { SyncImportConflictData } from './dialog-sync-import-conflict/dialog-sync-import-conflict.component';
+import { isExampleTaskCreateOp } from '../validation/is-example-task-op.util';
 
 const USER_ENTITY_TYPES = new Set(['TASK', 'PROJECT', 'TAG', 'NOTE']);
-
-/**
- * Startup example/onboarding tasks are generated locally on first run (see
- * ExampleTasksService) and must not count as "meaningful local work" that would block
- * an incoming SYNC_IMPORT. This only ever runs against local pending ops from
- * getUnsynced() — never against incoming remote ops — so a remote-supplied
- * `isExampleTask` flag cannot be used to bypass the conflict dialog.
- */
-const isExampleTaskCreateOp = (entry: OperationLogEntry): boolean => {
-  const { op } = entry;
-  if (
-    op.actionType !== ActionType.TASK_SHARED_ADD ||
-    op.opType !== OpType.Create ||
-    op.entityType !== 'TASK'
-  ) {
-    return false;
-  }
-
-  const actionPayload = extractActionPayload(op.payload);
-  return actionPayload['isExampleTask'] === true;
-};
 
 export interface IncomingFullStateConflictGateResult {
   fullStateOp?: Operation;
