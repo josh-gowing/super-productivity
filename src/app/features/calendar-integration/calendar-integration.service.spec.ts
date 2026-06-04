@@ -1066,17 +1066,24 @@ END:VCALENDAR`;
 
     it('should fetch events from provider URL', fakeAsync(() => {
       const mockProvider = createMockProvider();
+      const eventYear = Number(todayIcalDate.slice(0, 4));
+      const eventMonthIndex = Number(todayIcalDate.slice(4, 6)) - 1;
+      const eventDay = Number(todayIcalDate.slice(6, 8));
+      const eventDayStart = Date.UTC(eventYear, eventMonthIndex, eventDay);
+      const eventDayEnd = eventDayStart + 86_400_000;
 
       let result: unknown;
-      const sub = service.requestEvents$(mockProvider).subscribe((val) => {
-        result = val;
-      });
+      const sub = service
+        .requestEvents$(mockProvider, eventDayStart, eventDayEnd)
+        .subscribe((val) => {
+          result = val;
+        });
       subscriptions.push(sub);
 
       const req = httpMock.expectOne(mockProvider.icalUrl);
       req.flush(MOCK_ICAL_DATA);
 
-      tick(0);
+      flushMicrotasks();
       expect(result).toEqual([
         jasmine.objectContaining({
           id: 'test-event-1',
