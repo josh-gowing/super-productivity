@@ -163,7 +163,7 @@ const filterOptions: FilterOption[] = [
   {
     type: FILTER_OPTION_TYPE.tag,
     preset: null,
-    label: T.F.TASK_VIEW.CUSTOMIZER.FILTER_TAG,
+    label: T.F.TAG.D_EDIT.LABEL,
   },
   {
     type: FILTER_OPTION_TYPE.project,

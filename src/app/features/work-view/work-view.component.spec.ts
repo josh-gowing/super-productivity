@@ -32,11 +32,11 @@ import { TODAY_TAG } from '../tag/tag.const';
 /**
  * Tests for the constructor effect() in WorkViewComponent that deselects the
  * currently selected task when it is no longer present in any visible task list
- * (undone / done / later / overdue / backlog). The customizer's list is
- * intentionally NOT consulted: after #7279 it is always a subset of the context's
- * undoneTasks, so checking undoneTasks is sufficient. These tests exercise the
- * real component; the template is overridden to a no-op so we don't have to
- * stand up every child component.
+ * (undone / done / later / overdue / backlog). When the task view customizer
+ * filters the undone list, the selected task must also be present in the
+ * customized visible list. These tests exercise the real component; the
+ * template is overridden to a no-op so we don't have to stand up every child
+ * component.
  */
 
 const buildTask = (id: string, subTasks: TaskWithSubTasks[] = []): TaskWithSubTasks =>
@@ -47,6 +47,7 @@ describe('WorkViewComponent', () => {
     let selectedTaskId: ReturnType<typeof signal<string | null>>;
     let setSelectedId: jasmine.Spy;
     let customized$: BehaviorSubject<{ list: TaskWithSubTasks[] }>;
+    let isCustomized: ReturnType<typeof signal<boolean>>;
     let activeWorkContextId: string;
     let store: MockStore;
 
@@ -70,6 +71,7 @@ describe('WorkViewComponent', () => {
       selectedTaskId = signal<string | null>(null);
       setSelectedId = jasmine.createSpy('setSelectedId');
       customized$ = new BehaviorSubject<{ list: TaskWithSubTasks[] }>({ list: [] });
+      isCustomized = signal(false);
       activeWorkContextId = 'some-project-id';
 
       TestBed.configureTestingModule({
@@ -98,7 +100,7 @@ describe('WorkViewComponent', () => {
             provide: TaskViewCustomizerService,
             useValue: {
               customizeUndoneTasks: () => customized$.asObservable(),
-              isCustomized: signal(false),
+              isCustomized,
             },
           },
           {
@@ -170,6 +172,28 @@ describe('WorkViewComponent', () => {
     it('keeps the selection when the task is in undoneTasks (existing behaviour)', async () => {
       await createComponent({ undone: [buildTask('undone-1')] });
       selectedTaskId.set('undone-1');
+      TestBed.flushEffects();
+
+      expect(setSelectedId).not.toHaveBeenCalled();
+    });
+
+    it('deselects when the customizer filters the selected undone task out', async () => {
+      isCustomized.set(true);
+      customized$.next({ list: [buildTask('visible-1')] });
+
+      await createComponent({ undone: [buildTask('hidden-1'), buildTask('visible-1')] });
+      selectedTaskId.set('hidden-1');
+      TestBed.flushEffects();
+
+      expect(setSelectedId).toHaveBeenCalledOnceWith(null);
+    });
+
+    it('keeps the selection when the selected undone task remains in the customized list', async () => {
+      isCustomized.set(true);
+      customized$.next({ list: [buildTask('visible-1')] });
+
+      await createComponent({ undone: [buildTask('hidden-1'), buildTask('visible-1')] });
+      selectedTaskId.set('visible-1');
       TestBed.flushEffects();
 
       expect(setSelectedId).not.toHaveBeenCalled();

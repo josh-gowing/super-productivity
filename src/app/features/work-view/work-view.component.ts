@@ -88,6 +88,13 @@ import { DateService } from '../../core/date/date.service';
 import { PluginIndexComponent } from '../../plugins/ui/plugin-index/plugin-index.component';
 import { PluginBridgeService } from '../../plugins/plugin-bridge.service';
 
+interface CustomizedUndoneTasks {
+  list: TaskWithSubTasks[];
+  grouped?: Record<string, TaskWithSubTasks[]>;
+}
+
+const INITIAL_CUSTOMIZED_UNDONE_TASKS: CustomizedUndoneTasks = { list: [] };
+
 @Component({
   selector: 'work-view',
   templateUrl: './work-view.component.html',
@@ -191,7 +198,7 @@ export class WorkViewComponent implements OnInit, OnDestroy {
   undoneTasks = input.required<TaskWithSubTasks[]>();
   customizedUndoneTasks = toSignal(
     this.customizerService.customizeUndoneTasks(this.workContextService.undoneTasks$),
-    { initialValue: { list: [] } },
+    { initialValue: INITIAL_CUSTOMIZED_UNDONE_TASKS },
   );
   doneTasks = input.required<TaskWithSubTasks[]>();
   backlogTasks = input.required<TaskWithSubTasks[]>();
@@ -333,7 +340,10 @@ export class WorkViewComponent implements OnInit, OnDestroy {
       const currentSelectedId = this.selectedTaskId();
       if (!currentSelectedId) return;
 
-      if (this._hasTaskInList(this.undoneTasks(), currentSelectedId)) return;
+      const visibleUndoneTasks = this._getVisibleUndoneTasksForSelection();
+      if (!visibleUndoneTasks) return;
+
+      if (this._hasTaskInList(visibleUndoneTasks, currentSelectedId)) return;
       if (this._hasTaskInList(this.doneTasks(), currentSelectedId)) return;
       if (this._hasTaskInList(this.laterTodayTasks(), currentSelectedId)) return;
 
@@ -522,6 +532,15 @@ export class WorkViewComponent implements OnInit, OnDestroy {
         }
       }),
     );
+  }
+
+  private _getVisibleUndoneTasksForSelection(): TaskWithSubTasks[] | null {
+    if (!this.customizerService.isCustomized()) {
+      return this.undoneTasks();
+    }
+
+    const customized = this.customizedUndoneTasks();
+    return customized === INITIAL_CUSTOMIZED_UNDONE_TASKS ? null : customized.list;
   }
 
   private _focusItemInWorkViewWhenReady(

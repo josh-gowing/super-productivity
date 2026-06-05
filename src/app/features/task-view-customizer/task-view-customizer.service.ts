@@ -93,7 +93,7 @@ export class TaskViewCustomizerService {
         const stored = this._stateByContext[this._currentContextKey];
         this.selectedSort.set(stored?.sort ?? DEFAULT_OPTIONS.sort);
         this.selectedGroup.set(this._sanitizeGroupForContext(stored?.group, activeType));
-        this.selectedFilter.set(stored?.filter ?? DEFAULT_OPTIONS.filter);
+        this.selectedFilter.set(this._sanitizeFilter(stored?.filter));
         this.collapsedGroupIds.set(stored?.collapsedGroupIds ?? []);
       });
 
@@ -161,6 +161,17 @@ export class TaskViewCustomizerService {
       return DEFAULT_OPTIONS.group;
     }
     return stored;
+  }
+
+  private _sanitizeFilter(stored: FilterOption | undefined): FilterOption {
+    if (!stored) return DEFAULT_OPTIONS.filter;
+
+    const currentFilter = OPTIONS.filter.list.find(
+      (option) => option.type === stored.type,
+    );
+    return currentFilter
+      ? { ...currentFilter, preset: stored.preset ?? null }
+      : DEFAULT_OPTIONS.filter;
   }
 
   customizeUndoneTasks(undoneTasks$: Observable<TaskWithSubTasks[]>): Observable<{
