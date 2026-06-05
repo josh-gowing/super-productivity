@@ -1,4 +1,5 @@
 import { expect, test } from '../../fixtures/test.fixture';
+import { saveRecurDialog, setRecurStartDate } from '../../utils/recurring-task-helpers';
 
 /**
  * Bug: https://github.com/super-productivity/super-productivity/issues/6860
@@ -107,29 +108,7 @@ test.describe('Recurring Task - Start Date Epoch Bug (#6860)', () => {
     const repeatDialog = page.locator('mat-dialog-container');
     await repeatDialog.waitFor({ state: 'visible', timeout: 10000 });
 
-    // 4. Type a date directly into the date input field
-    // The app defaults to en-GB locale (DD/MM/YYYY format)
-    const dateInput = repeatDialog.getByRole('textbox', { name: /start date/i });
-    await expect(dateInput).toBeVisible();
-    // The Material datepicker input intermittently drops the typed value while
-    // the dialog is still binding/animating: the blur (Tab) clears the field
-    // when the text hasn't parsed to a valid date yet, leaving the form invalid
-    // so Save stays disabled. Retry the whole type-and-commit cycle (clear +
-    // type + blur) until the input retains the typed date.
-    await expect(async () => {
-      await dateInput.fill('');
-      await dateInput.pressSequentially('15/06/2026', { delay: 50 });
-      // Trigger change by pressing Tab to blur
-      await dateInput.press('Tab');
-      const inputValue = await dateInput.inputValue();
-      expect(inputValue).not.toBe('');
-      expect(inputValue).not.toContain('1970');
-    }).toPass({ timeout: 10000 });
-
-    // 6. Save
-    const saveBtn = repeatDialog.getByRole('button', { name: /Save/i });
-    await expect(saveBtn).toBeEnabled({ timeout: 5000 });
-    await saveBtn.click();
-    await repeatDialog.waitFor({ state: 'hidden', timeout: 10000 });
+    await setRecurStartDate(page, '15/06/2026');
+    await saveRecurDialog(page);
   });
 });

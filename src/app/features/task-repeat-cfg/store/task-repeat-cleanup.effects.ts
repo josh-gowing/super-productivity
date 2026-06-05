@@ -17,6 +17,98 @@ import { selectAllTaskRepeatCfgs } from './task-repeat-cfg.selectors';
 import { DateService } from '../../../core/date/date.service';
 import { Log } from '../../../core/log';
 import { DeletedTaskIssueSidecarService } from '../../issue/two-way-sync/deleted-task-issue-sidecar.service';
+import { TODAY_TAG } from '../../tag/tag.const';
+import { isValidSplitTime } from '../../../util/is-valid-split-time';
+import { getDateTimeFromClockString } from '../../../util/get-date-time-from-clock-string';
+import { dateStrToUtcDate } from '../../../util/date-str-to-utc-date';
+import { remindOptionToMilliseconds } from '../../tasks/util/remind-option-to-milliseconds';
+
+const _sameStringSet = (a: readonly string[], b: readonly string[]): boolean => {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((value, index) => value === sortedB[index]);
+};
+
+const _isNil = (v: unknown): boolean => v === null || v === undefined;
+
+const _hasNoDeadlineFields = (
+  task: Pick<TaskWithSubTasks, 'deadlineDay' | 'deadlineWithTime' | 'deadlineRemindAt'>,
+): boolean =>
+  _isNil(task.deadlineDay) &&
+  _isNil(task.deadlineWithTime) &&
+  _isNil(task.deadlineRemindAt);
+
+const _hasTemplateSchedule = (
+  task: TaskWithSubTasks,
+  cfg: TaskRepeatCfg,
+  dueStr: string,
+): boolean => {
+  if (isValidSplitTime(cfg.startTime)) {
+    const expectedDueWithTime = getDateTimeFromClockString(
+      cfg.startTime,
+      dateStrToUtcDate(dueStr),
+    );
+    const expectedRemindAt = cfg.remindAt
+      ? remindOptionToMilliseconds(expectedDueWithTime, cfg.remindAt)
+      : undefined;
+    const isScheduledTemplate =
+      task.dueWithTime === expectedDueWithTime &&
+      _isNil(task.dueDay) &&
+      task.remindAt === expectedRemindAt;
+    const isBeforeScheduleActionTemplate =
+      _isNil(task.dueWithTime) && task.dueDay === dueStr && _isNil(task.remindAt);
+
+    return isScheduledTemplate || isBeforeScheduleActionTemplate;
+  }
+
+  return _isNil(task.dueWithTime) && task.dueDay === dueStr && _isNil(task.remindAt);
+};
+
+const _hasTemplateSubTasks = (task: TaskWithSubTasks, cfg: TaskRepeatCfg): boolean => {
+  const templates = cfg.shouldInheritSubtasks ? (cfg.subTaskTemplates ?? []) : [];
+  if (task.subTasks.length !== templates.length) {
+    return false;
+  }
+  return templates.every((template, index) => {
+    const subTask = task.subTasks[index];
+    return (
+      !!subTask &&
+      subTask.title === template.title &&
+      (subTask.timeEstimate ?? 0) === (template.timeEstimate ?? 0) &&
+      (subTask.notes ?? '').trim() === (template.notes ?? '').trim() &&
+      (subTask.attachments?.length ?? 0) === 0 &&
+      _sameStringSet(subTask.tagIds ?? [], []) &&
+      subTask.parentId === task.id &&
+      subTask.projectId === (cfg.projectId || task.projectId) &&
+      _isNil(subTask.remindAt) &&
+      _hasNoDeadlineFields(subTask)
+    );
+  });
+};
+
+const _isUnmodifiedSkipOverdueInstance = (
+  task: TaskWithSubTasks,
+  cfg: TaskRepeatCfg,
+  newestInstanceProjectId: string,
+  dueStr: string,
+): boolean =>
+  task.title === (cfg.title ?? '') &&
+  (task.timeEstimate ?? 0) === (cfg.defaultEstimate ?? 0) &&
+  _sameStringSet(
+    task.tagIds ?? [],
+    (cfg.tagIds ?? []).filter((tagId) => tagId !== TODAY_TAG.id),
+  ) &&
+  (task.notes ?? '').trim() === (cfg.notes ?? '').trim() &&
+  (task.attachments?.length ?? 0) === 0 &&
+  (cfg.projectId
+    ? task.projectId === cfg.projectId
+    : task.projectId === newestInstanceProjectId) &&
+  _hasTemplateSchedule(task, cfg, dueStr) &&
+  _hasNoDeadlineFields(task) &&
+  _hasTemplateSubTasks(task, cfg);
 
 @Injectable()
 export class TaskRepeatCleanupEffects {
@@ -141,8 +233,12 @@ export class TaskRepeatCleanupEffects {
                   // creation time than today's, so only remove instances that
                   // are genuinely OVERDUE (due before today) — never today's or
                   // a future instance. And never discard a prior-day instance
-                  // the user actually edited (attachments or notes that differ
-                  // from the template).
+                  // the user actually edited. _isUnmodifiedSkipOverdueInstance
+                  // compares: title, timeEstimate, tagIds (excluding TODAY_TAG),
+                  // notes, attachments (must be empty), projectId, and the
+                  // subtask templates (title/timeEstimate/notes).
+                  // Subtask *progress* (completion / timeSpent) is caught
+                  // upstream by hasSubtaskProgress before this gate runs.
                   if (isSkipOverdueGroup) {
                     const dueStr = task.dueWithTime
                       ? getDbDateStr(task.dueWithTime)
@@ -150,10 +246,15 @@ export class TaskRepeatCleanupEffects {
                     if (!dueStr || dueStr >= todayStr) {
                       continue;
                     }
-                    if (task.attachments?.length) {
-                      continue;
-                    }
-                    if ((task.notes ?? '').trim() !== (cfg?.notes ?? '').trim()) {
+                    if (
+                      !cfg ||
+                      !_isUnmodifiedSkipOverdueInstance(
+                        task,
+                        cfg,
+                        tasks[0].projectId,
+                        dueStr,
+                      )
+                    ) {
                       continue;
                     }
                   }

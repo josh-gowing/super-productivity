@@ -39,7 +39,7 @@ import { TaskAttachmentService } from '../task-attachment/task-attachment.servic
 import { DialogEditTaskAttachmentComponent } from '../task-attachment/dialog-edit-attachment/dialog-edit-task-attachment.component';
 import { ProjectService } from '../../project/project.service';
 import { Project } from '../../project/project.model';
-import { _MISSING_PROJECT_ } from '../../project/project.const';
+import { _MISSING_PROJECT_, DEFAULT_PROJECT_ICON } from '../../project/project.const';
 import { T } from '../../../t.const';
 import {
   MatMenu,
@@ -89,6 +89,8 @@ import { LayoutService } from '../../../core-ui/layout/layout.service';
 import { TaskFocusService } from '../task-focus.service';
 import { selectTimeConflictTaskIds } from '../store/task.selectors';
 import { MatTooltip } from '@angular/material/tooltip';
+import { MenuTreeService } from '../../menu-tree/menu-tree.service';
+import { SelectOptionRowComponent } from '../../../ui/select-option-row/select-option-row.component';
 
 @Component({
   selector: 'task',
@@ -132,6 +134,7 @@ import { MatTooltip } from '@angular/material/tooltip';
     TagToggleMenuListComponent,
     DoneToggleComponent,
     SwipeBlockComponent,
+    SelectOptionRowComponent,
   ],
 })
 export class TaskComponent implements OnDestroy, AfterViewInit {
@@ -146,6 +149,7 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
   private readonly _taskFocusService = inject(TaskFocusService);
   private readonly _dateService = inject(DateService);
   private readonly _destroyRef = inject(DestroyRef);
+  private readonly _menuTreeService = inject(MenuTreeService);
 
   readonly workContextService = inject(WorkContextService);
   readonly layoutService = inject(LayoutService);
@@ -279,6 +283,7 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
   });
 
   T: typeof T = T;
+  readonly DEFAULT_PROJECT_ICON = DEFAULT_PROJECT_ICON;
   isTouchActive = isTouchActive;
   isDragOver: boolean = false;
   isDragReady = signal(false);
@@ -302,6 +307,7 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
 
   // Lazy-loaded project list - only fetched when project menu opens
   moveToProjectList = signal<Project[] | undefined>(undefined);
+  projectFolderMap = computed(() => this._menuTreeService.projectFolderMap());
   private _loadedProjectListForProjectId: string | null | undefined;
   private _moveToProjectListSub?: Subscription;
 
