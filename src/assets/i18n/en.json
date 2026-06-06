@@ -1622,6 +1622,11 @@
       },
       "ADDITIONAL_INFO": {
         "ADD_ATTACHMENT": "Links & Files",
+        "ADD_CHECKLIST_ITEM": "Add checklist item",
+        "CHECKLIST_ACTIONS": "Checklist actions",
+        "CHECK_ALL": "Check all",
+        "CLEAR_COMPLETED": "Clear completed",
+        "UNCHECK_ALL": "Uncheck all",
         "PASTE_IMAGE_HINT": "Ctrl+V to paste image",
         "PASTE_IMAGE_HINT_MAC": "Cmd+V to paste image",
         "PASTED_IMAGE_TITLE": "Pasted image",
