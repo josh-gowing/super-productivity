@@ -84,7 +84,7 @@ import { TaskListComponent } from '../task-list/task-list.component';
 import { MsToStringPipe } from '../../../ui/duration/ms-to-string.pipe';
 import { ShortPlannedAtPipe } from '../../../ui/pipes/short-planned-at.pipe';
 import { LocalDateStrPipe } from '../../../ui/pipes/local-date-str.pipe';
-import { TranslatePipe } from '@ngx-translate/core';
+import { TranslatePipe, TranslateService } from '@ngx-translate/core';
 import { SubTaskTotalTimeSpentPipe } from '../pipes/sub-task-total-time-spent.pipe';
 import { TagListComponent } from '../../tag/tag-list/tag-list.component';
 import { TagToggleMenuListComponent } from '../../tag/tag-toggle-menu-list/tag-toggle-menu-list.component';
@@ -101,6 +101,7 @@ import { MatTooltip } from '@angular/material/tooltip';
 import { millisecondsDiffToRemindOption } from '../util/remind-option-to-milliseconds';
 import { MenuTreeService } from '../../menu-tree/menu-tree.service';
 import { SelectOptionRowComponent } from '../../../ui/select-option-row/select-option-row.component';
+import { SnackService } from '../../../core/snack/snack.service';
 
 @Component({
   selector: 'task',
@@ -161,6 +162,8 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
   private readonly _dateService = inject(DateService);
   private readonly _destroyRef = inject(DestroyRef);
   private readonly _menuTreeService = inject(MenuTreeService);
+  private readonly _snackService = inject(SnackService);
+  private readonly _translateService = inject(TranslateService);
 
   readonly workContextService = inject(WorkContextService);
   readonly layoutService = inject(LayoutService);
@@ -543,7 +546,17 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
         : (this._configService.cfg()?.reminder.defaultTaskRemindOption ??
           DEFAULT_GLOBAL_CONFIG.reminder.defaultTaskRemindOption!);
 
-      this._taskService.scheduleTask(task, newDate.getTime(), remindCfg, true);
+      this._taskService.scheduleTask(task, newDate.getTime(), remindCfg, false);
+      this._snackService.open({
+        type: 'SUCCESS',
+        msg: T.F.PLANNER.S.TASK_PLANNED_FOR,
+        ico: 'today',
+        translateParams: {
+          date: this._dateService.isToday(newDate)
+            ? this._translateService.instant(T.G.TODAY_TAG_TITLE)
+            : (day as string),
+        },
+      });
     } else {
       this._store.dispatch(
         PlannerActions.planTaskForDay({

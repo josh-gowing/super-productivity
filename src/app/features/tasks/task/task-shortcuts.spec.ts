@@ -17,6 +17,8 @@ import { DEFAULT_TASK, HideSubTasksMode, TaskWithSubTasks } from '../task.model'
 import { TaskService } from '../task.service';
 import { WorkContextService } from '../../work-context/work-context.service';
 import { TaskComponent } from './task.component';
+import { SnackService } from '../../../core/snack/snack.service';
+import { TranslateService } from '@ngx-translate/core';
 
 describe('TaskComponent shortcut handling', () => {
   let fixture: import('@angular/core/testing').ComponentFixture<TaskComponent>;
@@ -115,6 +117,14 @@ describe('TaskComponent shortcut handling', () => {
           ]),
         },
         { provide: Store, useValue: storeSpy },
+        {
+          provide: SnackService,
+          useValue: jasmine.createSpyObj('SnackService', ['open']),
+        },
+        {
+          provide: TranslateService,
+          useValue: jasmine.createSpyObj('TranslateService', ['instant']),
+        },
         {
           provide: ProjectService,
           useValue: jasmine.createSpyObj('ProjectService', [
@@ -450,6 +460,7 @@ describe('TaskComponent shortcut handling', () => {
         jasmine.any(String),
         false,
       );
+      expect(TestBed.inject(SnackService).open).toHaveBeenCalled();
       expect(storeSpy.dispatch).not.toHaveBeenCalledWith(
         PlannerActions.planTaskForDay({
           task: timedTask as any,
