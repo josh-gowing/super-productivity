@@ -18,7 +18,25 @@ export interface PluginIframeConfig {
   boundMethods?: ReturnType<typeof PluginBridgeService.prototype.createBoundMethods>;
 }
 
-// Simple sandbox - allow what plugins need
+/**
+ * Sandbox for the plugin UI iframe. Single source of truth — bound in
+ * `plugin-index.component.html` via `[attr.sandbox]`; do not re-inline it.
+ *
+ * ACCEPTED RISK (#8209): the iframe is loaded from a blob: URL that inherits
+ * the host origin, and `allow-same-origin` keeps that origin instead of an
+ * opaque one — so the iframe is same-origin with the host and can reach
+ * `window.parent.ea` directly, bypassing the postMessage bridge (verified in
+ * `plugin-iframe-origin-isolation.spec.ts`). Accepted for now: plugins are
+ * first-party or open-source and users are warned before installing.
+ *
+ * DO NOT just drop `allow-same-origin` to fix this: empirically (tested on a
+ * real packaged `file://` build) the resulting opaque-origin iframe cannot load
+ * the `blob:file://…` URL at all, so every plugin UI renders BLANK. The blob
+ * load only works while the iframe shares the host (file://) origin. A real fix
+ * needs a different load mechanism that survives an opaque origin — `srcdoc`
+ * (inline, no cross-origin fetch) or a registered `app://` scheme — which is
+ * the structural work tracked in #8209.
+ */
 export const PLUGIN_IFRAME_SANDBOX =
   'allow-scripts allow-same-origin allow-forms allow-popups allow-modals';
 

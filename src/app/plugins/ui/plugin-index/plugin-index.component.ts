@@ -18,6 +18,7 @@ import { PluginBridgeService } from '../../plugin-bridge.service';
 import { PluginCleanupService } from '../../plugin-cleanup.service';
 import {
   PluginIframeConfig,
+  PLUGIN_IFRAME_SANDBOX,
   createPluginIframeUrl,
   handlePluginMessage,
   cleanupPluginIframeUrl,
@@ -89,6 +90,9 @@ export class PluginIndexComponent implements OnInit, OnDestroy {
   private readonly _layoutService = inject(LayoutService);
 
   T = T;
+
+  // Single source of truth for the iframe sandbox attribute (#8209).
+  readonly pluginIframeSandbox = PLUGIN_IFRAME_SANDBOX;
 
   readonly pluginId = signal<string>('');
   readonly isLoading = signal<boolean>(true);
