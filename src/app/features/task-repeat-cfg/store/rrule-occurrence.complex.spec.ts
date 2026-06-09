@@ -253,6 +253,35 @@ describe('rrule-occurrence engine — complex variants × settings', () => {
     });
   });
 
+  describe('isRRuleValid horizon cap (never-firing rules)', () => {
+    // A parseable rule whose pattern matches no real date (BYMONTH=13, Feb-30)
+    // used to make rrule.js's .after() walk day-by-day to its year-275760 ceiling
+    // — a multi-second main-thread freeze that ALSO returned `true`, so the engine
+    // deferred to a rule that silently never fires (bypassing the legacy
+    // fallback). The bounded .between() probe now returns false quickly instead.
+    it('rejects a never-firing rule instead of treating it as valid', () => {
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=13')).toBe(false);
+      expect(isRRuleValid('FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30')).toBe(false);
+    });
+
+    it('returns quickly (no unbounded walk to the year-275760 ceiling)', () => {
+      // Distinct rule so the validity memo can't mask the probe cost. The old
+      // unbounded .after() took ~3.8s here; the bounded probe is well under 1.5s.
+      const start = performance.now();
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=13;BYMONTHDAY=2')).toBe(false);
+      expect(performance.now() - start).toBeLessThan(1500);
+    });
+
+    it('keeps a sound pattern with a past UNTIL / COUNT valid', () => {
+      // UNTIL/COUNT are anchor-relative end conditions stripped for the validity
+      // probe: the PATTERN is sound and the engine applies the real start/end per
+      // cfg. Rejecting these would resurrect a finished rule forever via the
+      // UNTIL-less legacy fallback.
+      expect(isRRuleValid('FREQ=DAILY;UNTIL=20190601T000000Z')).toBe(true);
+      expect(isRRuleValid('FREQ=WEEKLY;BYDAY=MO;COUNT=3')).toBe(true);
+    });
+  });
+
   describe('fail-soft', () => {
     it('a malformed rule yields [] / null, never throws', () => {
       expect(

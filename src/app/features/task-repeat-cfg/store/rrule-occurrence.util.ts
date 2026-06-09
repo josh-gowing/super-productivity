@@ -1,6 +1,6 @@
 import { RRule, RRuleSet } from 'rrule';
 import { Log } from '../../../core/log';
-import { safeParseRRuleOptions } from '../util/rrule-parse.util';
+import { RRuleParsedOptions, safeParseRRuleOptions } from '../util/rrule-parse.util';
 
 /**
  * Day-granular, DST-safe occurrence engine for RFC 5545 RRULE strings.
@@ -83,9 +83,85 @@ const _buildRuleSet = (input: RRuleOccurrenceInput): RRuleSet | null => {
 // Rule strings are few and immutable, so a tiny memo makes repeat calls free.
 const _validityCache = new Map<string, boolean>();
 
+/** Max day-of-month per month (Feb leap-permissive at 29). */
+const _MONTH_MAX_DAY = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+const _asArray = (v: number | number[] | null | undefined): number[] =>
+  v == null ? [] : Array.isArray(v) ? v : [v];
+
+/** True only when a non-empty constraint has EVERY value outside the RFC range
+ *  (`[lo,hi]`, plus `[-hi,-lo]` when `allowNeg`) — i.e. it can match nothing. An
+ *  empty constraint (no values) is no constraint, so never "all out of range". */
+const _allOutOfRange = (
+  vals: number[],
+  lo: number,
+  hi: number,
+  allowNeg = false,
+): boolean => {
+  if (!vals.length) return false;
+  const inRange = (n: number): boolean =>
+    (n >= lo && n <= hi) || (allowNeg && n <= -lo && n >= -hi);
+  return vals.every((n) => !inRange(n));
+};
+
 /**
- * True when `rrule` is a parseable RFC 5545 recurrence with a FREQ. Cheap,
- * throws nothing, used as a guard everywhere.
+ * Detect a parseable rule whose BY-constraints are contradictory and can produce
+ * NO occurrence — the case rrule.js "handles" by walking day-by-day to its
+ * year-275760 ceiling (a multi-second main-thread freeze) before yielding
+ * nothing. We catch the realistic vectors (out-of-range BY values like
+ * `BYMONTH=13`, impossible `BYMONTH`+`BYMONTHDAY` combos like Feb-30) up front so
+ * isRRuleValid can reject without iterating.
+ *
+ * Conservative by construction: it flags a rule ONLY when an entire constraint
+ * is unsatisfiable, so a sound rule is never mis-flagged (a false positive would
+ * wrongly drop a good cfg to the legacy fallback and reschedule it). Exotic
+ * never-firing rules it doesn't recognise (e.g. a `BYSETPOS` larger than its
+ * occurrence set) still fall through to the probe below, which now returns false
+ * for them too — just after a one-time (memoised) walk.
+ */
+const _canNeverFire = (o: RRuleParsedOptions): boolean => {
+  const byMonth = _asArray(o.bymonth);
+  const byMonthDay = _asArray(o.bymonthday);
+  if (
+    _allOutOfRange(byMonth, 1, 12) ||
+    _allOutOfRange(byMonthDay, 1, 31, true) ||
+    _allOutOfRange(_asArray(o.byyearday), 1, 366, true) ||
+    _allOutOfRange(_asArray(o.byweekno), 1, 53, true) ||
+    _allOutOfRange(_asArray(o.bysetpos), 1, 366, true)
+  ) {
+    return true;
+  }
+  // Impossible month/day intersection, e.g. BYMONTH=2;BYMONTHDAY=30. Only
+  // positive month-days are positional from the start; a negative day (-1 =
+  // last) always exists, so a rule with ANY negative day can fire — skip the
+  // combo check then. Flag only when no (valid-month, positive-day) pair fits.
+  const posDays = byMonthDay.filter((d) => d > 0);
+  const hasNegDay = byMonthDay.some((d) => d < 0);
+  if (byMonth.length && posDays.length && !hasNegDay) {
+    const validMonths = byMonth.filter((m) => m >= 1 && m <= 12);
+    const anyPairFits = validMonths.some((m) =>
+      posDays.some((d) => d <= _MONTH_MAX_DAY[m - 1]),
+    );
+    if (!anyPairFits) return true;
+  }
+  return false;
+};
+
+/**
+ * True when `rrule` is a parseable RFC 5545 recurrence that actually fires.
+ * Cheap, throws nothing, used as a routing guard everywhere.
+ *
+ * Two correctness points beyond "does it parse":
+ *  1. It must FIRE. A rule that yields no occurrence (contradictory BY parts) is
+ *     invalid → the engine falls back to legacy repeatCycle instead of deferring
+ *     to a rule that silently never creates a task. `_canNeverFire` rejects the
+ *     realistic such rules without iterating (avoiding rrule.js's year-275760
+ *     freeze); the `.after()` non-null check covers the rest.
+ *  2. UNTIL/COUNT are stripped for the probe. They are anchor-relative end
+ *     conditions; a rule whose window already closed relative to the fixed probe
+ *     anchor still has a sound PATTERN, and the engine applies the real
+ *     start/UNTIL/COUNT per cfg. Keeping them here would mark such a rule invalid
+ *     and resurrect it forever via the UNTIL-less legacy fallback.
  */
 export const isRRuleValid = (rrule: string | undefined): rrule is string => {
   if (!rrule || !rrule.trim()) return false;
@@ -94,14 +170,20 @@ export const isRRuleValid = (rrule: string | undefined): rrule is string => {
 
   let valid = false;
   const options = safeParseRRuleOptions(rrule);
-  if (options) {
+  if (options && !_canNeverFire(options)) {
     try {
-      // Construct + probe once so deeper invalids (bad BYDAY etc.) surface here.
-      new RRule({ ...options, dtstart: noonUtc('2020-01-01') }).after(
-        _midnightUtc('2019-01-01'),
-        false,
-      );
-      valid = true;
+      // First occurrence on/after the probe anchor. For a firing rule this
+      // returns immediately; the construct + probe also surfaces deeper invalids
+      // (bad BYDAY etc.) that parsing alone misses. `valid` requires a real hit,
+      // so a never-firing rule that slipped past `_canNeverFire` resolves to
+      // false (after a one-time, memoised walk) rather than a spurious true.
+      const occ = new RRule({
+        ...options,
+        dtstart: noonUtc('2020-01-01'),
+        until: null,
+        count: null,
+      }).after(_midnightUtc('2019-01-01'), false);
+      valid = occ != null;
     } catch {
       // construct/probe failed → invalid
     }
