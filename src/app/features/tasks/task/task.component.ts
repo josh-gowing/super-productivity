@@ -98,6 +98,7 @@ import { LayoutService } from '../../../core-ui/layout/layout.service';
 import { TaskFocusService } from '../task-focus.service';
 import { selectTimeConflictTaskIds } from '../store/task.selectors';
 import { MatTooltip } from '@angular/material/tooltip';
+import { millisecondsDiffToRemindOption } from '../util/remind-option-to-milliseconds';
 import { MenuTreeService } from '../../menu-tree/menu-tree.service';
 import { SelectOptionRowComponent } from '../../../ui/select-option-row/select-option-row.component';
 
@@ -537,13 +538,12 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
     const task = this.task();
     if (task.dueWithTime) {
       const newDate = combineDateAndTime(dayDate, new Date(task.dueWithTime));
-      this._taskService.scheduleTask(
-        task,
-        newDate.getTime(),
-        this._configService.cfg()?.reminder.defaultTaskRemindOption ??
-          DEFAULT_GLOBAL_CONFIG.reminder.defaultTaskRemindOption!,
-        false,
-      );
+      const remindCfg = task.reminderId
+        ? millisecondsDiffToRemindOption(task.dueWithTime, task.remindAt)
+        : (this._configService.cfg()?.reminder.defaultTaskRemindOption ??
+          DEFAULT_GLOBAL_CONFIG.reminder.defaultTaskRemindOption!);
+
+      this._taskService.scheduleTask(task, newDate.getTime(), remindCfg, true);
     } else {
       this._store.dispatch(
         PlannerActions.planTaskForDay({
