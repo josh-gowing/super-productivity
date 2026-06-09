@@ -69,7 +69,8 @@ PR (never `Closes`).
       directions), live text preview, quick-setting presets, forward-compat clamp,
       property/invariant/fuzz tests, off-by-default per-device flag, follow-ups
       (from-completion flip, `isRRuleValid` never-fire/freeze, deterministic
-      `_parseStart`). _✅ on branch — follow-ups: fork→origin PR pending._
+      `_parseStart`, rrule re-anchor test). _✅ on branch — follow-ups: fork→origin
+      PR pending._
 - [ ] **2 — Heatmap + simulation** · `feat/rrule-epic-p2-heatmap` — 365-day occurrence
       heatmap; click a day to simulate completing it and re-anchor. _⏸ on waypoint._
 - [ ] **3 — Natural language `@+`** · `feat/rrule-epic-p3-nl` — `@+<phrase>` → RRULE +
@@ -78,12 +79,14 @@ PR (never `Closes`).
       appears + offset / until-next / period-end / fixed / from-completion / none.
       _⏸ on waypoint._
 - [ ] **5 — Ends after N completions** · `feat/rrule-epic-p5-endsafter` — stop after N
-      completed instances (needs min-client-version gate — old clients ignore the field).
-      _⏸ on waypoint._
+      completed instances (needs min-client-version gate — old clients ignore the field);
+      rejects `COUNT`+completion at the persist boundary. _⏸ on waypoint._
 - [ ] **6 — Missed-occurrence backfill** · `feat/rrule-epic-p6-backfill` — a task per
       missed occurrence (+ build-set-once perf). _⏸ on waypoint._
 - [ ] **7 — REST API recurring** · `feat/rrule-epic-p7-rest` — create recurring tasks
-      over the local REST API (rrule/startDate/from-completion) — #7239. _⏸ on waypoint._
+      over the local REST API (rrule/startDate/from-completion) — #7239; adds
+      persist-boundary guards for untrusted ingestion (unsupported-FREQ / `repeatCycle`
+      wire-safety — defends the non-dialog write path). _⏸ on waypoint._
 - [ ] **8 — RECURRENCE-ID overrides** · `feat/rrule-epic-p8-overrides` — edit a single
       occurrence (move / re-time / re-title) via RDATE+EXDATE. _⏸ on waypoint._
 - [ ] **9 — iCal / RRULE export** · `feat/rrule-epic-p9-ical` — export recurrences as
@@ -96,8 +99,8 @@ PR (never `Closes`).
       fires on an event / state-change condition instead of a clock. _🔭 not built._
 - [ ] **12 — Sub-daily / hourly** · `feat/rrule-epic-p12-subdaily` — interval-hours +
       multiple-per-day (`FREQ=HOURLY`/`BYHOUR`); revisits the local-noon/DST model —
-      largest of the four. Until it lands, sub-daily FREQs are rejected at save **and the
-      persist boundary**. _🔭 not built._
+      largest of the four. Owns the engine + persist-boundary sub-daily handling; until
+      then sub-daily is rejected at save **and the persist boundary**. _🔭 not built._
 - [ ] **13 — Multiple reminders per occurrence** · `feat/rrule-epic-p13-reminders` — more
       than one reminder offset per recurring instance. _🔭 not built._
 
