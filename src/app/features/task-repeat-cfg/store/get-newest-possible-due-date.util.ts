@@ -13,6 +13,7 @@ import {
 import { Log } from '../../../core/log';
 import { getNewestPossibleRRuleDueDate, isRRuleValid } from './rrule-occurrence.util';
 import { taskRepeatCfgToRRuleInput } from './task-repeat-cfg-to-rrule-input.util';
+import { isRRuleEngineEnabled } from '../../config/rrule-engine-flag';
 
 export const getNewestPossibleDueDate = (
   taskRepeatCfg: TaskRepeatCfg,
@@ -21,9 +22,15 @@ export const getNewestPossibleDueDate = (
   // FOR DEBUG
   // return new Date();
 
-  // A malformed raw-override rule falls through to the legacy schedule fields
-  // instead of stopping the task (only defer to the engine when it parses).
-  if (taskRepeatCfg.rrule && isRRuleValid(taskRepeatCfg.rrule)) {
+  // Defer to the RRULE engine only when enabled (local per-device flag, off by
+  // default) AND the rule parses; a disabled flag or malformed raw-override rule
+  // falls through to the legacy schedule fields instead of stopping the task.
+  // `rrule` is checked first so a config without one never touches the flag.
+  if (
+    taskRepeatCfg.rrule &&
+    isRRuleEngineEnabled() &&
+    isRRuleValid(taskRepeatCfg.rrule)
+  ) {
     // RRULE ignores repeatEvery/weekday flags; defer entirely to the engine.
     return getNewestPossibleRRuleDueDate(taskRepeatCfgToRRuleInput(taskRepeatCfg), today);
   }

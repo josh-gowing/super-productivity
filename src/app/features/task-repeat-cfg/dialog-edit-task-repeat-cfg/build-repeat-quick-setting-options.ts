@@ -13,6 +13,11 @@ export const buildRepeatQuickSettingOptions = (
   refDate: Date,
   locale: string,
   translateService: TranslateService,
+  // The 'RRULE' (advanced recurrence) builder is gated behind a local per-device
+  // flag. When off, the option is omitted so users can't author rules the local
+  // engine would ignore — callers still pass `true` for a config already in
+  // RRULE mode so an existing one stays editable.
+  includeRRule = true,
 ): { value: RepeatQuickSetting; label: string }[] => {
   // Guard against an invalid Date slipping through (e.g. a non-DB date string).
   // An invalid date makes the weekOfMonth math NaN, so ORDINAL_KEYS[NaN-1] is
@@ -29,7 +34,7 @@ export const buildRepeatQuickSettingOptions = (
   const weekOfMonth = Math.min(Math.floor((safeRefDate.getDate() - 1) / 7) + 1, 4);
   const ordinalStr = translateService.instant(ORDINAL_KEYS[weekOfMonth - 1]);
 
-  return [
+  const options: { value: RepeatQuickSetting; label: string }[] = [
     {
       value: 'DAILY',
       label: translateService.instant(T.F.TASK_REPEAT.F.Q_DAILY),
@@ -109,9 +114,14 @@ export const buildRepeatQuickSettingOptions = (
         dayAndMonthStr: refDayAndMonthStr,
       }),
     },
-    {
+  ];
+
+  if (includeRRule) {
+    options.push({
       value: 'RRULE',
       label: translateService.instant(T.F.TASK_REPEAT.F.Q_RRULE),
-    },
-  ];
+    });
+  }
+
+  return options;
 };

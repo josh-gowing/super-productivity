@@ -13,6 +13,7 @@ import {
 import { Log } from '../../../core/log';
 import { getNextRRuleOccurrence, isRRuleValid } from './rrule-occurrence.util';
 import { taskRepeatCfgToRRuleInput } from './task-repeat-cfg-to-rrule-input.util';
+import { isRRuleEngineEnabled } from '../../config/rrule-engine-flag';
 
 export const getNextRepeatOccurrence = (
   taskRepeatCfg: TaskRepeatCfg,
@@ -25,10 +26,16 @@ export const getNextRepeatOccurrence = (
   // scheduled-list and heatmap.
   { inclusive = false }: { inclusive?: boolean } = {},
 ): Date | null => {
-  // Only defer to the RRULE engine when the rule actually parses — a malformed
-  // raw-override rule must fall through to the (kept) legacy schedule fields
-  // rather than silently stopping the task.
-  if (taskRepeatCfg.rrule && isRRuleValid(taskRepeatCfg.rrule)) {
+  // Only defer to the RRULE engine when it is enabled (local per-device flag,
+  // off by default) AND the rule actually parses — a disabled flag or a
+  // malformed raw-override rule must fall through to the (kept) legacy schedule
+  // fields rather than silently stopping the task. `rrule` is checked first so a
+  // config without one never touches the flag/localStorage.
+  if (
+    taskRepeatCfg.rrule &&
+    isRRuleEngineEnabled() &&
+    isRRuleValid(taskRepeatCfg.rrule)
+  ) {
     return getNextRRuleOccurrence(taskRepeatCfgToRRuleInput(taskRepeatCfg), fromDate, {
       inclusive,
     });

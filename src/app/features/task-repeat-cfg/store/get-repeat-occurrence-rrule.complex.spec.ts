@@ -3,6 +3,12 @@ import { getFirstRepeatOccurrence } from './get-first-repeat-occurrence.util';
 import { getNewestPossibleDueDate } from './get-newest-possible-due-date.util';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
 import { getDbDateStr } from '../../../util/get-db-date-str';
+import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
+
+// The RRULE engine is gated behind a local per-device flag (off by default);
+// these routing tests exercise the engine, so enable it for the suite.
+beforeEach(() => setRRuleEngineEnabled(true));
+afterEach(() => setRRuleEngineEnabled(false));
 
 // Integration: complex RRULE strings routed through the cfg → engine adapter
 // (taskRepeatCfgToRRuleInput), crossed with cfg-level settings

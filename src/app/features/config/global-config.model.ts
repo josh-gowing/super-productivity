@@ -290,6 +290,13 @@ export type TaskWidgetConfig = Readonly<{
   opacity?: number;
 }>;
 
+// Local, per-device flag for the experimental RRULE recurrence engine. Like
+// TaskWidgetConfig it is NOT part of GlobalConfigState — it lives in localStorage
+// (see RRuleFeatureFlagService) so it never syncs to other / older clients.
+export type RRuleEngineConfig = Readonly<{
+  isEnabled?: boolean;
+}>;
+
 export type ClipboardImagesConfig = Readonly<{
   imagePath?: string | null;
 }>;
@@ -336,7 +343,10 @@ export type GlobalConfigSectionKey = keyof GlobalConfigState | 'EMPTY';
 // handler. Kept separate from `GlobalConfigSectionKey` so it cannot leak into
 // `updateGlobalConfigSection` action payloads (which would create phantom ops
 // in the sync log).
-export type GlobalConfigFormSectionKey = GlobalConfigSectionKey | 'taskWidget';
+export type GlobalConfigFormSectionKey =
+  | GlobalConfigSectionKey
+  | 'taskWidget'
+  | 'rruleEngine';
 
 export type GlobalSectionConfig =
   | MiscConfig
@@ -349,7 +359,8 @@ export type GlobalSectionConfig =
   | DailySummaryNote
   | SyncConfig
   | ClipboardImagesConfig
-  | TaskWidgetConfig;
+  | TaskWidgetConfig
+  | RRuleEngineConfig;
 type Omit<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>>;
 
 export interface LimitedFormlyFieldConfig<FormModel> extends Omit<

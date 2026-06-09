@@ -2,6 +2,13 @@ import { getNextRepeatOccurrence } from './get-next-repeat-occurrence.util';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
 import { getDbDateStr } from '../../../util/get-db-date-str';
 import { Log } from '../../../core/log';
+import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
+
+// A couple of cases here route a valid `rrule` through the engine, which is
+// gated behind a local per-device flag (off by default); enable it for the
+// suite. Legacy cases (no/!valid rrule) are unaffected by the flag.
+beforeEach(() => setRRuleEngineEnabled(true));
+afterEach(() => setRRuleEngineEnabled(false));
 
 const FAKE_MONDAY_THE_10TH = new Date(2022, 0, 10).getTime();
 

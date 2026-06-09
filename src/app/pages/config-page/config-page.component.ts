@@ -10,7 +10,11 @@ import {
 import { ActivatedRoute } from '@angular/router';
 import { GlobalConfigService } from '../../features/config/global-config.service';
 import { TaskWidgetSettingsService } from '../../features/config/task-widget-settings.service';
-import { TaskWidgetConfig } from '../../features/config/global-config.model';
+import { RRuleFeatureFlagService } from '../../features/config/rrule-feature-flag.service';
+import {
+  RRuleEngineConfig,
+  TaskWidgetConfig,
+} from '../../features/config/global-config.model';
 import {
   GLOBAL_GENERAL_FORM_CONFIG,
   GLOBAL_IMEX_FORM_CONFIG,
@@ -98,6 +102,7 @@ export class ConfigPageComponent implements OnInit {
   readonly configService = inject(GlobalConfigService);
   readonly syncSettingsService = inject(SyncConfigService);
   readonly taskWidgetSettingsService = inject(TaskWidgetSettingsService);
+  readonly rruleFeatureFlagService = inject(RRuleFeatureFlagService);
 
   T: typeof T = T;
 
@@ -304,6 +309,12 @@ export class ConfigPageComponent implements OnInit {
       return;
     }
 
+    // rruleEngine is a per-device flag (localStorage, not synced) — same pattern
+    if (formSectionKey === 'rruleEngine') {
+      this.rruleFeatureFlagService.update(config as Partial<RRuleEngineConfig>);
+      return;
+    }
+
     // From here on we know it's a real GlobalConfigState section.
     const sectionKey = formSectionKey as GlobalConfigSectionKey;
 
@@ -387,6 +398,9 @@ export class ConfigPageComponent implements OnInit {
   ): GlobalSectionConfig {
     if (sectionKey === 'taskWidget') {
       return this.taskWidgetSettingsService.settings() as GlobalSectionConfig;
+    }
+    if (sectionKey === 'rruleEngine') {
+      return this.rruleFeatureFlagService.settings() as GlobalSectionConfig;
     }
     return (this.globalCfg as unknown as Record<string, GlobalSectionConfig>)[sectionKey];
   }

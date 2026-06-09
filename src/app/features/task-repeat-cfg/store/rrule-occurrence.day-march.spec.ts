@@ -3,6 +3,12 @@ import { getRRuleOccurrencesInRange } from './rrule-occurrence.util';
 import { taskRepeatCfgToRRuleInput } from './task-repeat-cfg-to-rrule-input.util';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
 import { getDbDateStr } from '../../../util/get-db-date-str';
+import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
+
+// getNewestPossibleDueDate routes to the RRULE engine only when the local
+// per-device flag is on (off by default); enable it for this day-march suite.
+beforeEach(() => setRRuleEngineEnabled(true));
+afterEach(() => setRRuleEngineEnabled(false));
 
 // "Day-march" simulation — the highest-fidelity unit mirror of what the running
 // app does as real days pass. Production (task-repeat-cfg.service.ts) creates an
