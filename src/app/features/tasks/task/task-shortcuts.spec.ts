@@ -4,6 +4,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { Store } from '@ngrx/store';
 import { of } from 'rxjs';
 import { DateAdapter } from '@angular/material/core';
+import { PlannerActions } from '../../planner/store/planner.actions';
 import { DateService } from '../../../core/date/date.service';
 import { GlobalTrackingIntervalService } from '../../../core/global-tracking-interval/global-tracking-interval.service';
 import { LayoutService } from '../../../core-ui/layout/layout.service';
@@ -131,9 +132,13 @@ describe('TaskComponent shortcut handling', () => {
         },
         {
           provide: DateService,
-          useValue: jasmine.createSpyObj('DateService', ['isToday'], {
-            isToday: () => false,
-          }),
+          useValue: jasmine.createSpyObj(
+            'DateService',
+            ['isToday', 'getLogicalTodayDate'],
+            {
+              isToday: () => false,
+            },
+          ),
         },
         {
           provide: GlobalTrackingIntervalService,
@@ -344,5 +349,87 @@ describe('TaskComponent shortcut handling', () => {
     });
 
     expect(taskServiceSpy.addSubTaskTo).not.toHaveBeenCalled();
+  });
+
+  describe('Scheduling shortcuts', () => {
+    let dateService: jasmine.SpyObj<DateService>;
+    let dateAdapter: jasmine.SpyObj<DateAdapter<unknown>>;
+
+    beforeEach(() => {
+      dateService = TestBed.inject(DateService) as jasmine.SpyObj<DateService>;
+      dateAdapter = TestBed.inject(DateAdapter) as jasmine.SpyObj<DateAdapter<unknown>>;
+      // Mock "logical today" to 2026-06-01 (a Monday)
+      dateService.getLogicalTodayDate.and.returnValue(new Date('2026-06-01T12:00:00'));
+      dateAdapter.getDayOfWeek.and.callFake((d: any) => (d as Date).getDay());
+      dateAdapter.getFirstDayOfWeek.and.returnValue(1); // Monday
+    });
+
+    it('schedules for tomorrow', () => {
+      component.scheduleTaskTomorrow();
+
+      expect(storeSpy.dispatch).toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: component.task() as any,
+          day: '2026-06-02',
+          isShowSnack: true,
+        }),
+      );
+    });
+
+    it('schedules for next week (next Monday)', () => {
+      component.scheduleTaskNextWeek();
+
+      // Next week from Monday June 1st should be June 8th
+      expect(storeSpy.dispatch).toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: component.task() as any,
+          day: '2026-06-08',
+          isShowSnack: true,
+        }),
+      );
+    });
+
+    it('schedules for next week (from Sunday, next Monday)', () => {
+      dateService.getLogicalTodayDate.and.returnValue(new Date('2026-06-07T12:00:00')); // Sunday
+
+      component.scheduleTaskNextWeek();
+
+      // Next week from Sunday June 7th (first day Monday) should be June 8th
+      expect(storeSpy.dispatch).toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: component.task() as any,
+          day: '2026-06-08',
+          isShowSnack: true,
+        }),
+      );
+    });
+
+    it('schedules for next week (from Sunday, next Monday) - US locale (Sunday first)', () => {
+      dateAdapter.getFirstDayOfWeek.and.returnValue(0); // Sunday
+      dateService.getLogicalTodayDate.and.returnValue(new Date('2026-06-07T12:00:00')); // Sunday
+
+      component.scheduleTaskNextWeek();
+
+      // Next week from Sunday June 7th (first day Sunday) should be June 14th
+      expect(storeSpy.dispatch).toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: component.task() as any,
+          day: '2026-06-14',
+          isShowSnack: true,
+        }),
+      );
+    });
+
+    it('schedules for next month (first of next month)', () => {
+      component.scheduleTaskNextMonth();
+
+      expect(storeSpy.dispatch).toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: component.task() as any,
+          day: '2026-07-01',
+          isShowSnack: true,
+        }),
+      );
+    });
   });
 });
