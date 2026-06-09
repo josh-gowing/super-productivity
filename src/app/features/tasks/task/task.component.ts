@@ -59,6 +59,9 @@ import { DialogFullscreenMarkdownComponent } from '../../../ui/dialog-fullscreen
 import { Update } from '@ngrx/entity';
 import { DateAdapter } from '@angular/material/core';
 import { getDbDateStr, isDBDateStr } from '../../../util/get-db-date-str';
+import { combineDateAndTime } from '../../../util/combine-date-and-time';
+import { getNextWeekDayOffset } from '../../../util/get-next-week-day-offset';
+import { DEFAULT_GLOBAL_CONFIG } from '../../config/default-global-config.const';
 import { DateService } from '../../../core/date/date.service';
 import { isTouchActive } from '../../../util/input-intent';
 import { IS_HYBRID_DEVICE } from '../../../util/is-mouse-primary';
@@ -512,35 +515,44 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
   scheduleTaskTomorrow(): void {
     const tDate = this._dateService.getLogicalTodayDate();
     tDate.setDate(tDate.getDate() + 1);
-    this._scheduleForDay(getDbDateStr(tDate));
+    this._scheduleForDay(tDate);
   }
 
   scheduleTaskNextWeek(): void {
     const tDate = this._dateService.getLogicalTodayDate();
-    const dayOffset =
-      (this._dateAdapter.getFirstDayOfWeek() -
-        this._dateAdapter.getDayOfWeek(tDate) +
-        7) %
-        7 || 7;
+    const dayOffset = getNextWeekDayOffset(this._dateAdapter, tDate);
     tDate.setDate(tDate.getDate() + dayOffset);
-    this._scheduleForDay(getDbDateStr(tDate));
+    this._scheduleForDay(tDate);
   }
 
   scheduleTaskNextMonth(): void {
     const tDate = this._dateService.getLogicalTodayDate();
     tDate.setDate(1);
     tDate.setMonth(tDate.getMonth() + 1);
-    this._scheduleForDay(getDbDateStr(tDate));
+    this._scheduleForDay(tDate);
   }
 
-  private _scheduleForDay(day: string): void {
-    this._store.dispatch(
-      PlannerActions.planTaskForDay({
-        task: this.task() as TaskCopy,
-        day,
-        isShowSnack: true,
-      }),
-    );
+  private _scheduleForDay(dayDate: Date): void {
+    const day = getDbDateStr(dayDate);
+    const task = this.task();
+    if (task.dueWithTime) {
+      const newDate = combineDateAndTime(dayDate, new Date(task.dueWithTime));
+      this._taskService.scheduleTask(
+        task,
+        newDate.getTime(),
+        this._configService.cfg()?.reminder.defaultTaskRemindOption ??
+          DEFAULT_GLOBAL_CONFIG.reminder.defaultTaskRemindOption!,
+        false,
+      );
+    } else {
+      this._store.dispatch(
+        PlannerActions.planTaskForDay({
+          task: task as TaskCopy,
+          day,
+          isShowSnack: true,
+        }),
+      );
+    }
     this.focusSelfOrNextIfNotPossible();
   }
 

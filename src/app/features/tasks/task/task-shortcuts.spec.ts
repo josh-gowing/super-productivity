@@ -67,6 +67,7 @@ describe('TaskComponent shortcut handling', () => {
         'pauseCurrent',
         'getByIdWithSubTaskData$',
         'focusTaskById',
+        'scheduleTask',
       ],
       {
         currentTaskId: signal<string | null>(null),
@@ -103,7 +104,7 @@ describe('TaskComponent shortcut handling', () => {
         {
           provide: GlobalConfigService,
           useValue: jasmine.createSpyObj('GlobalConfigService', ['cfg'], {
-            cfg: () => ({ keyboard: {}, tasks: {} }),
+            cfg: () => ({ keyboard: {}, tasks: {}, reminder: {} }),
           }),
         },
         {
@@ -427,6 +428,32 @@ describe('TaskComponent shortcut handling', () => {
         PlannerActions.planTaskForDay({
           task: component.task() as any,
           day: '2026-07-01',
+          isShowSnack: true,
+        }),
+      );
+    });
+
+    it('preserves time and reminder when scheduling a timed task for tomorrow', () => {
+      const timedTask = {
+        ...component.task(),
+        dueWithTime: new Date('2026-06-01T10:00:00').getTime(),
+      };
+      fixture.componentRef.setInput('task', timedTask);
+
+      component.scheduleTaskTomorrow();
+
+      // Should call taskService.scheduleTask instead of dispatching planTaskForDay
+      // June 2nd at 10:00:00
+      expect(taskServiceSpy.scheduleTask).toHaveBeenCalledWith(
+        timedTask as any,
+        new Date('2026-06-02T10:00:00').getTime(),
+        jasmine.any(String),
+        false,
+      );
+      expect(storeSpy.dispatch).not.toHaveBeenCalledWith(
+        PlannerActions.planTaskForDay({
+          task: timedTask as any,
+          day: '2026-06-02',
           isShowSnack: true,
         }),
       );
