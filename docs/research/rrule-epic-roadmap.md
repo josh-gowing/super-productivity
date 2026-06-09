@@ -61,29 +61,49 @@ Work happens on the fork (`omega-tree/super-productivity`) and lands via PRs:
 
 ## Phases
 
-Each → a PR `feat/rrule-epic-pN-<slug> → feat/rrule-epic`, `Part of` the epic PR.
+Each phase = a PR `feat/rrule-epic-pN-<slug> → feat/rrule-epic`, body `Part of` the epic
+PR (never `Closes`).
 
-| ✓   | Phase                                  | Branch                          | Scope                                                                                                                                                                                                                                                                                                                                                                         | Status                                            |
-| --- | -------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| ☑   | **1 — Core**                           | `feat/rrule-epic`               | RFC 5545 occurrence engine (UTC/local-noon, DST-safe, fail-soft) · structured RRULE builder · legacy⇄RRULE migration (both directions) · live text preview · quick-setting presets · forward-compat clamp · property/invariant/fuzz tests · off-by-default per-device flag · follow-ups (from-completion flip, `isRRuleValid` never-fire/freeze, deterministic `_parseStart`) | ✅ on branch (follow-ups: fork→origin PR pending) |
-| ☐   | **2 — Heatmap + simulation**           | `feat/rrule-epic-p2-heatmap`    | 365-day occurrence heatmap in the dialog; click a day to simulate completing it and re-anchor — makes complex RRULEs visible before saving                                                                                                                                                                                                                                    | ⏸ on waypoint                                     |
-| ☐   | **3 — Natural language `@+`**          | `feat/rrule-epic-p3-nl`         | `@+<phrase>` → RRULE parser + add-task-bar wiring + humanized "rule · next date" preview                                                                                                                                                                                                                                                                                      | ⏸ on waypoint                                     |
-| ☐   | **4 — Due-date derivation**            | `feat/rrule-epic-p4-duetype`    | per-instance Due derived from the appears day: offset / until-next / period-end / fixed / from-completion / none                                                                                                                                                                                                                                                              | ⏸ on waypoint                                     |
-| ☐   | **5 — Ends after N completions**       | `feat/rrule-epic-p5-endsafter`  | end condition that stops after N completed instances (needs min-client-version gate — old clients ignore the field)                                                                                                                                                                                                                                                           | ⏸ on waypoint                                     |
-| ☐   | **6 — Missed-occurrence backfill**     | `feat/rrule-epic-p6-backfill`   | "create a task for each missed occurrence" catch-up (+ build-set-once perf)                                                                                                                                                                                                                                                                                                   | ⏸ on waypoint                                     |
-| ☐   | **7 — REST API recurring**             | `feat/rrule-epic-p7-rest`       | create recurring tasks over the local REST API (rrule/startDate/from-completion) — #7239                                                                                                                                                                                                                                                                                      | ⏸ on waypoint                                     |
-| ☐   | **8 — RECURRENCE-ID overrides**        | `feat/rrule-epic-p8-overrides`  | edit a single occurrence (move / re-time / re-title) via RDATE+EXDATE; dialog "Edit this occurrence"                                                                                                                                                                                                                                                                          | ⏸ on waypoint                                     |
-| ☐   | **9 — iCal / RRULE export**            | `feat/rrule-epic-p9-ical`       | export recurrences as `.ics` / RRULE strings                                                                                                                                                                                                                                                                                                                                  | ⬜ not built                                      |
-| ☐   | **10 — Adaptive scheduling**           | `feat/rrule-epic-p10-adaptive`  | learn per-task completion cadence (exp-decay weighted avg of historical delays, à la Donetick) → suggest / auto-adjust the next due; opt-in per repeat cfg. **Op-log-deterministic** (derive from recorded completions, not wall-clock)                                                                                                                                       | 🔭 not built                                      |
-| ☐   | **11 — Trigger-based recurrence**      | `feat/rrule-epic-p11-trigger`   | next occurrence fires on an event / state-change condition instead of a clock                                                                                                                                                                                                                                                                                                 | 🔭 not built                                      |
-| ☐   | **12 — Sub-daily / hourly**            | `feat/rrule-epic-p12-subdaily`  | extend the day-granular engine to interval-hours + multiple-per-day (`FREQ=HOURLY`/`BYHOUR`); revisits the local-noon/DST model — largest of the four. Until it lands, sub-daily FREQs are rejected at save **and the persist boundary**                                                                                                                                      | 🔭 not built                                      |
-| ☐   | **13 — Multiple reminders/occurrence** | `feat/rrule-epic-p13-reminders` | more than one reminder offset per recurring instance                                                                                                                                                                                                                                                                                                                          | 🔭 not built                                      |
+- [x] **1 — Core** · `feat/rrule-epic` — RFC 5545 occurrence engine (UTC/local-noon,
+      DST-safe, fail-soft), structured RRULE builder, legacy⇄RRULE migration (both
+      directions), live text preview, quick-setting presets, forward-compat clamp,
+      property/invariant/fuzz tests, off-by-default per-device flag, follow-ups
+      (from-completion flip, `isRRuleValid` never-fire/freeze, deterministic
+      `_parseStart`). _✅ on branch — follow-ups: fork→origin PR pending._
+- [ ] **2 — Heatmap + simulation** · `feat/rrule-epic-p2-heatmap` — 365-day occurrence
+      heatmap; click a day to simulate completing it and re-anchor. _⏸ on waypoint._
+- [ ] **3 — Natural language `@+`** · `feat/rrule-epic-p3-nl` — `@+<phrase>` → RRULE +
+      add-task-bar wiring + humanized "rule · next date" preview. _⏸ on waypoint._
+- [ ] **4 — Due-date derivation** · `feat/rrule-epic-p4-duetype` — per-instance Due =
+      appears + offset / until-next / period-end / fixed / from-completion / none.
+      _⏸ on waypoint._
+- [ ] **5 — Ends after N completions** · `feat/rrule-epic-p5-endsafter` — stop after N
+      completed instances (needs min-client-version gate — old clients ignore the field).
+      _⏸ on waypoint._
+- [ ] **6 — Missed-occurrence backfill** · `feat/rrule-epic-p6-backfill` — a task per
+      missed occurrence (+ build-set-once perf). _⏸ on waypoint._
+- [ ] **7 — REST API recurring** · `feat/rrule-epic-p7-rest` — create recurring tasks
+      over the local REST API (rrule/startDate/from-completion) — #7239. _⏸ on waypoint._
+- [ ] **8 — RECURRENCE-ID overrides** · `feat/rrule-epic-p8-overrides` — edit a single
+      occurrence (move / re-time / re-title) via RDATE+EXDATE. _⏸ on waypoint._
+- [ ] **9 — iCal / RRULE export** · `feat/rrule-epic-p9-ical` — export recurrences as
+      `.ics` / RRULE strings. _⬜ not built._
+- [ ] **10 — Adaptive scheduling** · `feat/rrule-epic-p10-adaptive` — learn completion
+      cadence (exp-decay weighted avg of historical delays) → suggest / auto-adjust the
+      next due; opt-in per repeat cfg. Op-log-deterministic (from recorded completions,
+      not wall-clock). _🔭 not built._
+- [ ] **11 — Trigger-based recurrence** · `feat/rrule-epic-p11-trigger` — next occurrence
+      fires on an event / state-change condition instead of a clock. _🔭 not built._
+- [ ] **12 — Sub-daily / hourly** · `feat/rrule-epic-p12-subdaily` — interval-hours +
+      multiple-per-day (`FREQ=HOURLY`/`BYHOUR`); revisits the local-noon/DST model —
+      largest of the four. Until it lands, sub-daily FREQs are rejected at save **and the
+      persist boundary**. _🔭 not built._
+- [ ] **13 — Multiple reminders per occurrence** · `feat/rrule-epic-p13-reminders` — more
+      than one reminder offset per recurring instance. _🔭 not built._
 
-Legend: ☑ done · ⏸ implemented on the waypoint, awaiting its slice · ⬜ not started ·
-🔭 newly scoped, not built.
-
-_Donetick's assignee rotation / round-robin is intentionally out of scope — SP recurrence
-is single-assignee._
+Status key: ✅ done · ⏸ implemented on the waypoint, awaiting its slice · ⬜ not started ·
+🔭 newly scoped, not built. Donetick assignee rotation / round-robin is intentionally out
+of scope — SP recurrence is single-assignee.
 
 ---
 
