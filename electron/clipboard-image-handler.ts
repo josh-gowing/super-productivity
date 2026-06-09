@@ -3,7 +3,7 @@ import { promises as fsPromises } from 'fs';
 import * as fs from 'fs';
 import * as path from 'path';
 import { IPC } from './shared-with-frontend/ipc-events.const';
-import { createValidatedHandler } from './ipc-handler-wrapper';
+import { createValidatedHandler, validatePathInUserData } from './ipc-handler-wrapper';
 import { EXTENSION_MIME_TYPES } from './shared-with-frontend/mime-type-mapping.const';
 
 interface ClipboardImageMeta {
@@ -49,6 +49,11 @@ const getMimeFromExt = (ext: string): string => {
 const findImageFile = (basePath: string, imageId: string): string | null => {
   for (const ext of SUPPORTED_IMAGE_EXTENSIONS) {
     const filePath = path.join(basePath, `${imageId}${ext}`);
+    // basePath is validated by the wrapper, but imageId is untrusted and can
+    // contain `../`, so re-check the effective joined path stays in userData.
+    if (!validatePathInUserData(filePath)) {
+      continue;
+    }
     if (fs.existsSync(filePath)) {
       return filePath;
     }
@@ -72,9 +77,15 @@ export const initClipboardImageHandlers = (): void => {
         base64Data: string;
         mimeType: string;
       }) => {
+        const filePath = path.join(basePath, fileName);
+        // basePath is validated by the wrapper, but fileName is untrusted and
+        // can contain `../`, so re-check the effective joined path.
+        if (!validatePathInUserData(filePath)) {
+          throw new Error('Invalid file path');
+        }
+
         ensureDir(basePath);
 
-        const filePath = path.join(basePath, fileName);
         const buffer = Buffer.from(base64Data, 'base64');
 
         await fsPromises.writeFile(filePath, new Uint8Array(buffer));

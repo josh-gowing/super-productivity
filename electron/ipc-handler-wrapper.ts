@@ -2,13 +2,21 @@ import { app } from 'electron';
 import * as path from 'path';
 
 /**
- * Validates if the given path is within the userData directory.
+ * Validates that the given path resolves to the userData directory or a
+ * descendant of it. Treats the argument as untrusted IPC input.
+ *
+ * Boundary-aware: a bare `startsWith(userData)` would also accept a sibling
+ * directory like `${userData}-evil`, so we require an exact match or a path
+ * separator boundary. `path.resolve` already collapses `..` segments, so
+ * traversal out of userData resolves to a non-prefixed path and is rejected.
  */
-export const validatePathInUserData = (basePath: string): boolean => {
-  const userDataPath = app.getPath('userData');
-  const resolvedBasePath = path.resolve(basePath);
-  const resolvedUserDataPath = path.resolve(userDataPath);
-  return resolvedBasePath.startsWith(resolvedUserDataPath);
+export const validatePathInUserData = (targetPath: unknown): boolean => {
+  if (typeof targetPath !== 'string' || targetPath.length === 0) {
+    return false;
+  }
+  const userDataPath = path.resolve(app.getPath('userData'));
+  const resolved = path.resolve(targetPath);
+  return resolved === userDataPath || resolved.startsWith(userDataPath + path.sep);
 };
 
 /**
