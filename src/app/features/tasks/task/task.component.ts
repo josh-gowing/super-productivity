@@ -69,6 +69,7 @@ import { DRAG_DELAY_FOR_TOUCH } from '../../../app.constants';
 import { KeyboardConfig } from '../../config/keyboard-config.model';
 import { DialogScheduleTaskComponent } from '../../planner/dialog-schedule-task/dialog-schedule-task.component';
 import { PlannerActions } from '../../planner/store/planner.actions';
+import { PlannerService } from '../../planner/planner.service';
 import { DialogDeadlineComponent } from '../dialog-deadline/dialog-deadline.component';
 import { isDeadlineOverdue as isDeadlineOverdueFn } from '../util/is-deadline-overdue';
 import { isDeadlineApproaching as isDeadlineApproachingFn } from '../util/is-deadline-approaching';
@@ -84,6 +85,7 @@ import { TaskListComponent } from '../task-list/task-list.component';
 import { MsToStringPipe } from '../../../ui/duration/ms-to-string.pipe';
 import { ShortPlannedAtPipe } from '../../../ui/pipes/short-planned-at.pipe';
 import { LocalDateStrPipe } from '../../../ui/pipes/local-date-str.pipe';
+import { LocaleDatePipe } from '../../../ui/pipes/locale-date.pipe';
 import { TranslatePipe, TranslateService } from '@ngx-translate/core';
 import { SubTaskTotalTimeSpentPipe } from '../pipes/sub-task-total-time-spent.pipe';
 import { TagListComponent } from '../../tag/tag-list/tag-list.component';
@@ -164,6 +166,8 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
   private readonly _menuTreeService = inject(MenuTreeService);
   private readonly _snackService = inject(SnackService);
   private readonly _translateService = inject(TranslateService);
+  private readonly _datePipe = inject(LocaleDatePipe);
+  private readonly _plannerService = inject(PlannerService);
 
   readonly workContextService = inject(WorkContextService);
   readonly layoutService = inject(LayoutService);
@@ -516,27 +520,27 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
       });
   }
 
-  scheduleTaskTomorrow(): void {
+  async scheduleTaskTomorrow(): Promise<void> {
     const tDate = this._dateService.getLogicalTodayDate();
     tDate.setDate(tDate.getDate() + 1);
-    this._scheduleForDay(tDate);
+    await this._scheduleForDay(tDate);
   }
 
-  scheduleTaskNextWeek(): void {
+  async scheduleTaskNextWeek(): Promise<void> {
     const tDate = this._dateService.getLogicalTodayDate();
     const dayOffset = getNextWeekDayOffset(this._dateAdapter, tDate);
     tDate.setDate(tDate.getDate() + dayOffset);
-    this._scheduleForDay(tDate);
+    await this._scheduleForDay(tDate);
   }
 
-  scheduleTaskNextMonth(): void {
+  async scheduleTaskNextMonth(): Promise<void> {
     const tDate = this._dateService.getLogicalTodayDate();
     tDate.setDate(1);
     tDate.setMonth(tDate.getMonth() + 1);
-    this._scheduleForDay(tDate);
+    await this._scheduleForDay(tDate);
   }
 
-  private _scheduleForDay(dayDate: Date): void {
+  private async _scheduleForDay(dayDate: Date): Promise<void> {
     const day = getDbDateStr(dayDate);
     const task = this.task();
     if (task.dueWithTime) {
@@ -554,7 +558,8 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
         translateParams: {
           date: this._dateService.isToday(newDate)
             ? this._translateService.instant(T.G.TODAY_TAG_TITLE)
-            : (day as string),
+            : (this._datePipe.transform(day, 'shortDate') as string),
+          extra: await this._plannerService.getSnackExtraStr(day),
         },
       });
     } else {

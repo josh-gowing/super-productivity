@@ -19,6 +19,8 @@ import { WorkContextService } from '../../work-context/work-context.service';
 import { TaskComponent } from './task.component';
 import { SnackService } from '../../../core/snack/snack.service';
 import { TranslateService } from '@ngx-translate/core';
+import { LocaleDatePipe } from '../../../ui/pipes/locale-date.pipe';
+import { PlannerService } from '../../planner/planner.service';
 
 describe('TaskComponent shortcut handling', () => {
   let fixture: import('@angular/core/testing').ComponentFixture<TaskComponent>;
@@ -124,6 +126,14 @@ describe('TaskComponent shortcut handling', () => {
         {
           provide: TranslateService,
           useValue: jasmine.createSpyObj('TranslateService', ['instant']),
+        },
+        {
+          provide: LocaleDatePipe,
+          useValue: jasmine.createSpyObj('LocaleDatePipe', ['transform']),
+        },
+        {
+          provide: PlannerService,
+          useValue: jasmine.createSpyObj('PlannerService', ['getSnackExtraStr']),
         },
         {
           provide: ProjectService,
@@ -365,14 +375,17 @@ describe('TaskComponent shortcut handling', () => {
   describe('Scheduling shortcuts', () => {
     let dateService: jasmine.SpyObj<DateService>;
     let dateAdapter: jasmine.SpyObj<DateAdapter<unknown>>;
+    let plannerService: jasmine.SpyObj<PlannerService>;
 
     beforeEach(() => {
       dateService = TestBed.inject(DateService) as jasmine.SpyObj<DateService>;
       dateAdapter = TestBed.inject(DateAdapter) as jasmine.SpyObj<DateAdapter<unknown>>;
+      plannerService = TestBed.inject(PlannerService) as jasmine.SpyObj<PlannerService>;
       // Mock "logical today" to 2026-06-01 (a Monday)
       dateService.getLogicalTodayDate.and.returnValue(new Date('2026-06-01T12:00:00'));
       dateAdapter.getDayOfWeek.and.callFake((d: any) => (d as Date).getDay());
       dateAdapter.getFirstDayOfWeek.and.returnValue(1); // Monday
+      plannerService.getSnackExtraStr.and.returnValue(Promise.resolve(''));
     });
 
     it('schedules for tomorrow', () => {
@@ -443,14 +456,14 @@ describe('TaskComponent shortcut handling', () => {
       );
     });
 
-    it('preserves time and reminder when scheduling a timed task for tomorrow', () => {
+    it('preserves time and reminder when scheduling a timed task for tomorrow', async () => {
       const timedTask = {
         ...component.task(),
         dueWithTime: new Date('2026-06-01T10:00:00').getTime(),
       };
       fixture.componentRef.setInput('task', timedTask);
 
-      component.scheduleTaskTomorrow();
+      await component.scheduleTaskTomorrow();
 
       // Should call taskService.scheduleTask instead of dispatching planTaskForDay
       // June 2nd at 10:00:00
