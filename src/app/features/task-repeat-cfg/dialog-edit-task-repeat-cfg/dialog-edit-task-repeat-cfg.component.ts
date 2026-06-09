@@ -648,18 +648,34 @@ export class DialogEditTaskRepeatCfgComponent {
   }
 
   private _processQuickSettingForDate<TCfg extends RepeatCfgWorking>(cfg: TCfg): TCfg {
+    // Completion-relative schedules must open in builder mode regardless of rrule
+    // presence or any matching preset: the schedule-type toggle ("from completion")
+    // only exists inside the RRULE builder, so a preset label would hide the one
+    // control that explains — and can change — how the cfg actually fires. Checked
+    // BEFORE the rrule branch on purpose: a no-rrule completion cfg (any pre-RRULE
+    // or imported cfg, since migration is lazy/save-only) whose quickSetting is a
+    // kept preset (DAILY / MONDAY_TO_FRIDAY, or any preset carrying a startDate)
+    // would otherwise fall through to `needsMigration === false`, open under its
+    // preset label with the toggle hidden, and then on ANY save run the preset
+    // branch that clears repeatFromCompletionDate — silently flipping the task
+    // from "repeat after completion" to "repeat from start date". Force builder
+    // mode (migrating to an rrule when absent) so the toggle is always visible and
+    // quickSetting === 'RRULE' skips that reset.
+    if (cfg.repeatFromCompletionDate) {
+      if (cfg.rrule) {
+        return cfg.quickSetting === 'RRULE' ? cfg : { ...cfg, quickSetting: 'RRULE' };
+      }
+      return {
+        ...cfg,
+        rrule: legacyTaskRepeatCfgToRRule(cfg as TaskRepeatCfg),
+        quickSetting: 'RRULE',
+      };
+    }
     // Presets now carry an rrule too (rrule presets), so an rrule alone no longer
     // means "builder mode". Keep the friendly preset label only while its rrule
     // still matches what that preset produces; a builder- / @+- / migration-built
     // or otherwise diverged rule opens the dedicated 'RRULE' builder.
     if (cfg.rrule) {
-      // Completion-relative schedules must open in builder mode regardless of
-      // any matching preset: the schedule-type toggle ("from completion") only
-      // exists inside the RRULE builder, so a preset label would hide the one
-      // control that explains — and can change — how the cfg actually fires.
-      if (cfg.repeatFromCompletionDate) {
-        return cfg.quickSetting === 'RRULE' ? cfg : { ...cfg, quickSetting: 'RRULE' };
-      }
       const qs = cfg.quickSetting;
       const isFaithfulPreset =
         !!qs &&

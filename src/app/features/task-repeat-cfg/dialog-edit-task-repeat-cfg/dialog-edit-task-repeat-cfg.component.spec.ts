@@ -894,6 +894,60 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       expect(fixture.componentInstance.repeatCfg().quickSetting).toBe('RRULE');
     });
 
+    it('opens a NO-rrule completion-relative cfg in builder mode (migrates to rrule)', async () => {
+      // Pre-RRULE / imported completion cfgs have no rrule and a kept preset
+      // label (DAILY here). They previously fell through `needsMigration === false`
+      // and opened under that label with the "from completion" toggle hidden.
+      // They must force builder mode so the toggle is visible.
+      const legacyCompletion: TaskRepeatCfg = {
+        ...DEFAULT_TASK_REPEAT_CFG,
+        id: 'legacy-completion',
+        title: 'Daily after done (legacy)',
+        quickSetting: 'DAILY',
+        repeatCycle: 'DAILY',
+        repeatEvery: 1,
+        repeatFromCompletionDate: true,
+        startDate: '2024-06-03',
+        rrule: undefined,
+      };
+      const fixture = await setupTestBed({ repeatCfg: legacyCompletion });
+      const cfg = fixture.componentInstance.repeatCfg();
+      expect(cfg.quickSetting).toBe('RRULE');
+      expect(cfg.rrule).toBeTruthy();
+      expect(cfg.repeatFromCompletionDate).toBe(true);
+    });
+
+    it('does NOT flip repeatFromCompletionDate to false when saving a migrated no-rrule completion cfg', async () => {
+      // The exact regression: opened under a preset label with the toggle hidden,
+      // a save would run the preset branch that resets the flag — silently
+      // changing "repeat after completion" to "repeat from start date". Forcing
+      // builder mode (quickSetting === 'RRULE') skips that reset.
+      const legacyCompletion: TaskRepeatCfg = {
+        ...DEFAULT_TASK_REPEAT_CFG,
+        id: 'legacy-completion-2',
+        title: 'Daily after done (legacy)',
+        quickSetting: 'DAILY',
+        repeatCycle: 'DAILY',
+        repeatEvery: 1,
+        repeatFromCompletionDate: true,
+        startDate: '2024-06-03',
+        rrule: undefined,
+      };
+      const fixture = await setupTestBed({ repeatCfg: legacyCompletion });
+      const component = fixture.componentInstance;
+      // Touch the schedule so a non-empty diff exists (else the empty-diff guard
+      // closes without dispatching).
+      component.repeatCfg.update(
+        (c) => ({ ...c, rrule: 'FREQ=DAILY;INTERVAL=2' }) as any,
+      );
+      component.save();
+      expect(mockTaskRepeatCfgService.updateTaskRepeatCfg).toHaveBeenCalled();
+      const changes = mockTaskRepeatCfgService.updateTaskRepeatCfg.calls.mostRecent()
+        .args[1] as any;
+      // Flag was already true and stays true → absent from the diff, never `false`.
+      expect(changes.repeatFromCompletionDate).toBeUndefined();
+    });
+
     it('clears repeatFromCompletionDate when switching a completion-relative cfg to a preset', async () => {
       // The "from completion" toggle lives only in the RRULE builder, so picking
       // a preset (which hides it) must clear the flag — otherwise it persists
