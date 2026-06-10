@@ -22,6 +22,7 @@ import { TaskCopy } from '../../tasks/task.model';
 import { TranslateService } from '@ngx-translate/core';
 import { T } from '../../../t.const';
 import { SnackService } from '../../../core/snack/snack.service';
+import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
 
 describe('DialogEditTaskRepeatCfgComponent', () => {
   let mockDialogRef: jasmine.SpyObj<MatDialogRef<DialogEditTaskRepeatCfgComponent>>;
@@ -743,6 +744,33 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       expect(savedCfg.startDate).toBe('2024-07-15');
     });
 
+    it('save() rejects a never-firing raw-override rule fast (pre-screen, no probe walk)', async () => {
+      const fixture = await setupTestBed({ task: mockTask });
+      const component = fixture.componentInstance;
+      const snack = TestBed.inject(SnackService);
+      const openSpy = spyOn(snack, 'open').and.callThrough();
+      component.repeatCfg.update(
+        (c) =>
+          ({
+            ...c,
+            quickSetting: 'RRULE',
+            rrule: 'FREQ=DAILY;BYWEEKNO=53;BYMONTH=2',
+          }) as any,
+      );
+      const start = performance.now();
+      component.save();
+      const elapsed = performance.now() - start;
+      // isRRuleValid's _canNeverFire pre-screen must reject before any probe:
+      // without it, this contradiction walks rrule.js to its iteration ceiling
+      // (~7-10s main-thread freeze) on the save click.
+      expect(openSpy.calls.mostRecent().args[0]).toEqual(
+        jasmine.objectContaining({ type: 'ERROR', msg: T.F.TASK_REPEAT.F.RRULE_INVALID }),
+      );
+      expect(mockTaskRepeatCfgService.addTaskRepeatCfgToTask).not.toHaveBeenCalled();
+      // Generous bound — only meant to catch a regression back to the probe walk.
+      expect(elapsed).toBeLessThan(1000);
+    });
+
     it('save() re-derives the legacy weekday fallback when startDate changed after the last builder emit', async () => {
       const fixture = await setupTestBed({ task: mockTask });
       const component = fixture.componentInstance;
@@ -892,6 +920,97 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       };
       const fixture = await setupTestBed({ repeatCfg: faithful });
       expect(fixture.componentInstance.repeatCfg().quickSetting).toBe('RRULE');
+    });
+
+    it('offers the RRULE quick-setting option after the ASYNC load migrates a cfg into builder mode (flag off)', fakeAsync(async () => {
+      // includeRRule must be read live, not captured at construction: on the
+      // task/repeatCfgId path the cfg arrives async, AFTER _initializeFormConfig
+      // ran — a snapshot taken then would leave the select holding 'RRULE' with
+      // no matching option on a flag-off device.
+      setRRuleEngineEnabled(false);
+      const taskWithRepeatCfg = {
+        ...mockTask,
+        repeatCfgId: 'repeat-cfg-123',
+      } as TaskCopy;
+      const repeatCfgSubject = new Subject<TaskRepeatCfg>();
+      const fixture = await setupTestBed({ task: taskWithRepeatCfg }, repeatCfgSubject);
+      const component = fixture.componentInstance;
+      fixture.detectChanges();
+      tick();
+
+      const field = component
+        .essentialFormFields()
+        .find((f) => f.key === 'quickSetting')!;
+      const evalOptions = field.expressionProperties![
+        'templateOptions.options'
+      ] as unknown as (model: Record<string, unknown>) => { value: string }[];
+
+      // Flag off, nothing loaded yet → no advanced option.
+      expect(evalOptions({}).some((o) => o.value === 'RRULE')).toBe(false);
+
+      // Async load delivers a completion cfg that migrates to builder mode.
+      repeatCfgSubject.next({
+        ...mockRepeatCfg,
+        repeatFromCompletionDate: true,
+        rrule: 'FREQ=DAILY',
+      } as TaskRepeatCfg);
+      tick();
+      expect(component.repeatCfg().quickSetting).toBe('RRULE');
+      expect(evalOptions({}).some((o) => o.value === 'RRULE')).toBe(true);
+    }));
+
+    it('opens a NO-rrule completion-relative cfg in builder mode (migrates to rrule)', async () => {
+      // Pre-RRULE / imported completion cfgs have no rrule and a kept preset
+      // label (DAILY here). They previously fell through `needsMigration === false`
+      // and opened under that label with the "from completion" toggle hidden.
+      // They must force builder mode so the toggle is visible.
+      const legacyCompletion: TaskRepeatCfg = {
+        ...DEFAULT_TASK_REPEAT_CFG,
+        id: 'legacy-completion',
+        title: 'Daily after done (legacy)',
+        quickSetting: 'DAILY',
+        repeatCycle: 'DAILY',
+        repeatEvery: 1,
+        repeatFromCompletionDate: true,
+        startDate: '2024-06-03',
+        rrule: undefined,
+      };
+      const fixture = await setupTestBed({ repeatCfg: legacyCompletion });
+      const cfg = fixture.componentInstance.repeatCfg();
+      expect(cfg.quickSetting).toBe('RRULE');
+      expect(cfg.rrule).toBeTruthy();
+      expect(cfg.repeatFromCompletionDate).toBe(true);
+    });
+
+    it('does NOT flip repeatFromCompletionDate to false when saving a migrated no-rrule completion cfg', async () => {
+      // The exact regression: opened under a preset label with the toggle hidden,
+      // a save would run the preset branch that resets the flag — silently
+      // changing "repeat after completion" to "repeat from start date". Forcing
+      // builder mode (quickSetting === 'RRULE') skips that reset.
+      const legacyCompletion: TaskRepeatCfg = {
+        ...DEFAULT_TASK_REPEAT_CFG,
+        id: 'legacy-completion-2',
+        title: 'Daily after done (legacy)',
+        quickSetting: 'DAILY',
+        repeatCycle: 'DAILY',
+        repeatEvery: 1,
+        repeatFromCompletionDate: true,
+        startDate: '2024-06-03',
+        rrule: undefined,
+      };
+      const fixture = await setupTestBed({ repeatCfg: legacyCompletion });
+      const component = fixture.componentInstance;
+      // Touch the schedule so a non-empty diff exists (else the empty-diff guard
+      // closes without dispatching).
+      component.repeatCfg.update(
+        (c) => ({ ...c, rrule: 'FREQ=DAILY;INTERVAL=2' }) as any,
+      );
+      component.save();
+      expect(mockTaskRepeatCfgService.updateTaskRepeatCfg).toHaveBeenCalled();
+      const changes = mockTaskRepeatCfgService.updateTaskRepeatCfg.calls.mostRecent()
+        .args[1] as any;
+      // Flag was already true and stays true → absent from the diff, never `false`.
+      expect(changes.repeatFromCompletionDate).toBeUndefined();
     });
 
     it('clears repeatFromCompletionDate when switching a completion-relative cfg to a preset', async () => {

@@ -2,6 +2,7 @@ import { getNextRepeatOccurrence } from './get-next-repeat-occurrence.util';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
 import { getDbDateStr } from '../../../util/get-db-date-str';
 import { Log } from '../../../core/log';
+import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
 
 const FAKE_MONDAY_THE_10TH = new Date(2022, 0, 10).getTime();
 
@@ -61,6 +62,14 @@ const testCase = (
 };
 
 describe('getNextRepeatOccurrence()', () => {
+  // A couple of cases here route a valid `rrule` through the engine, which is
+  // gated behind a local per-device flag (off by default); enable it for the
+  // suite. Legacy cases (no/!valid rrule) are unaffected by the flag. The hooks
+  // live inside the describe — a top-level hook would attach to Jasmine's root
+  // suite and force the flag on around every spec in the bundle.
+  beforeEach(() => setRRuleEngineEnabled(true));
+  afterEach(() => setRRuleEngineEnabled(false));
+
   describe('Input validation', () => {
     it('should use fallback date (1970-01-01) when startDate is not defined', () => {
       const cfg = dummyRepeatable('ID1', {

@@ -60,6 +60,7 @@ import { Log } from '../../../core/log';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { DialogConfirmComponent } from '../../../ui/dialog-confirm/dialog-confirm.component';
 import { GlobalConfigService } from '../../config/global-config.service';
+import { RRuleFeatureFlagService } from '../../config/rrule-feature-flag.service';
 import { DEFAULT_GLOBAL_CONFIG } from '../../config/default-global-config.const';
 import { DateTimeFormatService } from 'src/app/core/date-time-format/date-time-format.service';
 import { RepeatTaskHeatmapComponent } from '../repeat-task-heatmap/repeat-task-heatmap.component';
@@ -105,6 +106,7 @@ type RepeatCfgWorking = Omit<TaskRepeatCfgCopy, 'id'> | TaskRepeatCfg;
 })
 export class DialogEditTaskRepeatCfgComponent {
   private _globalConfigService = inject(GlobalConfigService);
+  private _rruleFlag = inject(RRuleFeatureFlagService);
   private _tagService = inject(TagService);
   private _taskRepeatCfgService = inject(TaskRepeatCfgService);
   private _matDialog = inject(MatDialog);
@@ -283,8 +285,17 @@ export class DialogEditTaskRepeatCfgComponent {
     const _locale = this._dateTimeFormatService.currentLocale();
     const translateService = this._translateService;
 
+    // Offer the advanced 'RRULE' option only when the engine flag is on — but
+    // keep it for a config already in RRULE mode so an existing rule stays
+    // editable (the builder is its only editor) even on a flag-off device.
+    // Read LIVE (not captured once): on the async edit path the cfg arrives —
+    // and is migrated to quickSetting 'RRULE' — only after this method ran, so
+    // a snapshot taken here would leave the select with a value that has no
+    // matching option on a flag-off device.
+    const includeRRule = (): boolean =>
+      this._rruleFlag.isEnabled() || this.repeatCfg().quickSetting === 'RRULE';
     const buildOptions = (refDate: Date): { value: string; label: string }[] =>
-      buildRepeatQuickSettingOptions(refDate, _locale, translateService);
+      buildRepeatQuickSettingOptions(refDate, _locale, translateService, includeRRule());
 
     const formConfig = TASK_REPEAT_CFG_ESSENTIAL_FORM_CFG.map((field) => ({
       ...field,
@@ -333,15 +344,19 @@ export class DialogEditTaskRepeatCfgComponent {
 
     // Memoize to avoid rebuilding options on every formly change cycle
     let lastStartDate: string | undefined;
+    let lastIncludeRRule: boolean | undefined;
     let cachedOptions: { value: string; label: string }[];
 
-    // Update options reactively when startDate changes
+    // Update options reactively when startDate changes — or when the async cfg
+    // load flips a flag-off device into RRULE mode (see includeRRule above).
     quickSettingField.expressionProperties = {
       ...quickSettingField.expressionProperties,
       ['templateOptions.options']: (model: Record<string, unknown>) => {
         const sd = model['startDate'] as string | undefined;
-        if (sd !== lastStartDate || !cachedOptions) {
+        const inc = includeRRule();
+        if (sd !== lastStartDate || inc !== lastIncludeRRule || !cachedOptions) {
           lastStartDate = sd;
+          lastIncludeRRule = inc;
           const refDate = sd ? dateStrToUtcDate(sd) : this._getReferenceDate();
           cachedOptions = buildOptions(refDate);
         }
@@ -648,18 +663,34 @@ export class DialogEditTaskRepeatCfgComponent {
   }
 
   private _processQuickSettingForDate<TCfg extends RepeatCfgWorking>(cfg: TCfg): TCfg {
+    // Completion-relative schedules must open in builder mode regardless of rrule
+    // presence or any matching preset: the schedule-type toggle ("from completion")
+    // only exists inside the RRULE builder, so a preset label would hide the one
+    // control that explains — and can change — how the cfg actually fires. Checked
+    // BEFORE the rrule branch on purpose: a no-rrule completion cfg (any pre-RRULE
+    // or imported cfg, since migration is lazy/save-only) whose quickSetting is a
+    // kept preset (DAILY / MONDAY_TO_FRIDAY, or any preset carrying a startDate)
+    // would otherwise fall through to `needsMigration === false`, open under its
+    // preset label with the toggle hidden, and then on ANY save run the preset
+    // branch that clears repeatFromCompletionDate — silently flipping the task
+    // from "repeat after completion" to "repeat from start date". Force builder
+    // mode (migrating to an rrule when absent) so the toggle is always visible and
+    // quickSetting === 'RRULE' skips that reset.
+    if (cfg.repeatFromCompletionDate) {
+      if (cfg.rrule) {
+        return cfg.quickSetting === 'RRULE' ? cfg : { ...cfg, quickSetting: 'RRULE' };
+      }
+      return {
+        ...cfg,
+        rrule: legacyTaskRepeatCfgToRRule(cfg as TaskRepeatCfg),
+        quickSetting: 'RRULE',
+      };
+    }
     // Presets now carry an rrule too (rrule presets), so an rrule alone no longer
     // means "builder mode". Keep the friendly preset label only while its rrule
     // still matches what that preset produces; a builder- / @+- / migration-built
     // or otherwise diverged rule opens the dedicated 'RRULE' builder.
     if (cfg.rrule) {
-      // Completion-relative schedules must open in builder mode regardless of
-      // any matching preset: the schedule-type toggle ("from completion") only
-      // exists inside the RRULE builder, so a preset label would hide the one
-      // control that explains — and can change — how the cfg actually fires.
-      if (cfg.repeatFromCompletionDate) {
-        return cfg.quickSetting === 'RRULE' ? cfg : { ...cfg, quickSetting: 'RRULE' };
-      }
       const qs = cfg.quickSetting;
       const isFaithfulPreset =
         !!qs &&

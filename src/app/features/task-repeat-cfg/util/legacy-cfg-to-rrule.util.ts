@@ -42,14 +42,23 @@ const WEEKLY_FIELDS: { field: keyof TaskRepeatCfg; code: string }[] = [
   { field: 'sunday', code: 'SU' },
 ];
 
-/** Parse 'YYYY-MM-DD' into 1-based month, day, and UTC day-of-week (today as fallback). */
+/**
+ * Parse 'YYYY-MM-DD' into 1-based month, day, and UTC day-of-week.
+ *
+ * Fallback for a missing/invalid startDate is the epoch (1970-01-01 = month 1,
+ * day 1, Thursday), NOT today. Two reasons: (1) the legacy occurrence engine
+ * treats a start-less MONTHLY/YEARLY cfg as day-1, so encoding today's
+ * day-of-month here would silently change the schedule on migration; (2)
+ * `new Date()` would make the produced rrule depend on WHEN the dialog is opened,
+ * so two devices migrating the same legacy cfg on different days would diverge.
+ * A fixed anchor keeps the conversion deterministic. UI paths always set
+ * startDate, so the fallback is only a safety net.
+ */
 const _parseStart = (startDate?: string): { month: number; day: number; dow: number } => {
-  if (startDate && /^\d{4}-\d{1,2}-\d{1,2}/.test(startDate)) {
-    const [y, m, d] = startDate.split('-').map(Number);
-    return { month: m, day: d, dow: new Date(Date.UTC(y, m - 1, d)).getUTCDay() };
-  }
-  const now = new Date();
-  return { month: now.getMonth() + 1, day: now.getDate(), dow: now.getDay() };
+  const ds =
+    startDate && /^\d{4}-\d{1,2}-\d{1,2}/.test(startDate) ? startDate : '1970-01-01';
+  const [y, m, d] = ds.split('-').map(Number);
+  return { month: m, day: d, dow: new Date(Date.UTC(y, m - 1, d)).getUTCDay() };
 };
 
 /**

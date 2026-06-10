@@ -253,6 +253,54 @@ describe('rrule-occurrence engine — complex variants × settings', () => {
     });
   });
 
+  describe('isRRuleValid never-firing rules', () => {
+    // A parseable rule whose pattern matches no real date (BYMONTH=13, Feb-30)
+    // used to make rrule.js's .after() walk day-by-day to its year-275760 ceiling
+    // — a multi-second main-thread freeze that ALSO returned `true`, so the engine
+    // deferred to a rule that silently never fires (bypassing the legacy
+    // fallback). `_canNeverFire` now rejects these contradiction classes in O(1)
+    // before any probe; a never-firing rule it doesn't recognise still resolves
+    // to false via the (unbounded, memoised) `.after()` probe — after a one-time
+    // multi-second walk, which is why extending the pre-screen matters.
+    it('rejects a never-firing rule instead of treating it as valid', () => {
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=13')).toBe(false);
+      expect(isRRuleValid('FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30')).toBe(false);
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=13;BYMONTHDAY=2')).toBe(false);
+    });
+
+    it('pre-screens impossible BYMONTH × BYYEARDAY / BYWEEKNO combos in O(1)', () => {
+      // These pass the simple range checks (every value individually valid) but
+      // can never intersect: year-day 200 is July/August, week 53 is around the
+      // Dec/Jan boundary — neither can fall in February. Without the pre-screen
+      // each costs a one-time ~5-7s probe walk on first sight (e.g. a save click).
+      const start = performance.now();
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=2;BYYEARDAY=200')).toBe(false);
+      expect(isRRuleValid('FREQ=DAILY;BYWEEKNO=53;BYMONTH=2')).toBe(false);
+      expect(isRRuleValid('FREQ=DAILY;BYMONTH=6;BYWEEKNO=1,52')).toBe(false);
+      // Generous bound — only meant to catch a regression back to the probe walk.
+      expect(performance.now() - start).toBeLessThan(1000);
+    });
+
+    it('keeps satisfiable BYMONTH × BYYEARDAY / BYWEEKNO combos valid (no false positives)', () => {
+      [
+        'FREQ=DAILY;BYMONTH=7;BYYEARDAY=200', // yearday 200 IS in July
+        'FREQ=DAILY;BYMONTH=12;BYWEEKNO=1', // ISO week 1 can include late December
+        'FREQ=DAILY;BYMONTH=1;BYWEEKNO=53', // week 53 can spill into January
+        'FREQ=DAILY;BYMONTH=2;BYYEARDAY=-320', // negative year-days skip the check
+        'FREQ=DAILY;BYMONTH=2;BYWEEKNO=-46', // negative week numbers skip the check
+      ].forEach((r) => expect(isRRuleValid(r)).withContext(r).toBe(true));
+    });
+
+    it('keeps a sound pattern with a past UNTIL / COUNT valid', () => {
+      // UNTIL/COUNT are anchor-relative end conditions stripped for the validity
+      // probe: the PATTERN is sound and the engine applies the real start/end per
+      // cfg. Rejecting these would resurrect a finished rule forever via the
+      // UNTIL-less legacy fallback.
+      expect(isRRuleValid('FREQ=DAILY;UNTIL=20190601T000000Z')).toBe(true);
+      expect(isRRuleValid('FREQ=WEEKLY;BYDAY=MO;COUNT=3')).toBe(true);
+    });
+  });
+
   describe('fail-soft', () => {
     it('a malformed rule yields [] / null, never throws', () => {
       expect(

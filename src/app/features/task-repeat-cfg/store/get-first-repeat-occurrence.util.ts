@@ -6,6 +6,7 @@ import {
 } from './get-nth-weekday-of-month.util';
 import { getFirstRRuleOccurrence, isRRuleValid } from './rrule-occurrence.util';
 import { taskRepeatCfgToRRuleInput } from './task-repeat-cfg-to-rrule-input.util';
+import { isRRuleEngineEnabled } from '../../config/rrule-engine-flag';
 
 /**
  * Returns the first valid repeat occurrence on or after `cfg.startDate`.
@@ -31,9 +32,15 @@ export const getFirstRepeatOccurrence = (taskRepeatCfg: TaskRepeatCfg): Date | n
     return null;
   }
 
-  // Only defer to the engine for a parseable rule; a malformed raw-override
-  // falls through to the legacy weekday/cycle calc below.
-  if (taskRepeatCfg.rrule && isRRuleValid(taskRepeatCfg.rrule)) {
+  // Defer to the engine only when enabled (local per-device flag, off by
+  // default) AND the rule parses; otherwise fall through to the legacy
+  // weekday/cycle calc below. `rrule` is checked first so a config without one
+  // never touches the flag.
+  if (
+    taskRepeatCfg.rrule &&
+    isRRuleEngineEnabled() &&
+    isRRuleValid(taskRepeatCfg.rrule)
+  ) {
     return getFirstRRuleOccurrence(taskRepeatCfgToRRuleInput(taskRepeatCfg));
   }
 

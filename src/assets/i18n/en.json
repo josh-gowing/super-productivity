@@ -2441,6 +2441,11 @@
       "IS_ALWAYS_SHOW": "Always show task widget (even when main window is visible)",
       "OPACITY": "Task widget opacity"
     },
+    "RRULE_ENGINE": {
+      "TITLE": "Advanced recurrence (experimental)",
+      "HELP": "<div><p>Enables the new RFC 5545 (RRULE) recurrence engine for repeating tasks — end conditions, multiple days per month and other custom rules. This is experimental and applies to <strong>this device only</strong>; it is not synced. Leave it off unless you are testing the feature, and reload the app after changing it.</p></div>",
+      "IS_ENABLED": "Enable advanced recurrence engine (this device only)"
+    },
     "IDLE": {
       "HELP": "<div><p>When idle time handling is enabled, a dialog will open after a specified amount of time to check if - and on which - task you want to track your time when you have been idle.</p></div>",
       "IS_ENABLE_IDLE_TIME_TRACKING": "Enable idle time handling",

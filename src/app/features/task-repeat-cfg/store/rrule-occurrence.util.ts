@@ -1,6 +1,6 @@
 import { RRule, RRuleSet } from 'rrule';
 import { Log } from '../../../core/log';
-import { safeParseRRuleOptions } from '../util/rrule-parse.util';
+import { RRuleParsedOptions, safeParseRRuleOptions } from '../util/rrule-parse.util';
 
 /**
  * Day-granular, DST-safe occurrence engine for RFC 5545 RRULE strings.
@@ -83,9 +83,141 @@ const _buildRuleSet = (input: RRuleOccurrenceInput): RRuleSet | null => {
 // Rule strings are few and immutable, so a tiny memo makes repeat calls free.
 const _validityCache = new Map<string, boolean>();
 
+/** Max day-of-month per month (Feb leap-permissive at 29). */
+const _MONTH_MAX_DAY = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** Cumulative days at each month's end, non-leap / leap. */
+const _CUM_DAYS = [31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365];
+const _CUM_DAYS_LEAP = [31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366];
+
+/** Months (1-12) a positive year-day can fall in, across leap AND non-leap
+ *  years (the boundary shifts by one day after February). Out-of-year days
+ *  (<1, >366) wrap to the adjacent year's Dec/Jan — used for week spans that
+ *  straddle a year boundary. */
+const _monthsOfYearDay = (yearDay: number): number[] => {
+  if (yearDay < 1) return [12];
+  if (yearDay > 366) return [1];
+  const months = new Set<number>();
+  for (const cum of [_CUM_DAYS, _CUM_DAYS_LEAP]) {
+    const m = cum.findIndex((c) => yearDay <= c);
+    if (m !== -1) months.add(m + 1);
+  }
+  return [...months];
+};
+
+/** Months an ISO-numbered week `n` (positive) can overlap, across all years,
+ *  leap shifts, and WKST choices. Week n's Monday sits at year-day
+ *  `(n-1)*7 + 4 - wd(Jan4)` with `wd ∈ [1,7]`, the week spans 7 days, and a
+ *  non-Monday WKST shifts boundaries by at most ±6 days — so year-days
+ *  `[(n-1)*7 - 9, (n-1)*7 + 16]` are a strict superset of every day week `n`
+ *  can contain. Superset = conservative: it can only ADD possible months,
+ *  never miss one, so the never-fire flag below stays free of false positives. */
+const _monthsOfWeekNo = (weekNo: number): Set<number> => {
+  const months = new Set<number>();
+  const base = (weekNo - 1) * 7;
+  for (let d = base - 9; d <= base + 16; d++) {
+    for (const m of _monthsOfYearDay(d)) months.add(m);
+  }
+  return months;
+};
+
+const _asArray = (v: number | number[] | null | undefined): number[] =>
+  v == null ? [] : Array.isArray(v) ? v : [v];
+
+/** True only when a non-empty constraint has EVERY value outside the RFC range
+ *  (`[lo,hi]`, plus `[-hi,-lo]` when `allowNeg`) — i.e. it can match nothing. An
+ *  empty constraint (no values) is no constraint, so never "all out of range". */
+const _allOutOfRange = (
+  vals: number[],
+  lo: number,
+  hi: number,
+  allowNeg = false,
+): boolean => {
+  if (!vals.length) return false;
+  const inRange = (n: number): boolean =>
+    (n >= lo && n <= hi) || (allowNeg && n <= -lo && n >= -hi);
+  return vals.every((n) => !inRange(n));
+};
+
 /**
- * True when `rrule` is a parseable RFC 5545 recurrence with a FREQ. Cheap,
- * throws nothing, used as a guard everywhere.
+ * Detect a parseable rule whose BY-constraints are contradictory and can produce
+ * NO occurrence — the case rrule.js "handles" by walking day-by-day to its
+ * year-275760 ceiling (a multi-second main-thread freeze) before yielding
+ * nothing. We catch the realistic vectors (out-of-range BY values like
+ * `BYMONTH=13`; impossible `BYMONTH` × `BYMONTHDAY` / `BYYEARDAY` / `BYWEEKNO`
+ * combos like Feb-30, Feb × yearday 200, Feb × week 53) up front so
+ * isRRuleValid can reject without iterating.
+ *
+ * Conservative by construction: it flags a rule ONLY when an entire constraint
+ * is unsatisfiable, so a sound rule is never mis-flagged (a false positive would
+ * wrongly drop a good cfg to the legacy fallback and reschedule it). Exotic
+ * never-firing rules it doesn't recognise (e.g. a `BYSETPOS` larger than its
+ * occurrence set) still fall through to the probe below, which now returns false
+ * for them too — just after a one-time (memoised) walk.
+ */
+const _canNeverFire = (o: RRuleParsedOptions): boolean => {
+  const byMonth = _asArray(o.bymonth);
+  const byMonthDay = _asArray(o.bymonthday);
+  if (
+    _allOutOfRange(byMonth, 1, 12) ||
+    _allOutOfRange(byMonthDay, 1, 31, true) ||
+    _allOutOfRange(_asArray(o.byyearday), 1, 366, true) ||
+    _allOutOfRange(_asArray(o.byweekno), 1, 53, true) ||
+    _allOutOfRange(_asArray(o.bysetpos), 1, 366, true)
+  ) {
+    return true;
+  }
+  // Impossible month/day intersection, e.g. BYMONTH=2;BYMONTHDAY=30. Only
+  // positive month-days are positional from the start; a negative day (-1 =
+  // last) always exists, so a rule with ANY negative day can fire — skip the
+  // combo check then. Flag only when no (valid-month, positive-day) pair fits.
+  const validMonths = byMonth.filter((m) => m >= 1 && m <= 12);
+  const posDays = byMonthDay.filter((d) => d > 0);
+  const hasNegDay = byMonthDay.some((d) => d < 0);
+  if (byMonth.length && posDays.length && !hasNegDay) {
+    const anyPairFits = validMonths.some((m) =>
+      posDays.some((d) => d <= _MONTH_MAX_DAY[m - 1]),
+    );
+    if (!anyPairFits) return true;
+  }
+  // Impossible month × year-day / week-number intersections, e.g.
+  // BYMONTH=2;BYYEARDAY=200 or BYMONTH=2;BYWEEKNO=53. Same shape as above:
+  // negative values count from the year's end (year-length-dependent), so any
+  // negative skips the check; flag only when NO value can touch a valid month
+  // under either leap layout.
+  const posYearDays = _asArray(o.byyearday).filter((d) => d > 0);
+  if (byMonth.length && posYearDays.length && !_asArray(o.byyearday).some((d) => d < 0)) {
+    const anyDayFits = posYearDays.some((d) =>
+      _monthsOfYearDay(d).some((m) => validMonths.includes(m)),
+    );
+    if (!anyDayFits) return true;
+  }
+  const posWeekNos = _asArray(o.byweekno).filter((n) => n > 0);
+  if (byMonth.length && posWeekNos.length && !_asArray(o.byweekno).some((n) => n < 0)) {
+    const anyWeekFits = posWeekNos.some((n) => {
+      const months = _monthsOfWeekNo(n);
+      return validMonths.some((m) => months.has(m));
+    });
+    if (!anyWeekFits) return true;
+  }
+  return false;
+};
+
+/**
+ * True when `rrule` is a parseable RFC 5545 recurrence that actually fires.
+ * Cheap, throws nothing, used as a routing guard everywhere.
+ *
+ * Two correctness points beyond "does it parse":
+ *  1. It must FIRE. A rule that yields no occurrence (contradictory BY parts) is
+ *     invalid → the engine falls back to legacy repeatCycle instead of deferring
+ *     to a rule that silently never creates a task. `_canNeverFire` rejects the
+ *     realistic such rules without iterating (avoiding rrule.js's year-275760
+ *     freeze); the `.after()` non-null check covers the rest.
+ *  2. UNTIL/COUNT are stripped for the probe. They are anchor-relative end
+ *     conditions; a rule whose window already closed relative to the fixed probe
+ *     anchor still has a sound PATTERN, and the engine applies the real
+ *     start/UNTIL/COUNT per cfg. Keeping them here would mark such a rule invalid
+ *     and resurrect it forever via the UNTIL-less legacy fallback.
  */
 export const isRRuleValid = (rrule: string | undefined): rrule is string => {
   if (!rrule || !rrule.trim()) return false;
@@ -94,14 +226,20 @@ export const isRRuleValid = (rrule: string | undefined): rrule is string => {
 
   let valid = false;
   const options = safeParseRRuleOptions(rrule);
-  if (options) {
+  if (options && !_canNeverFire(options)) {
     try {
-      // Construct + probe once so deeper invalids (bad BYDAY etc.) surface here.
-      new RRule({ ...options, dtstart: noonUtc('2020-01-01') }).after(
-        _midnightUtc('2019-01-01'),
-        false,
-      );
-      valid = true;
+      // First occurrence on/after the probe anchor. For a firing rule this
+      // returns immediately; the construct + probe also surfaces deeper invalids
+      // (bad BYDAY etc.) that parsing alone misses. `valid` requires a real hit,
+      // so a never-firing rule that slipped past `_canNeverFire` resolves to
+      // false (after a one-time, memoised walk) rather than a spurious true.
+      const occ = new RRule({
+        ...options,
+        dtstart: noonUtc('2020-01-01'),
+        until: null,
+        count: null,
+      }).after(_midnightUtc('2019-01-01'), false);
+      valid = occ != null;
     } catch {
       // construct/probe failed → invalid
     }

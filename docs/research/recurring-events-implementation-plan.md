@@ -1,5 +1,14 @@
 # Recurring Events Implementation Plan
 
+> **Epic roadmap & branch model:** [`rrule-epic-roadmap.md`](rrule-epic-roadmap.md) —
+> phase list, `feat/rrule-epic-pN-…` branch-per-phase scheme, issue wiring.
+>
+> **Review watchlist:** the recurring sync/forward-compat/legacy-fallback risks that
+> bubble up every phase are catalogued in
+> [`rrule-epic-review-watchlist.md`](rrule-epic-review-watchlist.md) (distilled from the
+> PR #7948 review thread). Check its "Always-verify" list on any PR touching synced
+> repeat state.
+
 > **Revision note (verified against code 2026-06-02).** Rewritten after two rounds
 > of multi-axis review against the actual codebase. The original draft was built on
 > three false premises and several sync-unsafe steps; a later "raw RRULE string as
