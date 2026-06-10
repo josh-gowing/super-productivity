@@ -288,10 +288,14 @@ export class DialogEditTaskRepeatCfgComponent {
     // Offer the advanced 'RRULE' option only when the engine flag is on — but
     // keep it for a config already in RRULE mode so an existing rule stays
     // editable (the builder is its only editor) even on a flag-off device.
-    const includeRRule =
+    // Read LIVE (not captured once): on the async edit path the cfg arrives —
+    // and is migrated to quickSetting 'RRULE' — only after this method ran, so
+    // a snapshot taken here would leave the select with a value that has no
+    // matching option on a flag-off device.
+    const includeRRule = (): boolean =>
       this._rruleFlag.isEnabled() || this.repeatCfg().quickSetting === 'RRULE';
     const buildOptions = (refDate: Date): { value: string; label: string }[] =>
-      buildRepeatQuickSettingOptions(refDate, _locale, translateService, includeRRule);
+      buildRepeatQuickSettingOptions(refDate, _locale, translateService, includeRRule());
 
     const formConfig = TASK_REPEAT_CFG_ESSENTIAL_FORM_CFG.map((field) => ({
       ...field,
@@ -340,15 +344,19 @@ export class DialogEditTaskRepeatCfgComponent {
 
     // Memoize to avoid rebuilding options on every formly change cycle
     let lastStartDate: string | undefined;
+    let lastIncludeRRule: boolean | undefined;
     let cachedOptions: { value: string; label: string }[];
 
-    // Update options reactively when startDate changes
+    // Update options reactively when startDate changes — or when the async cfg
+    // load flips a flag-off device into RRULE mode (see includeRRule above).
     quickSettingField.expressionProperties = {
       ...quickSettingField.expressionProperties,
       ['templateOptions.options']: (model: Record<string, unknown>) => {
         const sd = model['startDate'] as string | undefined;
-        if (sd !== lastStartDate || !cachedOptions) {
+        const inc = includeRRule();
+        if (sd !== lastStartDate || inc !== lastIncludeRRule || !cachedOptions) {
           lastStartDate = sd;
+          lastIncludeRRule = inc;
           const refDate = sd ? dateStrToUtcDate(sd) : this._getReferenceDate();
           cachedOptions = buildOptions(refDate);
         }

@@ -16,8 +16,9 @@ export const buildRepeatQuickSettingOptions = (
   // The 'RRULE' (advanced recurrence) builder is gated behind a local per-device
   // flag. When off, the option is omitted so users can't author rules the local
   // engine would ignore — callers still pass `true` for a config already in
-  // RRULE mode so an existing one stays editable.
-  includeRRule = true,
+  // RRULE mode so an existing one stays editable. Defaults to FALSE so a caller
+  // that forgets the param fails safe (no advanced option on flag-off devices).
+  includeRRule = false,
 ): { value: RepeatQuickSetting; label: string }[] => {
   // Guard against an invalid Date slipping through (e.g. a non-DB date string).
   // An invalid date makes the weekOfMonth math NaN, so ORDINAL_KEYS[NaN-1] is
