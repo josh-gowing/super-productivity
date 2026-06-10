@@ -37,6 +37,11 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
   let mockDateTimeFormatService: jasmine.SpyObj<DateTimeFormatService>;
   let mockDateService: jasmine.SpyObj<DateService>;
 
+  // Logical "today" pinned by the DateService mock in setupTestBed — tests must
+  // derive "today" expectations from this, never from the real clock.
+  const MOCK_TODAY = new Date(2026, 5, 9, 0, 0, 0, 0);
+  const MOCK_TODAY_STR = '2026-06-09';
+
   const mockRepeatCfg: TaskRepeatCfg = {
     ...DEFAULT_TASK_REPEAT_CFG,
     id: 'repeat-cfg-123',
@@ -83,8 +88,9 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       'todayStr',
       'getLogicalTodayDate',
     ]);
-    mockDateService.todayStr.and.returnValue('2026-06-09');
-    mockDateService.getLogicalTodayDate.and.returnValue(new Date(2026, 5, 9, 0, 0, 0, 0));
+    mockDateService.todayStr.and.returnValue(MOCK_TODAY_STR);
+    // Fresh copy per call — the component mutates the returned Date via setHours()
+    mockDateService.getLogicalTodayDate.and.callFake(() => new Date(MOCK_TODAY));
 
     // Set up the return value for getTaskRepeatCfgById$ before creating the component
     if (getTaskRepeatCfgById$ReturnValue) {
@@ -303,8 +309,7 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         (c) => c.key === T.F.TASK_REPEAT.F.Q_MONTHLY_CURRENT_DATE,
       );
 
-      const today = new Date();
-      const todayDayStr = today.toLocaleDateString('en-US', { day: 'numeric' });
+      const todayDayStr = MOCK_TODAY.toLocaleDateString('en-US', { day: 'numeric' });
 
       expect(monthlyCall).toBeDefined();
       expect(monthlyCall!.params.dateDayStr).toBe(todayDayStr);
@@ -453,7 +458,7 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       const component = fixture.componentInstance;
       component.openScheduleDialog();
 
-      const expectedToday = new Date(2026, 5, 9, 0, 0, 0, 0);
+      const expectedToday = new Date(MOCK_TODAY);
       expect(mockMatDialog.open).toHaveBeenCalledWith(
         jasmine.any(Function),
         jasmine.objectContaining({
