@@ -13,6 +13,7 @@ import { LayoutService } from '../../../core-ui/layout/layout.service';
 import { ScheduleService } from '../schedule.service';
 import { GlobalTrackingIntervalService } from '../../../core/global-tracking-interval/global-tracking-interval.service';
 import { GlobalConfigService } from '../../config/global-config.service';
+import { CalendarEventActionsService } from '../../calendar-integration/calendar-event-actions.service';
 import { DateTimeLocales } from '../../../core/locale.constants';
 import { safeFormatDate } from '../../../util/safe-format-date';
 
@@ -109,6 +110,24 @@ describe('issue #7383 — NG0701 race on /schedule', () => {
           { provide: LayoutService, useValue: mockLayoutService },
           { provide: ScheduleService, useValue: mockScheduleService },
           { provide: MatDialog, useValue: jasmine.createSpyObj('MatDialog', ['open']) },
+          {
+            // ScheduleComponent's children inject the root-provided
+            // CalendarEventActionsService, whose real DI chain pulls in
+            // IssueService → SnackService → LOCAL_ACTIONS (needs NgRx Actions,
+            // which provideMockStore does not supply). Mock it to keep the
+            // injector self-contained.
+            provide: CalendarEventActionsService,
+            useValue: jasmine.createSpyObj('CalendarEventActionsService', [
+              'hasEventUrl',
+              'isPluginEvent',
+              'canMoveEvent',
+              'openEventLink',
+              'reschedule',
+              'createAsTask',
+              'hideForever',
+              'deleteEvent',
+            ]),
+          },
           {
             provide: GlobalTrackingIntervalService,
             useValue: mockGlobalTrackingIntervalService,
