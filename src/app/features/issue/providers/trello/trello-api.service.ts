@@ -196,7 +196,8 @@ export class TrelloApiService {
       }),
       catchError((error) => {
         const errorMsg = `Trello failed to resolve username "${username}": ${getErrorTxt(error)}`;
-        IssueLog.err(errorMsg);
+        // errorMsg embeds the username (user content) — keep it out of the exportable log
+        IssueLog.err('Trello failed to resolve username:', getErrorTxt(error));
         this._snackService.open({
           type: 'ERROR',
           msg: errorMsg,
