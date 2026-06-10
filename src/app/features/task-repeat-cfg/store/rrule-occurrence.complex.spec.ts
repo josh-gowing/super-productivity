@@ -288,7 +288,7 @@ describe('rrule-occurrence engine — complex variants × settings', () => {
         'FREQ=DAILY;BYMONTH=1;BYWEEKNO=53', // week 53 can spill into January
         'FREQ=DAILY;BYMONTH=2;BYYEARDAY=-320', // negative year-days skip the check
         'FREQ=DAILY;BYMONTH=2;BYWEEKNO=-46', // negative week numbers skip the check
-      ].forEach((r) => expect(isRRuleValid(r)).toBe(true, r));
+      ].forEach((r) => expect(isRRuleValid(r)).withContext(r).toBe(true));
     });
 
     it('keeps a sound pattern with a past UNTIL / COUNT valid', () => {
