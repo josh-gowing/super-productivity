@@ -14,7 +14,7 @@ import {
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
-import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
+import { MAT_DIALOG_DATA, MatDialog, MatDialogRef } from '@angular/material/dialog';
 import { MatButton } from '@angular/material/button';
 import { MatButtonToggle, MatButtonToggleGroup } from '@angular/material/button-toggle';
 import { MatIcon } from '@angular/material/icon';
@@ -47,10 +47,17 @@ import {
 import { ClipboardImageService } from '../../core/clipboard-image/clipboard-image.service';
 import { TaskAttachmentService } from '../../features/tasks/task-attachment/task-attachment.service';
 import { ClipboardPasteHandlerService } from '../../core/clipboard-image/clipboard-paste-handler.service';
+import { toggleChecklistItemAtIndex } from '../../features/markdown-checklist/checklist-operations';
 import { HISTORY_STATE } from 'src/app/app.constants';
 import { IS_MOBILE } from 'src/app/util/is-mobile';
 import { IS_IOS } from 'src/app/util/is-ios';
 import { Keyboard } from '@capacitor/keyboard';
+import { DialogMarkdownShortcutsComponent } from './dialog-markdown-shortcuts.component';
+import {
+  MARKDOWN_SHORTCUTS,
+  shortcutLabels,
+  ShortcutNames,
+} from './markdown-shortcuts.const';
 
 type ViewMode = 'SPLIT' | 'PARSED' | 'TEXT_ONLY';
 const ALL_VIEW_MODES: ['SPLIT', 'PARSED', 'TEXT_ONLY'] = ['SPLIT', 'PARSED', 'TEXT_ONLY'];
@@ -89,7 +96,8 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
   readonly contentChanged = output<string>();
   private readonly _contentChanges$ = new Subject<string>();
   private _currentPastePlaceholder: string | null = null;
-
+  private readonly _matDialog = inject(MatDialog);
+  readonly shortcutLabels = shortcutLabels;
   /**
    * Resolved content with blob URLs for images (for preview rendering).
    * Initialized in ngOnInit with raw content, updated asynchronously when images resolve.
@@ -180,16 +188,69 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
     this.textareaEl()?.nativeElement?.focus();
   }
 
+  openShortcutsHelp(): void {
+    this._matDialog.open(DialogMarkdownShortcutsComponent, {
+      maxWidth: '100vw',
+      width: '402px',
+    });
+  }
+
+  private _executeShortcutByName(name: ShortcutNames): void {
+    switch (name) {
+      case 'bold':
+        this.onApplyBold();
+        break;
+      case 'italic':
+        this.onApplyItalic();
+        break;
+      case 'link':
+        this.onInsertLink();
+        break;
+      case 'strikethrough':
+        this.onApplyStrikethrough();
+        break;
+      case 'bullet':
+        this.onApplyBulletList(true);
+        break;
+      case 'numbered':
+        this.onApplyNumberedList(true);
+        break;
+      case 'code':
+        this.onApplyInlineCode();
+        break;
+      case 'quote':
+        this.onApplyQuote(true);
+        break;
+    }
+  }
+
   keydownHandler(ev: KeyboardEvent): void {
     if (ev.key === 'Enter' && ev.ctrlKey) {
       this.close();
       return;
     }
 
+    // Accept both Ctrl and Meta intentionally; the displayed shortcut label shows only one.
+    const hasModifier = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
+
     const textarea = this.textareaEl()?.nativeElement;
     if (!textarea) {
       return;
     }
+
+    if (hasModifier) {
+      const shortcut = MARKDOWN_SHORTCUTS.find((s) => {
+        const keyMatch = s.code ? ev.code === s.code : ev.key.toLowerCase() === s.key;
+        return keyMatch && ev.shiftKey === s.shiftKey;
+      });
+
+      if (shortcut) {
+        ev.preventDefault();
+        this._executeShortcutByName(shortcut.name);
+        return;
+      }
+    }
+
     const result = handleListKeydown(
       textarea.value,
       textarea.selectionStart,
@@ -246,39 +307,30 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
   }
 
   clickPreview($event: MouseEvent): void {
-    if (($event.target as HTMLElement).tagName === 'A') {
+    const target = $event.target as HTMLElement;
+    if (target.closest('a')) {
       // links are already handled by the markdown component
-    } else if (
-      $event?.target &&
-      ($event.target as HTMLElement).classList.contains('checkbox')
-    ) {
-      this._handleCheckboxClick(
-        ($event.target as HTMLElement).parentElement as HTMLElement,
-      );
+      return;
+    }
+
+    const wrapper = target.closest('.checkbox-wrapper') as HTMLElement | null;
+    if (wrapper) {
+      this._handleCheckboxClick(wrapper);
     }
   }
 
   private _handleCheckboxClick(targetEl: HTMLElement): void {
     const allCheckboxes =
       this.previewEl()?.element.nativeElement.querySelectorAll('.checkbox-wrapper');
-
     const checkIndex = Array.from(allCheckboxes || []).findIndex((el) => el === targetEl);
-    if (checkIndex !== -1 && this.data.content) {
-      const allLines = this.data.content.split('\n');
-      const todoAllLinesIndexes = allLines
-        .map((line, index) => (line.includes('- [') ? index : null))
-        .filter((i) => i !== null);
-
-      const itemIndex = todoAllLinesIndexes[checkIndex];
-      if (typeof itemIndex === 'number' && itemIndex > -1) {
-        const item = allLines[itemIndex];
-        allLines[itemIndex] = item.includes('[ ]')
-          ? item.replace('[ ]', '[x]').replace('[]', '[x]')
-          : item.replace('[x]', '[ ]');
-        this.data.content = allLines.join('\n');
-        // Emit change for auto-save
-        this._contentChanges$.next(this.data.content);
-      }
+    if (checkIndex === -1 || !this.data.content) {
+      return;
+    }
+    const next = toggleChecklistItemAtIndex(this.data.content, checkIndex);
+    if (next !== this.data.content) {
+      this.data.content = next;
+      // Emit change for auto-save
+      this._contentChanges$.next(this.data.content);
     }
   }
 
@@ -309,16 +361,16 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
     );
   }
 
-  onApplyQuote(): void {
-    this._applyTransformWithArgs(applyQuote);
+  onApplyQuote(isKeyboard = false): void {
+    this._applyTransformWithArgs(applyQuote, isKeyboard);
   }
 
-  onApplyBulletList(): void {
-    this._applyTransformWithArgs(applyBulletList);
+  onApplyBulletList(isKeyboard = false): void {
+    this._applyTransformWithArgs(applyBulletList, isKeyboard);
   }
 
-  onApplyNumberedList(): void {
-    this._applyTransformWithArgs(applyNumberedList);
+  onApplyNumberedList(isKeyboard = false): void {
+    this._applyTransformWithArgs(applyNumberedList, isKeyboard);
   }
 
   onApplyTaskList(): void {
@@ -347,6 +399,7 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
 
   private _applyTransformWithArgs(
     transformFn: (text: string, start: number, end: number) => TextTransformResult,
+    isKeyboard = false,
   ): void {
     const textarea = this.textareaEl()?.nativeElement;
     if (!textarea) {
@@ -362,7 +415,11 @@ export class DialogFullscreenMarkdownComponent implements OnInit, AfterViewInit 
     // Wait for Angular to update the DOM after ngModel change before restoring selection
     setTimeout(() => {
       textarea.focus();
-      textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
+      if (!isKeyboard) {
+        textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
+      } else {
+        textarea.setSelectionRange(result.selectionEnd, result.selectionEnd);
+      }
     });
   }
 }

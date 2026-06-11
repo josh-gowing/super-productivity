@@ -44,13 +44,19 @@ export interface PluginBaseCfg {
 export interface DialogButtonCfg {
   label: string;
   icon?: string;
-  onClick: () => void | Promise<void>;
+  onClick?: () => void | Promise<void>;
   color?: 'primary' | 'warn';
   raised?: boolean;
 }
 
+export type DialogResult = string | undefined;
+
 export interface DialogCfg {
+  title?: string;
   htmlContent?: string;
+  content?: string;
+  okBtnLabel?: string;
+  cancelBtnLabel?: string;
   buttons?: DialogButtonCfg[];
 }
 
@@ -162,6 +168,7 @@ export interface FinishDayPayload {
 
 export interface LanguageChangePayload {
   code: string;
+  newLanguage: string;
 
   [key: string]: unknown;
 }
@@ -466,6 +473,7 @@ export interface PluginAppState {
 
 export interface PluginAPI {
   cfg: PluginBaseCfg;
+  readonly Hooks: typeof PluginHooks;
 
   registerHook<T extends Hooks>(hook: T, fn: PluginHookHandler<T>): void;
 
@@ -543,7 +551,7 @@ export interface PluginAPI {
 
   showIndexHtmlAsView(): void;
 
-  openDialog(dialogCfg: DialogCfg): Promise<void>;
+  openDialog(dialogCfg: DialogCfg): Promise<DialogResult>;
 
   // tasks
   getTasks(): Promise<Task[]>;
@@ -624,6 +632,16 @@ export interface PluginAPI {
 
   getConfig<T = Record<string, unknown>>(): Promise<T | null>;
 
+  // i18n
+  translate(key: string, params?: Record<string, string | number>): string;
+
+  formatDate(
+    date: Date | string | number,
+    format: 'short' | 'medium' | 'long' | 'time' | 'datetime',
+  ): string;
+
+  getCurrentLanguage(): string;
+
   // oauth
   startOAuthFlow(config: OAuthFlowConfig): Promise<OAuthTokenResult>;
 
@@ -634,7 +652,8 @@ export interface PluginAPI {
   // download file
   downloadFile(filename: string, data: string): Promise<void>;
 
-  // node execution (only available in Electron with nodeExecution permission)
+  // node execution (Electron desktop only; currently grantable only to packaged
+  // built-in plugins with nodeExecution permission after main-process user consent)
   executeNodeScript?(request: PluginNodeScriptRequest): Promise<PluginNodeScriptResult>;
 
   // action execution - dispatch NgRx actions (limited to allowed subset)

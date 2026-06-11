@@ -12,6 +12,8 @@ import {
   TaskRepeatCfg,
 } from '../../features/task-repeat-cfg/task-repeat-cfg.model';
 import { IssueProvider } from '../../features/issue/issue.model';
+import { SimpleCounter } from '../../features/simple-counter/simple-counter.model';
+import { EMPTY_SIMPLE_COUNTER } from '../../features/simple-counter/simple-counter.const';
 import { AppDataComplete } from '../model/model-config';
 import { dirtyDeepCopy } from '../../util/dirtyDeepCopy';
 import { OP_LOG_SYNC_LOGGER } from '../core/sync-logger.adapter';
@@ -2374,6 +2376,83 @@ describe('dataRepair()', () => {
       expect(
         result.data.archiveYoung.task.entities['ARCHIVED_INVALID']!.dueDay,
       ).toBeUndefined();
+    });
+  });
+
+  describe('entity order preservation (#8257)', () => {
+    const _counter = (id: string): SimpleCounter => ({
+      ...EMPTY_SIMPLE_COUNTER,
+      id,
+      title: id,
+      isEnabled: true,
+    });
+
+    it('should preserve the user-defined simpleCounter ids order, not entities-dict order', () => {
+      // The `entities` dict is keyed in creation order (c1..c5), because
+      // updateSimpleCounterOrder mutates only `ids`, never the dict.
+      const entities = {
+        c1: _counter('c1'),
+        c2: _counter('c2'),
+        c3: _counter('c3'),
+        c4: _counter('c4'),
+        c5: _counter('c5'),
+      };
+      // `ids` holds the order the user dragged the habits into.
+      const userOrder = ['c1', 'c3', 'c5', 'c2', 'c4'];
+
+      const result = dataRepair({
+        ...mock,
+        simpleCounter: { ids: [...userOrder], entities },
+      } as any);
+
+      expect(result.data.simpleCounter.ids).toEqual(userOrder);
+    });
+
+    it('should drop ids without an entity and append entities missing from ids', () => {
+      const entities = {
+        c1: _counter('c1'),
+        c2: _counter('c2'),
+        c3: _counter('c3'),
+      };
+      // 'STALE' has no entity -> dropped; 'c3' exists but is absent from ids
+      // -> appended after the preserved order.
+      const result = dataRepair({
+        ...mock,
+        simpleCounter: { ids: ['c2', 'STALE', 'c1'], entities },
+      } as any);
+
+      expect(result.data.simpleCounter.ids).toEqual(['c2', 'c1', 'c3']);
+    });
+
+    it('should dedupe duplicate ids while preserving first-seen order', () => {
+      const entities = {
+        c1: _counter('c1'),
+        c2: _counter('c2'),
+      };
+
+      const result = dataRepair({
+        ...mock,
+        simpleCounter: { ids: ['c1', 'c1', 'c2'], entities },
+      } as any);
+
+      expect(result.data.simpleCounter.ids).toEqual(['c1', 'c2']);
+    });
+
+    it('should re-key entities by entity.id and drop the stale dict key from ids', () => {
+      // Entity stored under a stale dict key whose canonical entity.id differs.
+      const entities = {
+        STALE_KEY: _counter('c2'),
+        c1: _counter('c1'),
+      } as any;
+
+      const result = dataRepair({
+        ...mock,
+        simpleCounter: { ids: ['STALE_KEY', 'c1'], entities },
+      } as any);
+
+      // 'STALE_KEY' has no entity after re-keying -> dropped; 'c1' preserved;
+      // 'c2' (the re-keyed entity) appended.
+      expect(result.data.simpleCounter.ids).toEqual(['c1', 'c2']);
     });
   });
 });
