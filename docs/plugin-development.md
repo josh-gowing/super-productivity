@@ -616,11 +616,17 @@ plugin.onUnload(() => {
 ```
 
 The host invokes the callback at the start of plugin teardown, while the Plugin API is
-still usable. Registering again replaces the previous callback, so register once and do
-all cleanup there. Errors thrown by the callback are logged and do not block teardown.
+still usable. The returned promise is **not awaited** — do synchronous cleanup
+(`clearInterval` etc.) before any `await`, since teardown continues immediately.
+Registering again replaces the previous callback, so register once and do all cleanup
+there. Errors thrown by the callback are logged and do not block teardown.
 
-**Iframe plugins:** `onUnload` exists but is a no-op — the host destroys the iframe on
-unload, which takes its timers and listeners with it.
+Plugins distributed independently of the app should feature-detect it
+(`if (plugin.onUnload) { ... }`) — hosts predating the hook don't provide it.
+
+**Iframe plugins:** `onUnload` exists but is a no-op — the host unmounts the iframe on
+unload, which takes its timers and listeners with it. Don't rely on it for unload-time
+persistence in iframes; persist when the data changes instead.
 
 ### 4. Don't spam the logs
 

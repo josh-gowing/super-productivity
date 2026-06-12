@@ -1599,6 +1599,10 @@ export class PluginService implements OnDestroy {
    * without changing isEnabled or _pluginStates. Used for re-upload and reload.
    */
   private _teardownPluginRuntime(pluginId: string): void {
+    // Let the plugin clear its renderer-side timers/listeners first, while its
+    // hooks and translations are still registered (#8281)
+    this._pluginRunner.triggerUnload(pluginId);
+
     this._bumpPluginIframeGeneration(pluginId);
 
     // Close the side panel if this plugin is active

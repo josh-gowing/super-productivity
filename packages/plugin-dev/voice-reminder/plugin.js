@@ -37,6 +37,8 @@ if (!window.speechSynthesis) {
   }
 
   function _vrSpeak(text, volume, voiceName) {
+    // the settings dialog can outlive the plugin (Test button) — stay silent
+    if (_vrUnloaded) return;
     var synth = window.speechSynthesis;
     if (!synth) {
       console.error('[voice-reminder] No window.speechSynthesis available.');
@@ -76,6 +78,10 @@ if (!window.speechSynthesis) {
     // re-check after the await: the plugin may have been unloaded while the
     // config was loading — arming the interval then would leak it (#8281)
     if (!cfg.isEnabled || _vrUnloaded) return;
+
+    // stop again: an interleaved _vrStartTimer call may have armed its own
+    // interval during the await — without this that handle is orphaned
+    _vrStopTimer();
 
     var intervalMs = Math.max(cfg.interval || 300000, 5000);
     _vrInterval = setInterval(function () {

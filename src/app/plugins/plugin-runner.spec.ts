@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { PluginRunner } from './plugin-runner';
+import { PluginAPI } from './plugin-api';
 import { PluginBridgeService } from './plugin-bridge.service';
 import { PluginSecurityService } from './plugin-security';
 import { SnackService } from '../core/snack/snack.service';
@@ -358,6 +359,39 @@ describe('PluginRunner', () => {
       expect(mockCleanupService.cleanupPlugin).toHaveBeenCalledWith(mockManifest.id);
       // let the rejected promise settle so it doesn't leak into other specs
       await new Promise((r) => setTimeout(r, 0));
+    });
+
+    it('should fire the callback at most once across triggerUnload and unloadPlugin', async () => {
+      const unloadSpy = jasmine.createSpy('unload');
+      getGlobal()[mockManifest.id] = unloadSpy;
+
+      const code = `plugin.onUnload(() => globalThis['${UNLOAD_GLOBAL}']['${mockManifest.id}']());`;
+      await service.loadPlugin(mockManifest, code, mockBaseCfg);
+
+      // plugin.service fires triggerUnload at the start of teardown, then
+      // unloadPlugin runs as part of the same teardown — must not double-fire
+      service.triggerUnload(mockManifest.id);
+      expect(unloadSpy).toHaveBeenCalledTimes(1);
+
+      const result = service.unloadPlugin(mockManifest.id);
+      expect(result).toBe(true);
+      expect(unloadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should ignore onUnload registrations from a stale API instance', async () => {
+      const staleSpy = jasmine.createSpy('staleUnload');
+      // plugin leaks its API object so the test can register after unload
+      const code = `globalThis['${UNLOAD_GLOBAL}']['leakedApi'] = plugin;`;
+      await service.loadPlugin(mockManifest, code, mockBaseCfg);
+      service.unloadPlugin(mockManifest.id);
+
+      const leakedApi = getGlobal()['leakedApi'] as unknown as PluginAPI;
+      leakedApi.onUnload(staleSpy);
+
+      // reload the plugin: the stale registration must not fire on its unload
+      await service.loadPlugin(mockManifest, `/* no-op */`, mockBaseCfg);
+      service.unloadPlugin(mockManifest.id);
+      expect(staleSpy).not.toHaveBeenCalled();
     });
 
     it('should only fire the callback of the unloaded plugin', async () => {

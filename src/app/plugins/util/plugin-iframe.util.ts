@@ -493,7 +493,7 @@ export const createPluginApiScript = (config: PluginIframeConfig): string => {
             });
           },
 
-          // Teardown signal — no-op in iframes: the host destroys the iframe on
+          // Teardown signal — no-op in iframes: the host unmounts the iframe on
           // unload, which takes its timers/listeners with it. Provided so plugin
           // code can call onUnload unconditionally on both execution paths.
           onUnload: (fn) => {},
