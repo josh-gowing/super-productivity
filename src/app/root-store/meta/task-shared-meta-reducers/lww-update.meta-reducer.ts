@@ -387,6 +387,93 @@ const filterOrphanedTaskIdsFromEntityData = (
 };
 
 /**
+ * Sanitizes a TASK LWW Update payload's own forward references against the
+ * receiving device's current state (#8279).
+ *
+ * `filterOrphanedTaskIdsFromEntityData` handles the reverse direction (TAG/PROJECT
+ * payloads whose taskIds point at deleted tasks). A TASK payload can equally point
+ * at a tag/project this device deleted concurrently — e.g. an initial cross-device
+ * merge where one side deleted a tag/project while the other updated a task that
+ * still referenced it, and the task update won LWW. Left unsanitized, the task ends
+ * up with `tagIds`/`projectId` referencing a non-existent entity, which fails
+ * Checkpoint D cross-model validation and pops the false "data corrupted" dialog.
+ *
+ * Stripping is safe: a referenced entity that is missing locally was *deleted* —
+ * never one that is *about to be created*. Causal op ordering (vector clocks)
+ * guarantees the create of a referenced entity is applied before any op that
+ * references it, so a missing ref at apply time is always a deletion.
+ *
+ * - `tagIds`: drop ids whose tag no longer exists.
+ * - `projectId`: reassign a deleted project to INBOX (or the first existing
+ *   project), mirroring the recreate-branch / normalizeRestoredTask fallback.
+ * - `parentId`: a subtask whose parent was deleted is promoted to a root task
+ *   (parentId cleared) rather than left as a lonely subtask. The downstream
+ *   syncProjectTaskIds helper then re-homes it into its project's taskIds.
+ * - Finally, a root task left with no project AND no tags gets a project home so
+ *   it doesn't trip the "task without project or tag" invariant.
+ */
+const sanitizeTaskForwardReferences = (
+  entityData: Record<string, unknown>,
+  rootState: RootState,
+): Record<string, unknown> => {
+  const tagState = rootState[TAG_FEATURE_NAME];
+  const projectState = rootState[PROJECT_FEATURE_NAME];
+  const taskState = rootState[TASK_FEATURE_NAME];
+  const existingTagIds = new Set((tagState?.ids as string[]) ?? []);
+  const existingProjectIds = new Set((projectState?.ids as string[]) ?? []);
+  const existingTaskIds = new Set((taskState?.ids as string[]) ?? []);
+  const fallbackProjectId = existingProjectIds.has(INBOX_PROJECT.id)
+    ? INBOX_PROJECT.id
+    : ((projectState?.ids as string[])?.[0] ?? undefined);
+
+  const result = { ...entityData };
+
+  if (Array.isArray(result['tagIds'])) {
+    const tagIds = result['tagIds'] as string[];
+    const kept = tagIds.filter((id) => existingTagIds.has(id));
+    if (kept.length !== tagIds.length) {
+      OpLog.warn(
+        `lwwUpdateMetaReducer: Stripped ${tagIds.length - kept.length} orphaned tagId(s) from TASK LWW Update`,
+      );
+      result['tagIds'] = kept;
+    }
+  }
+
+  const projectId = result['projectId'];
+  if (
+    typeof projectId === 'string' &&
+    projectId &&
+    !existingProjectIds.has(projectId) &&
+    fallbackProjectId
+  ) {
+    OpLog.warn(
+      'lwwUpdateMetaReducer: Reassigned TASK LWW Update from deleted project to fallback',
+    );
+    result['projectId'] = fallbackProjectId;
+  }
+
+  // Promote a subtask whose parent was deleted on this device to a root task.
+  const parentId = result['parentId'];
+  if (typeof parentId === 'string' && parentId && !existingTaskIds.has(parentId)) {
+    OpLog.warn(
+      'lwwUpdateMetaReducer: Promoted TASK LWW Update to root task (parent deleted)',
+    );
+    result['parentId'] = undefined;
+  }
+
+  // Guard the "task without project or tag" invariant for root tasks.
+  const hasNoParent = !result['parentId'];
+  const hasNoProject = !result['projectId'];
+  const hasNoTags =
+    !Array.isArray(result['tagIds']) || (result['tagIds'] as string[]).length === 0;
+  if (hasNoParent && hasNoProject && hasNoTags && fallbackProjectId) {
+    result['projectId'] = fallbackProjectId;
+  }
+
+  return result;
+};
+
+/**
  * Meta-reducer that handles LWW (Last-Write-Wins) Update actions.
  *
  * When a LWW conflict is resolved and local state wins, a `[ENTITY_TYPE] LWW Update`
@@ -455,6 +542,12 @@ export const lwwUpdateMetaReducer: MetaReducer = (
 
     // Filter orphaned taskIds/backlogTaskIds for TAG and PROJECT entities
     entityData = filterOrphanedTaskIdsFromEntityData(entityData, entityType, rootState);
+
+    // #8279: sanitize a TASK payload's own forward refs (tagIds/projectId) against
+    // entities this device deleted concurrently (see fn docs).
+    if (entityType === 'TASK') {
+      entityData = sanitizeTaskForwardReferences(entityData, rootState);
+    }
 
     // Singleton entities: replace entire feature state with the winning data
     if (isSingletonEntity(config)) {

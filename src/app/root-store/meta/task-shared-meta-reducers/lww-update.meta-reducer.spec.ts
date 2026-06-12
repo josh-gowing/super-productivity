@@ -187,6 +187,61 @@ describe('lwwUpdateMetaReducer', () => {
       expect(updatedTask.notes).toBe('Updated notes');
     });
 
+    // #8279: a TASK LWW Update can carry forward refs (tagIds/projectId) to
+    // entities this device deleted concurrently (e.g. an initial cross-device
+    // merge). Leaving them produces an orphan that fails Checkpoint D validation
+    // and pops the false "data corrupted" dialog.
+    it('strips a tagId that no longer exists on this device (#8279)', () => {
+      const state = createMockState();
+      const action = {
+        type: '[TASK] LWW Update',
+        id: TASK_ID,
+        title: 'Winner',
+        tagIds: ['deleted-tag', TAG_ID],
+        meta: { isPersistent: true, entityType: 'TASK', entityId: TASK_ID },
+      };
+
+      reducer(state, action);
+
+      const updatedState = mockReducer.calls.mostRecent().args[0] as Partial<RootState>;
+      const updatedTask = updatedState[TASK_FEATURE_NAME]?.entities[TASK_ID] as Task;
+      expect(updatedTask.tagIds).toEqual([TAG_ID]);
+    });
+
+    it('reassigns a projectId whose project was deleted on this device (#8279)', () => {
+      const state = createMockState();
+      const action = {
+        type: '[TASK] LWW Update',
+        id: TASK_ID,
+        title: 'Winner',
+        projectId: 'deleted-project',
+        meta: { isPersistent: true, entityType: 'TASK', entityId: TASK_ID },
+      };
+
+      reducer(state, action);
+
+      const updatedState = mockReducer.calls.mostRecent().args[0] as Partial<RootState>;
+      const updatedTask = updatedState[TASK_FEATURE_NAME]?.entities[TASK_ID] as Task;
+      expect(updatedTask.projectId).toBe(INBOX_PROJECT.id);
+    });
+
+    it('promotes a subtask to root when its parent was deleted on this device (#8279)', () => {
+      const state = createMockState();
+      const action = {
+        type: '[TASK] LWW Update',
+        id: TASK_ID,
+        title: 'Winner',
+        parentId: 'deleted-parent',
+        meta: { isPersistent: true, entityType: 'TASK', entityId: TASK_ID },
+      };
+
+      reducer(state, action);
+
+      const updatedState = mockReducer.calls.mostRecent().args[0] as Partial<RootState>;
+      const updatedTask = updatedState[TASK_FEATURE_NAME]?.entities[TASK_ID] as Task;
+      expect(updatedTask.parentId).toBeUndefined();
+    });
+
     it('should update modified timestamp', () => {
       const state = createMockState([{ modified: 1000 }]);
       const action = {
@@ -463,10 +518,13 @@ describe('lwwUpdateMetaReducer', () => {
 
     it('should preserve projectId when partial TASK LWW Update carries one', () => {
       const state = createMockState();
+      // Use an existing project id: #8279 sanitization reassigns a projectId that
+      // references a project deleted on this device, so field-preservation is
+      // verified against a project that actually exists locally.
       const action = {
         type: '[TASK] LWW Update',
         id: 'partial_with_project',
-        projectId: 'some-other-project',
+        projectId: PROJECT_ID,
         dueDay: '2026-04-29',
         meta: {
           isPersistent: true,
@@ -482,7 +540,7 @@ describe('lwwUpdateMetaReducer', () => {
         'partial_with_project'
       ] as Task;
 
-      expect(recreated.projectId).toBe('some-other-project');
+      expect(recreated.projectId).toBe(PROJECT_ID);
     });
 
     it('should not warn when a TASK LWW Update payload is complete', () => {
@@ -1309,12 +1367,19 @@ describe('lwwUpdateMetaReducer', () => {
     });
 
     it('should not update project.taskIds for subtasks', () => {
-      // Subtask should not be added to project.taskIds
+      // Subtask should not be added to project.taskIds.
+      // The parent must exist in state, else #8279 sanitization promotes the
+      // subtask to a root task (and then it *would* join project.taskIds).
       const state = {
         ...createStateWithProjects(PROJECT_A, [], []),
         [TASK_FEATURE_NAME]: {
-          ids: [TASK_ID],
+          ids: ['parent-task', TASK_ID],
           entities: {
+            'parent-task': createMockTask({
+              id: 'parent-task',
+              projectId: PROJECT_A,
+              subTaskIds: [TASK_ID],
+            }),
             [TASK_ID]: createMockTask({ projectId: PROJECT_A, parentId: 'parent-task' }),
           },
           currentTaskId: null,
@@ -1771,8 +1836,12 @@ describe('lwwUpdateMetaReducer', () => {
     const SUBTASK_ID = 'subtask-1';
     const PROJECT_A = 'project-a';
 
-    it('should handle subtask with parentId referencing deleted parent gracefully', () => {
-      // Subtask references a parent that no longer exists in state
+    it('promotes a subtask whose parent was deleted to a root task (#8279)', () => {
+      // Subtask references a parent that no longer exists in state. Leaving the
+      // dangling parentId produces a "lonely subtask" that fails Checkpoint D
+      // validation (the false "data corrupted" dialog). #8279 sanitization
+      // promotes it to a valid root task, consistent with the explicit
+      // parentId-removal promotion path below.
       const state = {
         [TASK_FEATURE_NAME]: {
           ids: [SUBTASK_ID],
@@ -1817,12 +1886,12 @@ describe('lwwUpdateMetaReducer', () => {
       const subtask = updatedState[TASK_FEATURE_NAME]?.entities[SUBTASK_ID] as Task;
       const projectA = updatedState[PROJECT_FEATURE_NAME]?.entities[PROJECT_A] as Project;
 
-      // Subtask should be updated
+      // Subtask is updated and promoted to a root task (parent gone).
       expect(subtask.title).toBe('Updated Subtask');
-      expect(subtask.parentId).toBe(PARENT_TASK);
+      expect(subtask.parentId).toBeUndefined();
 
-      // Subtask should NOT be added to project.taskIds (subtasks are excluded)
-      expect(projectA.taskIds).not.toContain(SUBTASK_ID);
+      // As a root task it now belongs in its project's taskIds.
+      expect(projectA.taskIds).toContain(SUBTASK_ID);
     });
 
     it('should add promoted subtask to project.taskIds when parentId is removed in same project', () => {
