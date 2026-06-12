@@ -44,14 +44,16 @@ export class PluginRunner {
         this._pluginBridge,
         this._pluginI18nService,
         manifest,
-        (fn) => this._readyCallbacks.set(manifest.id, fn),
-        (fn) => {
-          // ignore registrations from a stale API instance — leaked plugin code
-          // can run after its own unload (the failure class this hook fixes)
-          // and must not clobber a reloaded instance's callback
-          if (this._pluginApis.get(manifest.id) === pluginAPI) {
-            this._unloadCallbacks.set(manifest.id, fn);
-          }
+        {
+          onReady: (fn) => this._readyCallbacks.set(manifest.id, fn),
+          onUnload: (fn) => {
+            // ignore registrations from a stale API instance — leaked plugin
+            // code can run after its own unload (the failure class this hook
+            // fixes) and must not clobber a reloaded instance's callback
+            if (this._pluginApis.get(manifest.id) === pluginAPI) {
+              this._unloadCallbacks.set(manifest.id, fn);
+            }
+          },
         },
       );
 

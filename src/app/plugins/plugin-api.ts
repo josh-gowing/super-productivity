@@ -73,15 +73,17 @@ export class PluginAPI implements PluginAPIInterface {
     pluginBridge: PluginBridgeService,
     pluginI18nService: PluginI18nService,
     manifest?: PluginManifest,
-    onReadyRegister?: (fn: () => void | Promise<void>) => void,
-    onUnloadRegister?: (fn: () => void | Promise<void>) => void,
+    lifecycleRegisters?: {
+      onReady?: (fn: () => void | Promise<void>) => void;
+      onUnload?: (fn: () => void | Promise<void>) => void;
+    },
   ) {
     this.#pluginId = pluginId;
     this.#pluginBridge = pluginBridge;
     this.#pluginI18nService = pluginI18nService;
     this.#manifest = manifest;
-    this.#onReadyRegister = onReadyRegister;
-    this.#onUnloadRegister = onUnloadRegister;
+    this.#onReadyRegister = lifecycleRegisters?.onReady;
+    this.#onUnloadRegister = lifecycleRegisters?.onUnload;
 
     // Get bound methods for this plugin
     this.#boundMethods = this.#pluginBridge.createBoundMethods(
