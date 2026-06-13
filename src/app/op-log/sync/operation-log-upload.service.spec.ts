@@ -406,8 +406,11 @@ describe('OperationLogUploadService', () => {
 
           const result = await service.uploadPendingOps(mockApiProvider);
 
-          // Should use max serverSeq from piggybacked ops (50), not latestSeq (100)
-          expect(mockApiProvider.setLastServerSeq).toHaveBeenCalledWith(50);
+          // #8304: piggybacked ops were collected for the caller to apply, so the seq
+          // persist is DEFERRED to the caller (no in-loop persist). The deferred value
+          // is the max serverSeq from piggybacked ops (50), not latestSeq (100).
+          expect(result.lastServerSeqToPersist).toBe(50);
+          expect(mockApiProvider.setLastServerSeq).not.toHaveBeenCalled();
           expect(result.hasMorePiggyback).toBe(true);
         });
 
@@ -461,13 +464,11 @@ describe('OperationLogUploadService', () => {
 
           const result = await service.uploadPendingOps(mockApiProvider);
 
-          // Verify setLastServerSeq calls
-          const calls = mockApiProvider.setLastServerSeq.calls.allArgs();
-          expect(calls.length).toBe(2);
-          // First chunk: should store 100 (latestSeq, since no hasMorePiggyback)
-          expect(calls[0][0]).toBe(100);
-          // Second chunk: should NOT regress to 50, should keep 100
-          expect(calls[1][0]).toBe(100);
+          // #8304: chunk 1 collected piggybacked ops, so the seq persist is deferred to
+          // the caller for ALL subsequent chunks (no in-loop persist). The deferred value
+          // must be the highest non-regressing seq (100), never regressing to chunk 2's 50.
+          expect(mockApiProvider.setLastServerSeq).not.toHaveBeenCalled();
+          expect(result.lastServerSeqToPersist).toBe(100);
           expect(result.hasMorePiggyback).toBe(true);
         });
 
@@ -551,15 +552,35 @@ describe('OperationLogUploadService', () => {
             }
           });
 
-          await service.uploadPendingOps(mockApiProvider);
+          const result = await service.uploadPendingOps(mockApiProvider);
 
-          // Verify setLastServerSeq calls
-          const calls = mockApiProvider.setLastServerSeq.calls.allArgs();
-          expect(calls.length).toBe(2);
-          // First chunk: should store 55 (max of piggybacked ops)
-          expect(calls[0][0]).toBe(55);
-          // Second chunk: should keep 55 (Math.max(55, 45) = 55), not regress to 45
-          expect(calls[1][0]).toBe(55);
+          // #8304: both chunks collected piggybacked ops, so the seq persist is deferred
+          // to the caller. The deferred value tracks the highest received seq across
+          // chunks (max(55, 45) = 55), never regressing to chunk 2's 45.
+          expect(mockApiProvider.setLastServerSeq).not.toHaveBeenCalled();
+          expect(result.lastServerSeqToPersist).toBe(55);
+        });
+
+        // #8304 regression: when a chunk receives NO piggybacked ops, the seq only
+        // covers our own just-uploaded ops, so persisting in-loop carries no loss risk
+        // and the caller has nothing to persist afterwards.
+        it('should persist seq in-loop (not defer) when no piggybacked ops are received', async () => {
+          mockApiProvider.getLastServerSeq.and.returnValue(Promise.resolve(40));
+          mockOpLogStore.getUnsynced.and.returnValue(
+            Promise.resolve([createMockEntry(1, 'op-1', 'client-1')]),
+          );
+          mockApiProvider.uploadOps.and.returnValue(
+            Promise.resolve({
+              results: [{ opId: 'op-1', accepted: true }],
+              latestSeq: 42,
+              newOps: [],
+            }),
+          );
+
+          const result = await service.uploadPendingOps(mockApiProvider);
+
+          expect(mockApiProvider.setLastServerSeq).toHaveBeenCalledWith(42);
+          expect(result.lastServerSeqToPersist).toBeUndefined();
         });
       });
     });

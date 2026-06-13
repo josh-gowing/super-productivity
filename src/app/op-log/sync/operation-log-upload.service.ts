@@ -88,6 +88,10 @@ export class OperationLogUploadService {
     // We track this BEFORE decryption to detect the server's actual encryption state.
     let sawAnyPiggybackOps = false;
     let sawEncryptedPiggybackOp = false;
+    // #8304: When this upload collects piggybacked ops for the caller to apply, the
+    // last-server-seq covering them must be persisted by the caller AFTER those ops are
+    // applied — not here. We surface the planned value instead of persisting it.
+    let lastServerSeqToPersist: number | undefined;
 
     await this.lockService.request(LOCK_NAMES.UPLOAD, async () => {
       // Execute pre-upload callback INSIDE the lock, BEFORE checking for pending ops.
@@ -109,6 +113,10 @@ export class OperationLogUploadService {
       let lastKnownServerSeq = await syncProvider.getLastServerSeq();
       // Track highest received sequence across ALL chunks to prevent regression
       let highestReceivedSeq = lastKnownServerSeq;
+      // #8304: Becomes true once any chunk collects piggybacked ops the caller must
+      // apply. From that point on we stop persisting lastServerSeq in-loop (and never
+      // regress) — the caller persists the final value after processing those ops.
+      let deferSeqPersistToCaller = false;
 
       // Get encryption key (optional - file-based adapters handle encryption internally)
       const encryptKey = syncProvider.getEncryptKey
@@ -330,6 +338,9 @@ export class OperationLogUploadService {
 
           const ops = piggybackSyncOps.map((op) => syncOpToOperation(op));
           piggybackedOps.push(...ops);
+          // These ops are returned to the caller for processRemoteOps; defer the seq
+          // persist so it cannot advance past ops that are not yet applied. (#8304)
+          deferSeqPersistToCaller = true;
         }
 
         // Update last known server seq
@@ -352,8 +363,14 @@ export class OperationLogUploadService {
             `OperationLogUploadService: hasMorePiggyback=true but no ops received, keeping lastServerSeq at ${serverSeqPlan.seqToStore}`,
           );
         }
-        await syncProvider.setLastServerSeq(serverSeqPlan.seqToStore);
         lastKnownServerSeq = serverSeqPlan.seqToStore;
+        if (deferSeqPersistToCaller) {
+          // #8304: Hand the value to the caller; it persists after applying the
+          // piggybacked ops (mirrors the download path's "persist AFTER ops stored").
+          lastServerSeqToPersist = serverSeqPlan.seqToStore;
+        } else {
+          await syncProvider.setLastServerSeq(serverSeqPlan.seqToStore);
+        }
 
         // Collect rejected operations - DO NOT mark as rejected here!
         // The sync service must process piggybacked ops FIRST to allow proper conflict detection.
@@ -400,6 +417,7 @@ export class OperationLogUploadService {
       rejectedOps,
       ...(hasMorePiggyback ? { hasMorePiggyback: true } : {}),
       ...(piggybackHasOnlyUnencryptedData ? { piggybackHasOnlyUnencryptedData } : {}),
+      ...(lastServerSeqToPersist !== undefined ? { lastServerSeqToPersist } : {}),
     };
   }
 
