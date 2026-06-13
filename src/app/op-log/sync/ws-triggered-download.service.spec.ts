@@ -9,6 +9,7 @@ import { SyncProviderManager } from '../sync-providers/provider-manager.service'
 import { WrappedProviderService } from '../sync-providers/wrapped-provider.service';
 import { WsTriggeredDownloadService } from './ws-triggered-download.service';
 import { SyncSessionValidationService } from './sync-session-validation.service';
+import { SyncCycleGuardService } from './sync-cycle-guard.service';
 import { AuthFailSPError, MissingCredentialsSPError } from '../sync-exports';
 
 describe('WsTriggeredDownloadService', () => {
@@ -61,6 +62,10 @@ describe('WsTriggeredDownloadService', () => {
     });
 
     service = TestBed.inject(WsTriggeredDownloadService);
+    // The cycle guard is a root singleton; reset it so a prior test that left
+    // it claimed (e.g. an assertion threw before guard.end()) can't poison this
+    // one. Mirrors SyncSessionValidationService's per-test reset.
+    TestBed.inject(SyncCycleGuardService)._resetForTest();
   });
 
   afterEach(() => {
@@ -110,6 +115,37 @@ describe('WsTriggeredDownloadService', () => {
 
     expect(mockWrappedProvider.getOperationSyncCapable).not.toHaveBeenCalled();
     expect(mockSyncService.downloadRemoteOps).not.toHaveBeenCalled();
+  }));
+
+  // #8309: the WS-download side channel claims the in-tab SyncCycleGuard and
+  // skips when another cycle (main sync, force flow, or immediate upload) is
+  // active, so its gate decision / setLastServerSeq can't race a concurrent
+  // flow and overlapping withSession() calls can't misattribute the latch.
+  it('should skip the download when another sync cycle is active (#8309)', fakeAsync(() => {
+    const guard = TestBed.inject(SyncCycleGuardService);
+    expect(guard.tryBegin()).toBe(true);
+
+    service.start();
+    notification$.next({ latestSeq: 7 });
+    tick(500);
+    flushMicrotasks();
+
+    expect(mockWrappedProvider.getOperationSyncCapable).not.toHaveBeenCalled();
+    expect(mockSyncService.downloadRemoteOps).not.toHaveBeenCalled();
+
+    guard.end();
+  }));
+
+  it('releases the guard after the download so a later cycle can run (#8309)', fakeAsync(() => {
+    const guard = TestBed.inject(SyncCycleGuardService);
+
+    service.start();
+    notification$.next({ latestSeq: 8 });
+    tick(500);
+    flushMicrotasks();
+
+    expect(mockSyncService.downloadRemoteOps).toHaveBeenCalledTimes(1);
+    expect(guard.isActive).toBe(false);
   }));
 
   it('should stop listening after an auth failure', fakeAsync(() => {

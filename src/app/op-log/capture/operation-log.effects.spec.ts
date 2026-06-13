@@ -506,6 +506,37 @@ describe('OperationLogEffects', () => {
       expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(2);
     }));
 
+    it('re-extracts the SAME action on the quota-exceeded retry, never a second op (#8307)', fakeAsync(() => {
+      // Regression (#8307, now structural): the positional dequeue is gone.
+      // entityChanges is recomputed by the pure, idempotent extractEntityChanges()
+      // on every write, so the quota retry re-extracts THIS action's changes and
+      // can never steal the next pending action's entry the way the old
+      // double-dequeue did.
+      const quotaError = new DOMException('Quota exceeded', 'QuotaExceededError');
+      let appendCount = 0;
+      mockOpLogStore.appendWithVectorClockUpdate.and.callFake(() => {
+        appendCount++;
+        if (appendCount === 1) {
+          return Promise.reject(quotaError);
+        }
+        return Promise.resolve(1);
+      });
+
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      actions$ = of(action);
+
+      effects.persistOperation$.subscribe();
+
+      tick(100);
+      // Append ran twice (initial + retry). Extraction ran once per write and
+      // always against the same action — no positional queue to mis-consume.
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(2);
+      expect(mockOperationCaptureService.extractEntityChanges).toHaveBeenCalledTimes(2);
+      expect(mockOperationCaptureService.extractEntityChanges).toHaveBeenCalledWith(
+        action,
+      );
+    }));
+
     it('should use updated clientId after backup import generates new one', (done) => {
       const action1 = createPersistentAction(ActionType.TASK_SHARED_ADD);
       const action2 = createPersistentAction(ActionType.TASK_SHARED_UPDATE);

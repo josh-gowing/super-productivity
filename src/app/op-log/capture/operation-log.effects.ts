@@ -533,7 +533,11 @@ export class OperationLogEffects implements DeferredLocalActionsPort {
         try {
           // Set circuit breaker before retry to prevent recursive handling
           this.isHandlingQuotaExceeded = true;
-          // Retry the failed operation after compaction freed space
+          // Retry the failed operation after compaction freed space.
+          // #8307 (structural): there is no longer a positional dequeue to
+          // double-consume — entityChanges is recomputed by the pure, idempotent
+          // extractEntityChanges() inside writeOperation, so the retry simply
+          // re-extracts the same changes. Pass isDeferredWrite through unchanged.
           await this.writeOperation(action, isDeferredWrite, options);
           this.snackService.open({
             type: 'SUCCESS',
