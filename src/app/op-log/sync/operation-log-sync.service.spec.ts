@@ -521,6 +521,51 @@ describe('OperationLogSyncService', () => {
           expect(setLastServerSeqSpy).not.toHaveBeenCalled();
           expect(remoteOpsProcessingServiceSpy.processRemoteOps).not.toHaveBeenCalled();
         });
+
+        it('should NOT persist lastServerSeq if processRemoteOps throws (crash window)', async () => {
+          opLogStoreSpy.getUnsynced.and.returnValue(Promise.resolve([]));
+
+          const piggybackedOp: Operation = {
+            id: 'piggybacked-1',
+            clientId: 'client-B',
+            actionType: 'test' as ActionType,
+            opType: OpType.Update,
+            entityType: 'TASK',
+            entityId: 'task-1',
+            payload: { title: 'Test' },
+            vectorClock: { clientB: 1 },
+            timestamp: Date.now(),
+            schemaVersion: 1,
+          };
+
+          uploadServiceSpy.uploadPendingOps.and.resolveTo({
+            uploadedCount: 1,
+            piggybackedOps: [piggybackedOp],
+            rejectedCount: 0,
+            rejectedOps: [],
+            lastServerSeqToPersist: 88,
+          });
+
+          // Simulate a crash mid-apply (e.g. DecryptNoPasswordError, validation throw).
+          remoteOpsProcessingServiceSpy.processRemoteOps.and.rejectWith(
+            new Error('apply failed mid-flight'),
+          );
+
+          const setLastServerSeqSpy = jasmine
+            .createSpy('setLastServerSeq')
+            .and.resolveTo();
+          const mockProvider = {
+            isReady: () => Promise.resolve(true),
+            supportsOperationSync: true,
+            setLastServerSeq: setLastServerSeqSpy,
+          } as any;
+
+          await expectAsync(service.uploadPendingOps(mockProvider)).toBeRejected();
+
+          // The seq must NOT have advanced — the apply threw before completing, so the
+          // next download must re-fetch the piggybacked ops instead of skipping them.
+          expect(setLastServerSeqSpy).not.toHaveBeenCalled();
+        });
       });
 
       describe('rejected ops handling delegation', () => {
