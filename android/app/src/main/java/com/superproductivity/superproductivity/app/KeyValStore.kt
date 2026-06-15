@@ -69,20 +69,48 @@ class KeyValStore(private val context: Context) :
         val newKey = DatabaseUtils.sqlEscapeString(key)
         Log.v(TAG, "getting db value: $newKey")
         val dbHelper = (context.applicationContext as App).keyValStore
-        var value = defaultValue
-        dbHelper.readableDatabase?.let { database ->
-            database.query(
-                DATABASE_TABLE, arrayOf(VALUE), "$KEY=?", arrayOf(newKey), null, null, null
-            )?.let { cursor ->
-                if (cursor.moveToNext()) {
-                    value = cursor.getString(cursor.getColumnIndexOrThrow(VALUE))
+        val database = dbHelper.readableDatabase ?: return defaultValue
+        return try {
+            // Read the value in <2 MB chunks via substr(). A single cursor.getString()
+            // on a row larger than Android's ~2 MB CursorWindow throws
+            // SQLiteBlobTooBigException ("Row too big to fit into CursorWindow"), which
+            // silently broke on-device backup restore once the backup blob grew past
+            // ~2 MB (a year of normal use). substr() is 1-indexed; GET_CHUNK_CHARS is a
+            // CHARACTER count kept well under the byte window even for 4-byte UTF-8.
+            val sb = StringBuilder()
+            var offset = 1
+            var rowExists = false
+            while (true) {
+                database.rawQuery(
+                    "SELECT substr($VALUE, ?, ?) FROM $DATABASE_TABLE WHERE $KEY=? LIMIT 1",
+                    arrayOf(offset.toString(), GET_CHUNK_CHARS.toString(), newKey)
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        rowExists = true
+                        val chunk = cursor.getString(0)
+                        if (chunk == null) {
+                            offset = DONE // VALUE column is NULL
+                        } else {
+                            sb.append(chunk)
+                            // A short chunk means we read past the end → finished.
+                            offset = if (chunk.length < GET_CHUNK_CHARS) DONE else offset + GET_CHUNK_CHARS
+                        }
+                    } else {
+                        offset = DONE // no row for this key
+                    }
                 }
-                Log.v(TAG, "get db value size:" + value.length)
-                cursor.close()
+                if (offset == DONE) break
             }
+            Log.v(TAG, "get db value size:" + sb.length)
+            if (rowExists) sb.toString() else defaultValue
+        } catch (e: Exception) {
+            // Never let a read failure crash the JS bridge — degrade to default so
+            // callers can surface "no backup" instead of an opaque invocation error.
+            Log.e(TAG, "get failed for key $newKey", e)
+            defaultValue
+        } finally {
             database.close()
         }
-        return value
     }
 
     fun clearAll(context: Context) {
@@ -103,6 +131,13 @@ class KeyValStore(private val context: Context) :
         private const val VALUE: String = "VALUE"
         private const val KEY_CREATED_AT: String = "KEY_CREATED_AT"
         private const val TAG: String = "SupKeyValStore"
+
+        // Read large rows in chunks of this many CHARACTERS. Even at 4 bytes/char
+        // (256K * 4 = 1 MB) this stays well under the ~2 MB CursorWindow limit.
+        private const val GET_CHUNK_CHARS: Int = 256 * 1024
+
+        // Sentinel offset signalling the chunked read loop is finished.
+        private const val DONE: Int = -1
         // IF NOT EXISTS so the additive onUpgrade() (which calls onCreate) is safe
         // to run against an already-populated DB without throwing (#7901).
         private const val CREATE_TABLE =
