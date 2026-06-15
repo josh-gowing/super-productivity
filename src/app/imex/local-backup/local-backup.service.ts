@@ -86,13 +86,12 @@ export class LocalBackupService {
   checkBackupAvailable(): Promise<boolean | LocalBackupMeta> {
     if (this._isAndroidWebView) {
       // Available if either ring slot holds a backup (#7901).
-      return androidInterface.loadFromDbWrapped(ANDROID_DB_KEY).then(async (primary) => {
-        if (primary) {
+      return (async () => {
+        if (await this._loadAndroidDbValueSafe(ANDROID_DB_KEY)) {
           return true;
         }
-        const prev = await androidInterface.loadFromDbWrapped(ANDROID_DB_KEY_PREV);
-        return !!prev;
-      });
+        return !!(await this._loadAndroidDbValueSafe(ANDROID_DB_KEY_PREV));
+      })();
     }
     if (this._platformService.isIOS()) {
       return this._checkBackupAvailableIOS();
@@ -112,10 +111,33 @@ export class LocalBackupService {
     // usable exists (degrades to the existing import-error snack rather than
     // throwing on the startup path).
     const [primary, prev] = await Promise.all([
-      androidInterface.loadFromDbWrapped(ANDROID_DB_KEY),
-      androidInterface.loadFromDbWrapped(ANDROID_DB_KEY_PREV),
+      this._loadAndroidDbValueSafe(ANDROID_DB_KEY),
+      this._loadAndroidDbValueSafe(ANDROID_DB_KEY_PREV),
     ]);
     return selectBestBackupStr(primary, prev) ?? '';
+  }
+
+  /**
+   * Android-only native-KV read with diagnostics + graceful failure.
+   *
+   * - Logs the blob SIZE (never content — see core/log rule 9) so a shared log
+   *   export shows whether a backup has grown into the ~2 MB CursorWindow danger
+   *   zone that used to make `loadFromDb` throw.
+   * - Returns null instead of throwing, so a read failure degrades to "no backup"
+   *   (the existing snack) rather than an opaque "Error invoking loadFromDb" that
+   *   aborts the whole restore action.
+   */
+  private async _loadAndroidDbValueSafe(key: string): Promise<string | null> {
+    try {
+      const val = await androidInterface.loadFromDbWrapped(key);
+      Log.log(
+        `LocalBackupService: read Android backup '${key}' (${val ? val.length : 0} chars)`,
+      );
+      return val;
+    } catch (e) {
+      Log.err(`LocalBackupService: failed to read Android backup '${key}'`, e);
+      return null;
+    }
   }
 
   async loadBackupIOS(): Promise<string> {
@@ -379,14 +401,30 @@ export class LocalBackupService {
   // Returns true when a backup was actually written, false when the A3 guard
   // skipped it (so the caller knows whether to advance the last-backup time).
   private async _backupAndroid(data: AppDataComplete): Promise<boolean> {
-    const existing = await androidInterface.loadFromDbWrapped(ANDROID_DB_KEY);
+    // Read the existing primary slot directly (NOT via _loadAndroidDbValueSafe): on the
+    // write path a read failure is ambiguous — we can't tell "no backup yet" from
+    // "unreadable" — so we must not overwrite the primary on uncertainty. Bail instead,
+    // preserving both ring slots; the next cycle retries (#7901).
+    let existing: string | null;
+    try {
+      existing = await androidInterface.loadFromDbWrapped(ANDROID_DB_KEY);
+    } catch (e) {
+      Log.err(
+        'LocalBackupService: skipping Android backup — could not read existing slot',
+        e,
+      );
+      return false;
+    }
     if (this._guardNearEmptyOverwrite(data, existing, 'Android')) {
       return false;
     }
     if (existing) {
       await androidInterface.saveToDbWrapped(ANDROID_DB_KEY_PREV, existing);
     }
-    await androidInterface.saveToDbWrapped(ANDROID_DB_KEY, JSON.stringify(data));
+    const json = JSON.stringify(data);
+    // Size only, never content (core/log rule 9) — lands in shared log exports.
+    Log.log(`LocalBackupService: writing Android backup (${json.length} chars)`);
+    await androidInterface.saveToDbWrapped(ANDROID_DB_KEY, json);
     return true;
   }
 
