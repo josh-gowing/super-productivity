@@ -104,8 +104,11 @@ describe('privacyExport', () => {
     cases.forEach(([key, value]) => {
       it(`should mask ${key} field`, () => {
         const result = JSON.parse(privacyExport({ [key]: value }));
-        expect(result[key]).toMatch(new RegExp(`^${key}__\\d+$`));
-        expect(result[key]).not.toBe(value);
+        const masked = result[key] as string;
+        // static regex literal (no dynamic RegExp built from the case data)
+        expect(masked).toMatch(/__\d+$/);
+        expect(masked.startsWith(`${key}__`)).toBe(true);
+        expect(masked).not.toBe(value);
       });
     });
 
