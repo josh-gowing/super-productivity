@@ -90,6 +90,44 @@ describe('privacyExport', () => {
     });
   });
 
+  describe('issue provider credential fields', () => {
+    const cases: [string, string][] = [
+      ['apiKey', 'trello-api-key-abc'],
+      ['secret', 'oauth-secret-xyz'],
+      ['authorization', 'Basic dXNlcjpwYXNz'],
+      ['icalUrl', 'https://calendar.google.com/calendar/ical/SECRET_TOKEN/basic.ics'],
+      ['nextcloudBaseUrl', 'https://cloud.example.com'],
+      ['organization', 'my-azure-org'],
+      ['filterUsername', 'john_doe'],
+    ];
+
+    cases.forEach(([key, value]) => {
+      it(`should mask ${key} field`, () => {
+        const result = JSON.parse(privacyExport({ [key]: value }));
+        expect(result[key]).toMatch(new RegExp(`^${key}__\\d+$`));
+        expect(result[key]).not.toBe(value);
+      });
+    });
+
+    it('should mask credentials in a realistic Trello provider config', () => {
+      const input = {
+        issueProviderKey: 'TRELLO',
+        boardId: 'board-123',
+        apiKey: 'trello-key-secret',
+        token: 'trello-token-secret',
+      };
+      const result = JSON.parse(privacyExport(input));
+      expect(result.apiKey).toMatch(/^apiKey__\d+$/);
+      expect(result.token).toMatch(/^token__\d+$/);
+      // non-credential fields are preserved
+      expect(result.boardId).toBe('board-123');
+      expect(result.issueProviderKey).toBe('TRELLO');
+      const jsonString = JSON.stringify(result);
+      expect(jsonString).not.toContain('trello-key-secret');
+      expect(jsonString).not.toContain('trello-token-secret');
+    });
+  });
+
   describe('email exposure prevention', () => {
     it('should completely mask email addresses in resourceName', () => {
       const input = { resourceName: 'john.doe@company.com/personal-calendar' };
