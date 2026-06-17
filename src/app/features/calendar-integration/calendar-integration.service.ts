@@ -463,11 +463,20 @@ export class CalendarIntegrationService {
               msg: T.F.CALENDARS.S.CAL_PROVIDER_NOT_ICAL,
             });
           } else {
+            // Replace the raw iCal URL (which may embed a secret token) with
+            // the sanitized host so the user-visible snackbar can't leak it
+            // via screenshot/screenshare.
+            const rawErrTxt = getErrorTxt(err);
+            const errTxt = calProvider.icalUrl
+              ? rawErrTxt
+                  .split(calProvider.icalUrl)
+                  .join(sanitizeIcalUrlForDisplay(calProvider.icalUrl))
+              : rawErrTxt;
             this._snackService.open({
               type: 'ERROR',
               msg: T.F.CALENDARS.S.CAL_PROVIDER_ERROR,
               translateParams: {
-                errTxt: getErrorTxt(err),
+                errTxt,
               },
             });
           }
