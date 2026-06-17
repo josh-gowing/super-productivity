@@ -1,52 +1,160 @@
 @if (data(); as heatmapData) {
-  <div class="heatmap-container">
-    <div class="heatmap-grid">
-      <div class="day-labels">
-        <div class="month-spacer"></div>
-        @for (label of dayLabels(); track $index) {
-          <div class="day-label">{{ label }}</div>
-        }
-      </div>
-
-      <div
-        class="scrollable-content"
-        #scrollableContent
-      >
-        <div class="heatmap-months">
-          @for (month of heatmapData.monthLabels; track $index) {
-            <div class="month-label">{{ month }}</div>
+  @if (heatmapData.months; as months) {
+    <div
+      class="heatmap-container"
+      [class.is-interactive]="interactive()"
+    >
+      @if (tip(); as t) {
+        <div
+          class="heatmap-tip"
+          [style.left.px]="t.x"
+          [style.top.px]="t.y"
+        >
+          {{ t.text }}
+        </div>
+      }
+      @if (navLabel()) {
+        <div class="heatmap-nav">
+          <!-- Arrows only when there is anywhere to go — a single navigable
+               year would render two permanently dead buttons. -->
+          @if (canNavPrev() || canNavNext()) {
+            <button
+              mat-icon-button
+              type="button"
+              [disabled]="!canNavPrev()"
+              (click)="navPrev.emit()"
+            >
+              <mat-icon>chevron_left</mat-icon>
+            </button>
+          }
+          <div class="heatmap-nav__title">{{ navLabel() }}</div>
+          @if (canNavPrev() || canNavNext()) {
+            <button
+              mat-icon-button
+              type="button"
+              [disabled]="!canNavNext()"
+              (click)="navNext.emit()"
+            >
+              <mat-icon>chevron_right</mat-icon>
+            </button>
           }
         </div>
-
-        <div class="weeks">
-          @for (week of heatmapData.weeks; track $index) {
-            <div class="week">
-              @for (day of week.days; track $index) {
-                <div
-                  [class]="getDayClass(day)"
-                  [title]="getDayTitle(day)"
-                ></div>
+      }
+      <div class="heatmap-month-row">
+        <div class="day-labels day-labels--blocks">
+          @for (row of dayLabelRows(); track row.weekdayIdx) {
+            <div
+              class="day-label"
+              [class.is-clickable]="interactiveMenus()"
+              [matTooltip]="weekdayHeaderTooltips()?.get(row.weekdayIdx) || ''"
+              [matTooltipDisabled]="!weekdayHeaderTooltips()?.get(row.weekdayIdx)"
+              (click)="onYearWeekdayClick(row.weekdayIdx, $event)"
+            >
+              {{ row.label }}
+            </div>
+          }
+        </div>
+        <div
+          class="heatmap-month-blocks"
+          [class.dragging]="isDragging()"
+          [class.is-pannable]="interactive()"
+          (pointerdown)="onBlocksPointerDown($event)"
+          (pointermove)="onBlocksPointerMove($event)"
+          (pointerup)="onBlocksPointerUp($event)"
+          (pointercancel)="onBlocksPointerUp($event)"
+        >
+          @for (m of months; track $index) {
+            <div class="heatmap-month">
+              <div class="weeks">
+                @for (week of m.weeks; track $index) {
+                  <div class="week">
+                    @for (day of week.days; track $index) {
+                      <div
+                        [class]="getDayClass(day)"
+                        [attr.role]="interactive() && day ? 'button' : null"
+                        [attr.tabindex]="interactive() && day ? 0 : null"
+                        [attr.aria-label]="day ? getDayTitle(day) : null"
+                        (mouseenter)="showTip(day, $event)"
+                        (mouseleave)="hideTip()"
+                        (focus)="showTip(day, $event)"
+                        (blur)="hideTip()"
+                        (click)="onDayClick(day, $event)"
+                        (dblclick)="interactive() && day && dayDblClick.emit(day)"
+                        (keydown.enter)="interactive() && onDayKeydown($event, day)"
+                        (keydown.space)="interactive() && onDayKeydown($event, day)"
+                      ></div>
+                    }
+                  </div>
+                }
+              </div>
+              <div
+                class="heatmap-month__label"
+                [class.is-clickable]="interactiveMenus()"
+                [class.is-limited]="isMonthLimited(m.monthIndex)"
+                [matTooltip]="monthTooltip()"
+                [matTooltipDisabled]="!monthTooltip() || !isMonthLimited(m.monthIndex)"
+                (click)="onYearMonthClick(m.monthIndex, $event)"
+              >
+                {{ m.label }}
+                @if (isMonthLimited(m.monthIndex)) {
+                  <span class="heatmap-month__limit-chip"></span>
+                }
+              </div>
+              @if (m.total) {
+                <div class="heatmap-month__total">{{ m.total }}</div>
               }
             </div>
           }
         </div>
       </div>
+
+      @if (label()) {
+        <div class="heatmap-label">{{ label() }}</div>
+      }
+
+      @if (legendMode() === 'intensity') {
+        <div class="heatmap-legend">
+          <span>{{ T.G.HEATMAP_LOW | translate }}</span>
+          <div class="legend-item level-0"></div>
+          <div class="legend-item level-1"></div>
+          <div class="legend-item level-2"></div>
+          <div class="legend-item level-3"></div>
+          <div class="legend-item level-4"></div>
+          <span>{{ T.G.HEATMAP_HIGH | translate }}</span>
+        </div>
+      } @else if (legendMode() === 'projection') {
+        <!-- Each swatch + its label is one nowrap unit; the legend wraps BETWEEN
+             units (not mid-label) so a narrow strip flows cleanly onto 2 lines. -->
+        <div class="heatmap-legend heatmap-legend--wrap">
+          <span class="legend-pair">
+            <span class="legend-item start"></span>{{ T.G.HEATMAP_START_DAY | translate }}
+          </span>
+          <span class="legend-pair">
+            <span class="legend-item today"></span>{{ T.G.HEATMAP_TODAY | translate }}
+          </span>
+          <span class="legend-pair">
+            <span class="legend-item projected"></span
+            >{{ T.G.HEATMAP_PROJECTED | translate }}
+          </span>
+          <span class="legend-pair">
+            <span class="legend-item next"></span>{{ T.G.HEATMAP_NEXT | translate }}
+          </span>
+          <span class="legend-pair">
+            <span class="legend-item end"></span>{{ T.G.HEATMAP_END_DAY | translate }}
+          </span>
+          @if (showActivity()) {
+            <span class="legend-pair">
+              <span class="legend-ramp">
+                <span class="legend-item activity-1"></span>
+                <span class="legend-item activity-2"></span>
+                <span class="legend-item activity-3"></span>
+                <span class="legend-item activity-4"></span>
+              </span>
+              {{ T.G.HEATMAP_ACTIVITY_LEGEND | translate }}
+            </span>
+          }
+        </div>
+      }
     </div>
-
-    @if (label()) {
-      <div class="heatmap-label">{{ label() }}</div>
-    }
-
-    @if (showLegend()) {
-      <div class="heatmap-legend">
-        <span>Less</span>
-        <div class="legend-item level-0"></div>
-        <div class="legend-item level-1"></div>
-        <div class="legend-item level-2"></div>
-        <div class="legend-item level-3"></div>
-        <div class="legend-item level-4"></div>
-        <span>More</span>
-      </div>
-    }
-  </div>
+  }
 }

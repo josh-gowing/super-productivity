@@ -8,36 +8,119 @@
   gap: var(--s2);
 }
 
-// A sentence-style row: label + inline controls.
 .rb-row {
   display: flex;
   align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
   gap: var(--s);
 }
 
-.rb-lbl {
-  font-weight: bold;
-  opacity: 0.85;
+// Row labels: sentence-case, medium weight, slightly muted, centered.
+.rb-lbl,
+.rb-field > label {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.75;
+  text-align: center;
 }
 
 .rb-field {
   display: flex;
   flex-direction: column;
-  gap: var(--s-quarter, 4px);
+  align-items: center;
+  gap: var(--s);
+}
+
+// Inline variant: label sits on the SAME line as its control (e.g. "Ends" +
+// the three end-type buttons, "Schedule type" + the two options). Wraps only
+// on a genuinely narrow surface.
+.rb-field--inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
 
   > label {
-    font-weight: bold;
-    opacity: 0.85;
+    margin-right: var(--s-half);
   }
 }
 
-// Shared control styling (native select / input themed to the app).
+// "Repeat every" reads as one inline phrase: label + stepper + unit dropdown
+// grouped close together (no space-between push).
+.rb-row--repeat {
+  gap: var(--s);
+}
+
+.rb-repeat-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-half);
+}
+
+// --- Interval stepper (− N +) ---
+.rb-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--extra-border-color);
+  border-radius: var(--card-border-radius);
+  overflow: hidden;
+}
+
+.rb-step {
+  width: 38px;
+  height: 38px;
+  border: none;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover:not([disabled]) {
+    background: var(--bg-lightest);
+  }
+
+  &[disabled] {
+    opacity: 0.35;
+    cursor: default;
+  }
+}
+
+.rb-step-num {
+  width: 46px;
+  height: 38px;
+  border: none;
+  border-left: 1px solid var(--extra-border-color);
+  border-right: 1px solid var(--extra-border-color);
+  background: transparent;
+  color: var(--text-color);
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  -moz-appearance: textfield;
+  appearance: textfield;
+
+  &:focus {
+    outline: none;
+  }
+
+  &::-webkit-outer-spin-button,
+  &::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+// Segmented controls (end condition, schedule type) now use the shared
+// `segmented-button-group` component — no local segmented styles needed.
+
+// --- Inputs / native selects ---
 .rb-sel,
 .rb-num,
 .rb-text,
 .rb-date {
-  height: 40px; // touch-friendly
+  height: 38px;
   padding: 0 var(--s);
   color: var(--text-color);
   background: var(--bg, transparent);
@@ -52,13 +135,41 @@
   }
 }
 
+// Native select themed with a custom chevron so it doesn't look raw. A native
+// <select> can't host a pseudo-element or inherit `currentColor` into a
+// background data-URI, so the arrow color is baked into the SVG and swapped per
+// theme (same approach as the native datepicker indicator).
+.rb-sel {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23666' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
+
+  :host-context(.isDarkTheme) & {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23bbb' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  }
+}
+
 .rb-num {
-  width: 64px;
+  width: 56px;
   text-align: center;
+  font-weight: 600;
 }
 
 .rb-sel--wide {
-  min-width: 180px;
+  min-width: 200px;
+}
+
+// Unit dropdown in the "Repeat every" line — sized to its content, and matched
+// to the stepper number (15px / 600) so the inline phrase reads uniform.
+.rb-sel--freq {
+  min-width: 96px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .rb-text {
@@ -68,36 +179,51 @@
     font-family: monospace;
   }
 
-  // Sits inline next to a select within a row (e.g. the custom BYSETPOS input).
   &--inline {
     width: 110px;
   }
 }
 
-// Toggle buttons for weekdays / months.
+// --- Toggle chips (weekdays / months / day-of-month / segmented pills) ---
 .rb-toggles {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s-quarter, 4px);
+  justify-content: center;
+  gap: var(--s-half);
 
   &--months {
     max-width: 320px;
   }
 
-  // Calendar-style day-of-month grid (~7 per row).
+  // Day-of-month picker laid out as a 7-column calendar grid. Capped so 7
+  // columns fit a 375px-wide phone with margin, and shrinks below that.
   &--days {
-    max-width: 300px;
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: var(--s-quarter, 4px);
+    width: 100%;
+    max-width: 322px;
   }
 }
 
-.rb-tgl--wide {
-  min-width: auto;
-  padding: 0 var(--s2);
+// "Last day / 2nd-last / 3rd-last" pills sit on their own row under the grid.
+.rb-day-extras {
+  margin-top: var(--s-half);
+}
+
+// "custom…" reveal for the free-text day list — quiet, set apart from the grid.
+.rb-custom-toggle {
+  margin-top: var(--s-half);
+  opacity: 0.85;
+}
+
+.rb-weekrow {
+  gap: var(--s-half);
 }
 
 .rb-tgl {
-  min-width: 40px;
-  height: 40px; // touch-friendly tap target
+  min-width: 38px;
+  height: 38px;
   padding: 0 var(--s);
   touch-action: manipulation;
   display: inline-flex;
@@ -110,9 +236,9 @@
   font-size: 13px;
   cursor: pointer;
   transition:
-    background 0.1s ease,
-    color 0.1s ease,
-    border-color 0.1s ease;
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
 
   &:hover {
     border-color: var(--c-primary);
@@ -122,14 +248,94 @@
     background: var(--c-primary);
     border-color: var(--c-primary);
     color: #fff;
-    font-weight: bold;
+    font-weight: 600;
   }
+}
+
+// Wide pills read as a segmented option (occurrence-which, add row, etc).
+.rb-tgl--wide {
+  min-width: auto;
+  padding: 0 var(--s2);
+  border-radius: 19px;
+}
+
+// Weekday letter chips → circles (TickTick). Single-letter chips in weekday
+// groups only — not the day-of-month grid, month grid, or wide pills.
+.rb-toggles:not(.rb-toggles--days):not(.rb-toggles--months) .rb-tgl:not(.rb-tgl--wide) {
+  min-width: 38px;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+// Day-of-month grid styled like the deadline modal's calendar: borderless
+// circular cells, primary-filled when selected, subtle hover otherwise.
+.rb-toggles--days .rb-tgl {
+  min-width: 0;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  font-size: 13px;
+  border: none;
+  border-radius: 50%;
+
+  &:hover:not(.active) {
+    background: var(--bg-lightest, rgba(127, 127, 127, 0.12));
+  }
+}
+
+.rb-ends {
+  display: flex;
+  // Stack the segmented control above its conditional COUNT/UNTIL input so the
+  // control keeps a stable full width — a row layout let it (and its label
+  // wrapping) resize as the input appeared/disappeared, so the control
+  // "bounced" with each selection.
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s);
 }
 
 .rb-hint {
   font-size: 12px;
   line-height: 1.4;
-  opacity: 0.65;
+  opacity: 0.6;
+  text-align: center;
+}
+
+// The assembled rule + copy button beneath the raw-override field.
+.rb-built {
+  display: flex;
+  align-items: center;
+  gap: var(--s-half);
+  margin-top: var(--s-half);
+
+  &__expr {
+    font-family: monospace;
+    font-size: 12px;
+    opacity: 0.75;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+}
+
+// Engine-off messaging: the per-device advanced-recurrence flag is off, so
+// parts of the rule won't drive scheduling — accented so it reads as a notice,
+// not as one more field description.
+.rb-engine-off {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: var(--s) var(--s2);
+  border-left: 3px solid var(--c-warn, var(--c-primary));
+  background: var(--c-dark-10);
+  border-radius: var(--card-border-radius);
+}
+
+.rb-hint--engine-off {
+  opacity: 0.9;
+  border-left: 3px solid var(--c-warn, var(--c-primary));
+  padding-left: var(--s);
 }
 
 .rb-adv {
@@ -137,4 +343,10 @@
   flex-direction: column;
   gap: var(--s2);
   padding-top: var(--s);
+
+  // Divider between the projected Ends/Schedule block and the rrule-only
+  // advanced fields (BYMONTH / WKST / raw …).
+  &__sep {
+    border-top: 1px solid var(--separator-color, var(--extra-border-color));
+  }
 }

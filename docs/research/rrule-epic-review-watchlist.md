@@ -50,10 +50,13 @@ Released-master `MonthlyWeekOfMonth = 1|2|3|4|-1`; `MonthlyWeekday = 0..6`.
 - [ ] **No optional synced field is "cleared" via `undefined`** expecting it to
       propagate — JSON.stringify drops the key, so remotes never see the clear. Use a
       wire-stable strategy. (§3.)
-- [ ] **Legacy fallback fields stay faithful.** Old clients ignore `rrule` and schedule
-      from `repeatCycle` + weekday flags + monthly anchors + `startDate`-day. Any rule
-      the builder can emit must round-trip to legacy fields that fire on the _same days_,
-      or the value must be left unset so old clients fall back cleanly. (§4.)
+- [ ] **Legacy fallback fields stay faithful — or sentinel, never approximate.** Old
+      clients ignore `rrule` and schedule from `repeatCycle` + weekday flags + monthly
+      anchors + `startDate`-day. Any rule the builder can emit must round-trip to legacy
+      fields that fire on the _same days_; a rule outside legacy expressiveness writes
+      `LEGACY_NEVER_FIRES_FALLBACK` (all-false WEEKLY — old clients create nothing)
+      plus the authoring-time warning. Decided policy 2026-06-11 — see the roadmap's
+      "Legacy-fallback contract". (§4.)
 - [ ] **Effects inject `LOCAL_ACTIONS`** (lint-enforced); multi-entity changes go through
       a meta-reducer, not effect fan-out; no `Date.now()` in pure engine/reducer code.
 - [ ] **Never log rule bodies or task content** — `rrule` (raw-override = free-text),
@@ -70,11 +73,11 @@ Released-master `MonthlyWeekOfMonth = 1|2|3|4|-1`; `MonthlyWeekday = 0..6`.
   (`_processQuickSettingForDate`). Clamp centralized in the `addTaskRepeatCfgToTask` /
   `updateTaskRepeatCfg` / `updateTaskRepeatCfgs` **action creators**
   (`toSyncSafeQuickSetting` / `_toPersisted`, `MASTER_SAFE_QUICK_SETTINGS`). (Comments #5–9.)
-- ❓ **`monthlyWeekOfMonth` out-of-range** — `rruleToLegacyTaskRepeatCfg` blind-casts the
-  BYDAY ordinal; builder custom-ordinal allows ±5 (monthly) / ±53 (yearly), so
-  `BYDAY=5MO`→`5`, `BYDAY=-2MO`→`-2` are outside `1|2|3|4|-1`. Fix: only set the anchor
-  when model-valid (`n===-1 || (n>=1&&n<=4)`), else leave unset; mirror a strip/repair in
-  the action boundary **and `data-repair.ts`**. (Comment #15.1 — verify still guarded.)
+- ✅ **`monthlyWeekOfMonth` out-of-range** — `rruleToLegacyTaskRepeatCfg` only maps
+  model-valid ordinals (`1..4 | -1`); an out-of-range ordinal (`BYDAY=5MO`, `-2MO`) now
+  routes the whole rule to the never-fires sentinel (spec-pinned). Still open from the
+  original finding: mirror a strip/repair in the action boundary **and `data-repair.ts`**
+  for non-dialog producers. (Comment #15.1.)
 - ❓ **`null` anchors not master-safe** — `monthlyWeekOfMonth`/`monthlyWeekday = null` must
   be normalized to absent/`undefined` before persist (`_normalizeMonthlyAnchor`). (Comments #13.3, #15.) The
   follow-up fix `fix(task-repeat-cfg): clear repeat-from-completion…` touches this path.
@@ -93,8 +96,11 @@ rrule: undefined }` branch is removed); editing a preset no longer drops the can
 - 🔶 **`MONTHLY_ANCHOR_RESET` (nth-weekday → day-of-month switch)** — clearing
   `monthlyWeekOfMonth`/`monthlyWeekday` via `undefined` doesn't propagate, so a **released**
   client (ignores `rrule`, checks Nth-weekday anchors first) keeps scheduling the old
-  rule. Affects the whole installed base during the mixed-version window; self-heals once
-  both devices run the rrule build, loses no data. **Tracked follow-up** — needs a
+  rule. Scope sharpened 2026-06-11: because the per-device flag defaults OFF, _every_
+  remote client routes the legacy engine today — the gap applies to the whole installed
+  base (incl. fully-updated flag-off devices) until the flag defaults on, not just
+  PRE-rrule versions; the model comment now says so. Self-heals once
+  both devices route the rrule engine, loses no data. **Tracked follow-up** — needs a
   wire-stable clear/replace strategy or the two-release `| null` migration, not a code
   comment alone. (Comments #16.3, #17.1, #19.) **This is the canonical example — any new
   "switch mode clears a legacy anchor" path inherits it.**
@@ -102,7 +108,20 @@ rrule: undefined }` branch is removed); editing a preset no longer drops the can
 ## 4. Legacy ⇄ RRULE dual-engine fidelity ✅ (keep faithful)
 
 Old clients schedule from legacy fields; new clients prefer a valid `rrule`. Divergence =
-the same task fires on different days per device.
+the same task fires on different days per device — and because creation is per-device
+recomputation deduped by `rpt_<cfgId>_<dueDay>`, different days = **duplicate tasks on
+every device** plus `lastTaskCreationDay` cross-suppression (see the roadmap's
+"governing risk model"). Note the flag gates evaluation, so "old client" here includes
+every **flag-off** rrule-aware build.
+
+- ✅ **Non-representable rules → never-fires sentinel** (decided 2026-06-11):
+  COUNT/UNTIL, seasonal `BYMONTH`, `BYWEEKNO`/`BYYEARDAY`, multi-day lists,
+  out-of-union ordinals, yearly weekday modes write `LEGACY_NEVER_FIRES_FALLBACK`
+  (all-false WEEKLY, every value wire-stable) instead of a wrong-day approximation;
+  the dialog warns via `isRRuleLegacyRepresentable` / `RRULE_LEGACY_INCOMPAT`, and the
+  flag-off builder notices say "creates no tasks" rather than "simplified rhythm".
+  Bonus: the sentinel's `repeatCycle: 'WEEKLY'` switch is wire-stable, so it sidesteps
+  the §3 stale-anchor gap (anchors are only read in the legacy MONTHLY branch).
 
 - ✅ **Malformed `rrule` → silent dormancy** — the three dispatchers gate on `isRRuleValid`
   and fall back to legacy fields instead of returning `null`. (Comments #5, #7; reinforced
@@ -132,7 +151,11 @@ BYMONTH=13`, Feb-30 combos) walked to year 275760 (~3.8s freeze) and returned `t
   Fixed: `_canNeverFire` pre-screen (contradictory BY-constraints) + the probe must
   actually return an occurrence; `UNTIL`/`COUNT` stripped for the probe.
   (Commit `d1ef458`; Comment #20 🟠.) Note: `.between()`/`until` do **not** bound a
-  never-firing rule in rrule.js — only `_canNeverFire` does.
+  never-firing rule in rrule.js — only `_canNeverFire` does. Re-measured 2026-06-11:
+  `FREQ=DAILY;BYWEEKNO=53;BYMONTH=2` with `UNTIL=2030` still walked **10.1 s** — the
+  "replace heuristics with a bounded 10-year probe" idea is structurally impossible on
+  rrule.js (until/between are checked against _emitted_ occurrences only). Heuristics
+  stay; the live preview is now gated on the same memoised `isRRuleValid`.
 - ✅ **`_canNeverFire` combo coverage** — the original pre-screen only paired
   `BYMONTH` × positive `BYMONTHDAY`, so `BYMONTH` × `BYYEARDAY` / `BYWEEKNO`
   contradictions (`FREQ=DAILY;BYWEEKNO=53;BYMONTH=2`: measured ~7–10s) slipped through
@@ -148,9 +171,11 @@ BYMONTH=13`, Feb-30 combos) walked to year 275760 (~3.8s freeze) and returned `t
 - 🔶 **Sub-daily FREQ (HOURLY/MINUTELY/SECONDLY)** — engine maps every occurrence to local
   noon, so sub-daily silently collapses to ~daily; also `FREQ_TO_CYCLE` miss →
   `repeatCycle: undefined` → required-field typia failure. Rejected at the **dialog**
-  only. **Mirror the guard at the engine/persist/`data-repair` boundary** so a synced/
-  imported/REST rule can't slip past. (Comments #15.2, #20 🟡.) Phase 12 owns real
-  sub-daily support.
+  AND at the **engine validity gate** (`isRRuleValid` rejects non-day-granular FREQs →
+  a synced/imported rule drops to the legacy `repeatCycle` fallback instead of
+  mis-firing daily). Still open: the persist/`data-repair` ingestion guard (strip or
+  reject at the write boundary) — lands with Phase 7's ingestion guards.
+  (Comments #15.2, #20 🟡.) Phase 12 owns real sub-daily support.
 - 🔶 **`COUNT` + `repeatFromCompletionDate`** — completion re-anchors `startDate` +
   `lastTaskCreationDay`, restarting the COUNT window → never terminates. Rejected at the
   dialog only; mirror at the persist boundary. (Comment #20 🟡.)
@@ -229,6 +254,10 @@ BYMONTH=13`, Feb-30 combos) walked to year 275760 (~3.8s freeze) and returned `t
 - ❓ **Lockfile** — earlier rounds flagged stale `cron-parser` / `cronstrue` entries in
   `package-lock.json` with no source imports. Should be gone post-pivot — verify
   `package-lock.json` only adds `rrule` (+ pre-existing `tslib`). (Comments #9, #20.)
+- ✅ **`rrule` pinned exact (`2.8.1`, no caret)** — occurrence streams are downstream of
+  a third-party parser; a caret upgrade changing parsing on some devices mid-account
+  re-creates the duplicate-task mechanics between identical app versions. Bump only
+  deliberately, with the invariants/differential specs as the tripwire.
 
 ---
 

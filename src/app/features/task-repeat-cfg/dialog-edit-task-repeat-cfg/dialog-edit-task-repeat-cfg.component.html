@@ -9,21 +9,19 @@
         ? (T.F.TASK_REPEAT.D_EDIT.EDIT | translate)
         : (T.F.TASK_REPEAT.D_EDIT.ADD | translate)
     }}
+    <button
+      mat-icon-button
+      type="button"
+      class="fullscreen-toggle"
+      [title]="T.G.TOGGLE_FULLSCREEN | translate"
+      [attr.aria-label]="T.G.TOGGLE_FULLSCREEN | translate"
+      (click)="toggleFullScreen()"
+    >
+      <mat-icon>{{ isFullScreen() ? 'fullscreen_exit' : 'fullscreen' }}</mat-icon>
+    </button>
   </h1>
 
   <mat-dialog-content>
-    @if (repeatCfgId(); as cfgId) {
-      <collapsible
-        [title]="T.F.TASK_REPEAT.D_EDIT.HEATMAP_LABEL | translate"
-        icon="bar_chart"
-        (isExpandedChange)="isHeatmapExpanded = $event"
-      >
-        @if (isHeatmapExpanded) {
-          <repeat-task-heatmap [repeatCfgId]="cfgId" />
-        }
-      </collapsible>
-    }
-
     <div class="form-wrapper">
       <formly-form
         (modelChange)="repeatCfg.set($event)"
@@ -32,15 +30,656 @@
         [model]="repeatCfg()"
       ></formly-form>
 
+      <!-- The recurrence controls (Repeat / Every / On / Ends / Schedule type)
+           come FIRST; the calendar below previews the rule they define. -->
+      <repeat-freq-picker
+        [label]="T.F.TASK_REPEAT.F.QUICK_SETTING | translate"
+        [options]="quickSettingOptions()"
+        [commonValues]="quickSettingCommon"
+        [value]="repeatCfg().quickSetting"
+        (selected)="onQuickSettingSelect($event)"
+      ></repeat-freq-picker>
+
       @if (isRRuleMode()) {
+        <!-- Custom mode: the builder hosts the calendar in its projection slot
+             (between On and Ends), so Ends / Schedule type sit BELOW it. -->
         <rrule-builder
           [rrule]="repeatCfg().rrule ?? ''"
           [startDate]="repeatCfg().startDate"
-          [repeatFromCompletion]="repeatCfg().repeatFromCompletionDate ?? false"
           (rruleChange)="onRRuleChange($event)"
-          (repeatFromCompletionChange)="onRepeatFromCompletionChange($event)"
-        ></rrule-builder>
+        >
+          <ng-container [ngTemplateOutlet]="cal"></ng-container>
+          <!-- Projected into the TOP of the builder's "Advanced rule" section —
+               Ends + Schedule type are advanced, Custom-only settings. -->
+          <div
+            recurrenceOptions
+            class="rrule-ends"
+          >
+            <div class="rrule-ends__field">
+              <label>{{ T.F.TASK_REPEAT.F.RRULE_END | translate }}</label>
+              <div class="rrule-ends__control">
+                <segmented-button-group
+                  [options]="endOptions"
+                  [selectedId]="endType()"
+                  [ariaLabel]="T.F.TASK_REPEAT.F.RRULE_END | translate"
+                  size="md"
+                  (selectionChange)="onEndTypeChange($event)"
+                ></segmented-button-group>
+                @if (endType() === 'COUNT') {
+                  <input
+                    class="rrule-ends__num"
+                    type="number"
+                    min="1"
+                    max="1000"
+                    [value]="endCount()"
+                    (input)="setEndCount($any($event.target).value)"
+                    [attr.aria-label]="T.F.TASK_REPEAT.F.RRULE_END_COUNT | translate"
+                  />
+                }
+                @if (endType() === 'UNTIL') {
+                  <input
+                    class="rrule-ends__date"
+                    type="date"
+                    [value]="endUntil()"
+                    (input)="setEndUntil($any($event.target).value)"
+                    [attr.aria-label]="T.F.TASK_REPEAT.F.RRULE_END_UNTIL | translate"
+                  />
+                }
+              </div>
+            </div>
+            <div class="rrule-ends__field">
+              <label>{{ T.F.TASK_REPEAT.F.RRULE_SCHEDULE_TYPE | translate }}</label>
+              <div class="rrule-ends__control">
+                <segmented-button-group
+                  [options]="scheduleTypeOptions"
+                  [selectedId]="scheduleSelectedId()"
+                  [ariaLabel]="T.F.TASK_REPEAT.F.RRULE_SCHEDULE_TYPE | translate"
+                  size="md"
+                  (selectionChange)="onScheduleTypeChange($event)"
+                ></segmented-button-group>
+              </div>
+            </div>
+            <div class="rrule-ends__hint">
+              {{
+                (scheduleSelectedId() === 'COMPLETION'
+                  ? T.F.TASK_REPEAT.F.RRULE_SCHEDULE_TYPE_DESC_COMPLETION
+                  : T.F.TASK_REPEAT.F.RRULE_SCHEDULE_TYPE_DESC_FIXED
+                ) | translate
+              }}
+            </div>
+          </div>
+        </rrule-builder>
+      } @else {
+        <!-- Preset mode: no builder, so the calendar renders standalone. -->
+        <ng-container [ngTemplateOutlet]="cal"></ng-container>
       }
+
+      <!-- Start-date picker + occurrence calendar — the start picker for EVERY
+           repeat mode (click a day = set start; double-click = simulate). In
+           RRULE mode it's projected into the builder between On and Ends; for
+           presets it renders standalone. The textual summary stays in the
+           sticky strip at the bottom. -->
+      <ng-template #cal>
+        @if (hasRule()) {
+          @if (resultHeatmapData(); as hd) {
+            <div class="rrule-cal">
+              @if (startParts(); as sp) {
+                <div class="rrule-cal__start">
+                  <span class="rrule-cal__start-label"
+                    >{{ T.F.TASK_REPEAT.F.START_DATE | translate }}:</span
+                  >
+                  <div class="rrule-cal__start-fields">
+                    <select
+                      class="rrule-cal__start-field rrule-cal__start-month"
+                      (change)="setStartMonth(+$any($event.target).value)"
+                      [attr.aria-label]="T.F.TASK_REPEAT.F.START_DATE | translate"
+                    >
+                      @for (mo of monthOptions(); track mo.value) {
+                        <option
+                          [value]="mo.value"
+                          [selected]="mo.value === sp.m"
+                        >
+                          {{ mo.name }}
+                        </option>
+                      }
+                    </select>
+                    <input
+                      class="rrule-cal__start-field rrule-cal__start-day"
+                      type="number"
+                      min="1"
+                      max="31"
+                      [value]="sp.d"
+                      (change)="setStartDay(+$any($event.target).value)"
+                      [attr.aria-label]="T.F.TASK_REPEAT.F.START_DATE | translate"
+                    />
+                    <input
+                      class="rrule-cal__start-field rrule-cal__start-year"
+                      type="number"
+                      min="1970"
+                      max="2999"
+                      [value]="sp.y"
+                      (change)="setStartYear(+$any($event.target).value)"
+                      [attr.aria-label]="T.F.TASK_REPEAT.F.START_DATE | translate"
+                    />
+                  </div>
+                </div>
+              }
+              @if (hasActivity()) {
+                <div class="rrule-cal__activity">
+                  <label class="rrule-cal__activity-toggle">
+                    <input
+                      type="checkbox"
+                      [checked]="showActivity()"
+                      (change)="showActivity.set($any($event.target).checked)"
+                    />
+                    {{ T.F.TASK_REPEAT.D_EDIT.HEATMAP_LABEL | translate }}
+                  </label>
+                  @if (showActivity() && activitySummary(); as a) {
+                    <span class="rrule-cal__activity-summary">
+                      {{ T.F.TASK_REPEAT.D_EDIT.TIME_SPENT_TOTAL | translate }}:
+                      {{ a.total }}
+                      <span class="rrule-result__sep">&middot;</span>
+                      {{ T.F.TASK_REPEAT.D_EDIT.TIME_SPENT_THIS_WEEK | translate }}:
+                      {{ a.thisWeek }}
+                      <span class="rrule-result__sep">&middot;</span>
+                      {{ T.F.TASK_REPEAT.D_EDIT.TIME_SPENT_THIS_MONTH | translate }}:
+                      {{ a.thisMonth }}
+                    </span>
+                  }
+                </div>
+              }
+              <heatmap-switcher
+                class="rrule-cal__switcher"
+                [data]="hd"
+                [dayMap]="hd.dayMap"
+                [rangeStart]="hd.rangeStart"
+                [rangeEnd]="hd.rangeEnd"
+                legendMode="projection"
+                [initialView]="'month'"
+                [showActivity]="showActivity() && hasActivity()"
+                [interactive]="true"
+                [interactiveMenus]="true"
+                [weekdayHeaderGlyphs]="weekdayHeaderGlyphs()"
+                [weekdayHeaderTooltips]="weekdayHeaderTooltips()"
+                [monthTooltip]="monthTooltip()"
+                [limitedMonths]="limitedMonths()"
+                [focusDate]="focusStart()"
+                [navLabel]="previewNavLabel()"
+                [canNavPrev]="true"
+                [canNavNext]="true"
+                [monthBoundless]="true"
+                [showWeekends]="true"
+                (navPrev)="previewPrevYear()"
+                (navNext)="previewNextYear()"
+                (monthViewChange)="onPreviewMonthChange($event)"
+                (dayMenu)="onPreviewDayMenu($event)"
+                (weekdayHeaderMenu)="onWeekdayHeaderMenu($event)"
+                (monthLabelMenu)="onMonthLabelMenu($event)"
+              />
+              @if (weekdayHeaderGlyphs().size) {
+                <div class="rrule-cal__glyph-hint">
+                  {{ T.F.TASK_REPEAT.F.CAL_GLYPH_HINT | translate }}
+                </div>
+              }
+              @if (previewWindowEmpty()) {
+                <div class="rrule-cal__hint">
+                  {{ T.F.TASK_REPEAT.F.RRULE_PREVIEW_EMPTY_WINDOW | translate }}
+                </div>
+              }
+              @if (simulatedCompletion(); as sim) {
+                <div class="rrule-cal__sim">
+                  {{ T.F.TASK_REPEAT.F.RRULE_SIM_LABEL | translate }} {{ sim }}
+                  <button
+                    type="button"
+                    class="rrule-cal__sim-reset"
+                    (click)="clearSimulation()"
+                  >
+                    {{ T.F.TASK_REPEAT.F.RRULE_SIM_RESET | translate }}
+                  </button>
+                </div>
+              }
+            </div>
+          } @else {
+            <div class="rrule-cal__hint">
+              {{ T.F.TASK_REPEAT.F.RRULE_PREVIEW_INVALID | translate }}
+            </div>
+          }
+        }
+      </ng-template>
+
+      <!-- Calendar context menus (hidden triggers positioned at the click point;
+           opened programmatically from the calendar's menu outputs). Each action
+           edits the SAME rule via rrule-calendar-ops + onRRuleChange. -->
+      <div
+        #dayMenuTrigger
+        class="cal-menu-anchor"
+        [style.left]="menuPos().x"
+        [style.top]="menuPos().y"
+        [matMenuTriggerFor]="dayMenu"
+      ></div>
+      <!-- Day menu. Native options for the current frequency sit at the top; the
+           "On this day of the month/year" options that would SWITCH the frequency
+           are grouped under a per-target-freq icon button in the bottom row. -->
+      <mat-menu #dayMenu="matMenu">
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuSetStart()"
+        >
+          <mat-icon>flag</mat-icon>
+          {{ T.F.TASK_REPEAT.F.CAL_MENU_SET_START | translate }}
+        </button>
+        @if (menuDayAfterStart()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuEndsOn()"
+          >
+            <mat-icon>event_busy</mat-icon>
+            {{
+              (menuDayIsEnd()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_ENDS
+                : T.F.TASK_REPEAT.F.CAL_MENU_ENDS_ON
+              ) | translate
+            }}
+          </button>
+        }
+        @if (isMonthlyRule()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleMonthDay()"
+          >
+            <mat-icon>calendar_view_month</mat-icon>
+            {{
+              (menuDayMonthActive()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_DAY_OF_MONTH
+                : T.F.TASK_REPEAT.F.CAL_MENU_DAY_OF_MONTH
+              ) | translate
+            }}
+          </button>
+        }
+        @if (isYearlyRule()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuSetYearDay()"
+          >
+            <mat-icon>calendar_month</mat-icon>
+            {{
+              (menuDayYearActive()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_DAY_OF_YEAR
+                : T.F.TASK_REPEAT.F.CAL_MENU_DAY_OF_YEAR
+              ) | translate
+            }}
+          </button>
+        }
+        @if (menuDaySimAllowed() || menuDayIsSim()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuSimulate()"
+          >
+            <mat-icon>science</mat-icon>
+            {{
+              (menuDayIsSim()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_STOP_SIMULATE
+                : T.F.TASK_REPEAT.F.CAL_MENU_SIMULATE
+              ) | translate
+            }}
+          </button>
+        }
+        @if (!isMonthlyRule() || !isYearlyRule()) {
+          <div class="cal-menu-switch">
+            @if (!isMonthlyRule()) {
+              <button
+                mat-icon-button
+                type="button"
+                class="cal-menu-switch__btn"
+                [class.is-active]="expandedSwitch() === 'MONTHLY'"
+                [matTooltip]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_MONTHLY | translate"
+                [attr.aria-label]="
+                  T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_MONTHLY | translate
+                "
+                [attr.aria-expanded]="expandedSwitch() === 'MONTHLY'"
+                (click)="toggleSwitchExpand('MONTHLY'); $event.stopPropagation()"
+              >
+                <mat-icon>calendar_view_month</mat-icon>
+              </button>
+            }
+            @if (!isYearlyRule()) {
+              <button
+                mat-icon-button
+                type="button"
+                class="cal-menu-switch__btn"
+                [class.is-active]="expandedSwitch() === 'YEARLY'"
+                [matTooltip]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_YEARLY | translate"
+                [attr.aria-label]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_YEARLY | translate"
+                [attr.aria-expanded]="expandedSwitch() === 'YEARLY'"
+                (click)="toggleSwitchExpand('YEARLY'); $event.stopPropagation()"
+              >
+                <mat-icon>calendar_month</mat-icon>
+              </button>
+            }
+          </div>
+          @if (expandedSwitch() === 'MONTHLY') {
+            <button
+              mat-menu-item
+              type="button"
+              (click)="menuToggleMonthDay()"
+            >
+              <mat-icon>calendar_view_month</mat-icon>
+              {{ T.F.TASK_REPEAT.F.CAL_MENU_DAY_OF_MONTH | translate }}
+            </button>
+          }
+          @if (expandedSwitch() === 'YEARLY') {
+            <button
+              mat-menu-item
+              type="button"
+              (click)="menuSetYearDay()"
+            >
+              <mat-icon>calendar_month</mat-icon>
+              {{ T.F.TASK_REPEAT.F.CAL_MENU_DAY_OF_YEAR | translate }}
+            </button>
+          }
+        }
+      </mat-menu>
+
+      <div
+        #weekdayMenuTrigger
+        class="cal-menu-anchor"
+        [style.left]="menuPos().x"
+        [style.top]="menuPos().y"
+        [matMenuTriggerFor]="weekdayMenu"
+      ></div>
+      <!-- Weekday-header menu. Native weekday options for the current frequency at
+           the top; the options that SWITCH frequency live under a per-target-freq
+           icon button in the bottom row (each opening the same Selected-days / Nth
+           sub-menu for that frequency). -->
+      <mat-menu #weekdayMenu="matMenu">
+        <!-- Native options are INLINE (not via *ngTemplateOutlet): MatMenu focuses
+             its first registered item on open, and template-projected items
+             register AFTER static ones — which made the focus land on a switch
+             icon below, painting a stray state-layer circle on it. Inline = static
+             = first, so focus lands on this text item as expected. -->
+        @if (isWeeklyRule()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('WEEKLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{
+              (menuWeekdaySelectedActive()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_SELECTED_DAYS
+                : T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS
+              ) | translate
+            }}
+          </button>
+        }
+        @if (isMonthlyRule()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('MONTHLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{
+              (menuWeekdaySelectedActive()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_SELECTED_DAYS
+                : T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS
+              ) | translate
+            }}
+          </button>
+          <button
+            mat-menu-item
+            type="button"
+            [matMenuTriggerFor]="nthMenu"
+            (menuOpened)="menuNthFreq.set('MONTHLY')"
+          >
+            <mat-icon>format_list_numbered</mat-icon>
+            {{ T.F.TASK_REPEAT.F.RRULE_MODE_NTH_WEEKDAY | translate }}
+          </button>
+        }
+        @if (isYearlyRule()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('YEARLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{
+              (menuWeekdaySelectedActive()
+                ? T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_SELECTED_DAYS
+                : T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS
+              ) | translate
+            }}
+          </button>
+          <button
+            mat-menu-item
+            type="button"
+            [matMenuTriggerFor]="nthMenu"
+            (menuOpened)="menuNthFreq.set('YEARLY')"
+          >
+            <mat-icon>format_list_numbered</mat-icon>
+            {{ T.F.TASK_REPEAT.F.RRULE_MODE_NTH_WEEKDAY | translate }}
+          </button>
+        }
+        <div class="cal-menu-switch">
+          @if (!isWeeklyRule()) {
+            <button
+              mat-icon-button
+              type="button"
+              class="cal-menu-switch__btn"
+              [class.is-active]="expandedSwitch() === 'WEEKLY'"
+              [matTooltip]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_WEEKLY | translate"
+              [attr.aria-label]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_WEEKLY | translate"
+              [attr.aria-expanded]="expandedSwitch() === 'WEEKLY'"
+              (click)="toggleSwitchExpand('WEEKLY'); $event.stopPropagation()"
+            >
+              <mat-icon>calendar_view_week</mat-icon>
+            </button>
+          }
+          @if (!isMonthlyRule()) {
+            <button
+              mat-icon-button
+              type="button"
+              class="cal-menu-switch__btn"
+              [class.is-active]="expandedSwitch() === 'MONTHLY'"
+              [matTooltip]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_MONTHLY | translate"
+              [attr.aria-label]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_MONTHLY | translate"
+              [attr.aria-expanded]="expandedSwitch() === 'MONTHLY'"
+              (click)="toggleSwitchExpand('MONTHLY'); $event.stopPropagation()"
+            >
+              <mat-icon>calendar_view_month</mat-icon>
+            </button>
+          }
+          @if (!isYearlyRule()) {
+            <button
+              mat-icon-button
+              type="button"
+              class="cal-menu-switch__btn"
+              [class.is-active]="expandedSwitch() === 'YEARLY'"
+              [matTooltip]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_YEARLY | translate"
+              [attr.aria-label]="T.F.TASK_REPEAT.F.CAL_MENU_SWITCHES_YEARLY | translate"
+              [attr.aria-expanded]="expandedSwitch() === 'YEARLY'"
+              (click)="toggleSwitchExpand('YEARLY'); $event.stopPropagation()"
+            >
+              <mat-icon>calendar_month</mat-icon>
+            </button>
+          }
+        </div>
+        <!-- Clicking a switch icon expands that frequency's options INLINE here
+             (no hover-opened sub-menu); clicking it again collapses them. -->
+        @if (expandedSwitch() === 'WEEKLY') {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('WEEKLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{ T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS | translate }}
+          </button>
+        }
+        @if (expandedSwitch() === 'MONTHLY') {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('MONTHLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{ T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS | translate }}
+          </button>
+          <button
+            mat-menu-item
+            type="button"
+            [matMenuTriggerFor]="nthMenu"
+            (menuOpened)="menuNthFreq.set('MONTHLY')"
+          >
+            <mat-icon>format_list_numbered</mat-icon>
+            {{ T.F.TASK_REPEAT.F.RRULE_MODE_NTH_WEEKDAY | translate }}
+          </button>
+        }
+        @if (expandedSwitch() === 'YEARLY') {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuToggleSelectedDay('YEARLY')"
+          >
+            <mat-icon>calendar_view_week</mat-icon>
+            {{ T.F.TASK_REPEAT.F.CAL_MENU_SELECTED_DAYS | translate }}
+          </button>
+          <button
+            mat-menu-item
+            type="button"
+            [matMenuTriggerFor]="nthMenu"
+            (menuOpened)="menuNthFreq.set('YEARLY')"
+          >
+            <mat-icon>format_list_numbered</mat-icon>
+            {{ T.F.TASK_REPEAT.F.RRULE_MODE_NTH_WEEKDAY | translate }}
+          </button>
+        }
+      </mat-menu>
+      <!-- nth-ordinal items toggle: an ordinal already holding this weekday flips
+           to "Remove <ordinal>" (the ordinal label nested into the remove string). -->
+      <mat-menu #nthMenu="matMenu">
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleNth(1, menuNthFreq())"
+        >
+          <mat-icon>looks_one</mat-icon>
+          @if (menuNthActive(1)) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_NTH
+                | translate: { ordinal: (T.F.TASK_REPEAT.F.ORD_FIRST | translate) }
+            }}
+          } @else {
+            {{ T.F.TASK_REPEAT.F.ORD_FIRST | translate }}
+          }
+        </button>
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleNth(2, menuNthFreq())"
+        >
+          <mat-icon>looks_two</mat-icon>
+          @if (menuNthActive(2)) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_NTH
+                | translate: { ordinal: (T.F.TASK_REPEAT.F.ORD_SECOND | translate) }
+            }}
+          } @else {
+            {{ T.F.TASK_REPEAT.F.ORD_SECOND | translate }}
+          }
+        </button>
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleNth(3, menuNthFreq())"
+        >
+          <mat-icon>looks_3</mat-icon>
+          @if (menuNthActive(3)) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_NTH
+                | translate: { ordinal: (T.F.TASK_REPEAT.F.ORD_THIRD | translate) }
+            }}
+          } @else {
+            {{ T.F.TASK_REPEAT.F.ORD_THIRD | translate }}
+          }
+        </button>
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleNth(4, menuNthFreq())"
+        >
+          <mat-icon>looks_4</mat-icon>
+          @if (menuNthActive(4)) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_NTH
+                | translate: { ordinal: (T.F.TASK_REPEAT.F.ORD_FOURTH | translate) }
+            }}
+          } @else {
+            {{ T.F.TASK_REPEAT.F.ORD_FOURTH | translate }}
+          }
+        </button>
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleNth(-1, menuNthFreq())"
+        >
+          <mat-icon>last_page</mat-icon>
+          @if (menuNthActive(-1)) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_REMOVE_NTH
+                | translate: { ordinal: (T.F.TASK_REPEAT.F.ORD_LAST | translate) }
+            }}
+          } @else {
+            {{ T.F.TASK_REPEAT.F.ORD_LAST | translate }}
+          }
+        </button>
+      </mat-menu>
+
+      <div
+        #monthMenuTrigger
+        class="cal-menu-anchor"
+        [style.left]="menuPos().x"
+        [style.top]="menuPos().y"
+        [matMenuTriggerFor]="monthMenu"
+      ></div>
+      <mat-menu #monthMenu="matMenu">
+        <button
+          mat-menu-item
+          type="button"
+          (click)="menuToggleMonth()"
+        >
+          <mat-icon>filter_alt</mat-icon>
+          @if (menuMonthActive()) {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_UNLIMIT_MONTH
+                | translate: { month: menuMonthName() }
+            }}
+          } @else {
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_LIMIT_MONTH
+                | translate: { month: menuMonthName() }
+            }}
+          }
+        </button>
+        @if (hasMonthLimits()) {
+          <button
+            mat-menu-item
+            type="button"
+            (click)="menuClearMonthLimits()"
+          >
+            <mat-icon>filter_alt_off</mat-icon>
+            {{
+              T.F.TASK_REPEAT.F.CAL_MENU_CLEAR_MONTHS
+                | translate: { months: limitedMonthNames() }
+            }}
+          </button>
+        }
+      </mat-menu>
 
       <collapsible [title]="T.F.TASK_REPEAT.D_EDIT.ADVANCED_CFG | translate">
         <chip-list-input
@@ -62,29 +701,38 @@
     </div>
   </mat-dialog-content>
 
-  <!-- Live result/preview — pinned above the action buttons in RRULE mode. -->
+  <!-- Natural-language summary of the rule — Custom (RRULE) mode only, kept in a
+       sticky strip above the actions so it stays in view as the form scrolls. -->
   @if (isRRuleMode() && rrulePreview(); as p) {
     <div class="rrule-result">
       <div class="rrule-result__human">&rarr; {{ p.human }}</div>
-      @if (repeatCfg().repeatFromCompletionDate) {
-        @if (p.completionExample; as ex) {
-          <div class="rrule-result__next">
-            {{ T.F.TASK_REPEAT.F.RRULE_NEXT_AFTER_COMPLETION | translate }}:
-            {{ ex.done | date: 'mediumDate' }} &rarr; {{ ex.next | date: 'mediumDate' }}
-          </div>
-        }
-      } @else if (p.upcoming.length) {
-        <div class="rrule-result__next">
-          {{ T.F.TASK_REPEAT.F.RRULE_NEXT | translate }}:
-          @for (d of p.upcoming; track d.getTime(); let last = $last) {
-            <span>{{ d | date: 'mediumDate' }}</span>
-            @if (!last) {
-              <span class="rrule-result__sep">&middot;</span>
+      @if (nextOccurrence(); as n) {
+        <div class="rrule-result__next-chip">
+          <mat-icon>schedule</mat-icon>
+          <span class="rrule-result__next-date"
+            >{{ T.F.TASK_REPEAT.F.RRULE_PREVIEW_NEXT | translate }}:
+            {{ n.date | date: 'mediumDate' }}</span
+          >
+          <span class="rrule-result__next-away">
+            @if (n.daysAway <= 0) {
+              {{ T.G.HEATMAP_TODAY | translate }}
+            } @else {
+              {{ T.G.HEATMAP_IN_DAYS | translate: { nr: n.daysAway } }}
             }
-          }
+          </span>
         </div>
       }
-      <div class="rrule-result__expr">{{ p.rrule }}</div>
+      @if (rruleLegacyIncompat()) {
+        <div class="rrule-result__legacy-warning">
+          {{ T.F.TASK_REPEAT.F.RRULE_LEGACY_INCOMPAT | translate }}
+        </div>
+      }
+      @if (repeatCfg().repeatFromCompletionDate && p.completionExample; as ex) {
+        <div class="rrule-result__next">
+          {{ T.F.TASK_REPEAT.F.RRULE_NEXT_AFTER_COMPLETION | translate }}:
+          {{ ex.done | date: 'mediumDate' }} &rarr; {{ ex.next | date: 'mediumDate' }}
+        </div>
+      }
     </div>
   }
 

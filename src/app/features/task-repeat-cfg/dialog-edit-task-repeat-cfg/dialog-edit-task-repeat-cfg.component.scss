@@ -2,6 +2,16 @@ h1 mat-icon {
   transform: rotate(45deg);
 }
 
+h1[mat-dialog-title] {
+  display: flex;
+  align-items: center;
+  gap: var(--s-half);
+}
+
+.fullscreen-toggle {
+  margin-left: auto;
+}
+
 // Bound the whole dialog to the viewport and lay it out as a flex column so
 // the scrollable form and the pinned result band share the available height
 // instead of overflowing past the action buttons.
@@ -9,6 +19,20 @@ h1 mat-icon {
   display: flex;
   flex-direction: column;
   max-height: 85vh;
+}
+
+// Fullscreen state (`dialog-fullscreen` panel class on the overlay pane): the
+// pane is viewport-sized, so the wrapper stretches to fill it and the 85vh cap
+// no longer applies.
+:host-context(.dialog-fullscreen) .dialog-help-wrapper {
+  height: 100%;
+  max-height: none;
+}
+
+// In fullscreen the result band (calendar preview) fills the surface — that's
+// the width the expand was for. The form column above keeps its 600px cap.
+:host-context(.dialog-fullscreen) .rrule-result {
+  max-width: none;
 }
 
 mat-dialog-content {
@@ -53,27 +77,355 @@ mat-dialog-actions {
   }
 }
 
+// Centered content column. The dialog surface itself widens dynamically with the
+// viewport (`.dialog-recurring`, see _overwrite-material.scss); the form fills it
+// up to a cap so the controls stay readable even when fullscreen makes the
+// surface very wide (the calendar preview below is what uses that extra width).
 .form-wrapper {
-  min-width: 280px;
-  max-width: 620px;
+  width: 100%;
+  min-width: 0;
+  max-width: 600px;
+  margin: 0 auto;
 }
 
-// Live RRULE result/preview, pinned above the dialog action buttons.
-.rrule-result {
+// Divider under the Repeat picker so the recurrence flow reads as its own
+// clean section above the builder.
+repeat-freq-picker {
+  display: block;
+  padding-bottom: var(--s);
+  margin-bottom: var(--s);
+  border-bottom: 1px solid var(--separator-color, var(--extra-border-color));
+}
+
+// Empty-state hint inside the result band (shown when no rule is assembled yet).
+.rrule-result__empty-hint {
+  font-size: 12px;
+  opacity: 0.7;
+  text-align: center;
+  margin-top: var(--s-half);
+}
+
+// Start-date picker + occurrence calendar, placed inline ABOVE the repeat
+// dropdown. No card framing / accent bar (unlike the bottom summary strip) — it
+// reads as part of the form, not a pinned result.
+.rrule-cal {
   margin: var(--s) 0;
+
+  // Start-date editor: Month / Day / Year fields, the precise alternative to
+  // clicking a day in the calendar below (both write the same start date).
+  &__start {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s-half);
+    margin-bottom: var(--s-half);
+    font-size: 12px;
+  }
+
+  &__start-label {
+    font-weight: 600;
+  }
+
+  &__start-fields {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-quarter, 4px);
+  }
+
+  &__start-field {
+    padding: 3px 6px;
+    border: 1px solid var(--separator-color, var(--extra-border-color));
+    border-radius: var(--card-border-radius);
+    background: var(--bg-lightest, transparent);
+    color: var(--text-color);
+    font: inherit;
+    font-size: 12px;
+
+    &:focus {
+      outline: none;
+      border-color: var(--c-primary);
+    }
+  }
+
+  // Drop the native number spinners on the day/year fields — the calendar below
+  // is the spinner; the bare number reads cleaner.
+  &__start-day,
+  &__start-year {
+    -moz-appearance: textfield;
+    appearance: textfield;
+
+    &::-webkit-outer-spin-button,
+    &::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+  }
+
+  &__start-day {
+    width: 2.6em;
+    text-align: center;
+  }
+
+  &__start-year {
+    width: 3.6em;
+    text-align: center;
+  }
+
+  &__start-month {
+    max-width: 9em;
+  }
+
+  &__pick-tap {
+    opacity: 0.6;
+  }
+
+  &__activity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s);
+    margin-bottom: var(--s-half);
+    font-size: 12px;
+  }
+
+  &__activity-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-quarter, 4px);
+    cursor: pointer;
+  }
+
+  &__activity-summary {
+    opacity: 0.75;
+  }
+
+  &__hint {
+    margin-top: var(--s-half);
+    font-size: 12px;
+    opacity: 0.7;
+    text-align: center;
+  }
+
+  // Explains the weekday-header annotation glyphs (nth / selected / in-months).
+  &__glyph-hint {
+    margin-top: var(--s-quarter, 4px);
+    font-size: 11px;
+    opacity: 0.6;
+    text-align: center;
+  }
+
+  &__sim {
+    margin-top: var(--s-half);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  &__sim-reset {
+    margin-left: var(--s-half);
+    border: none;
+    background: transparent;
+    color: var(--c-primary);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+}
+
+// Ends + Schedule type — schedule-level controls shown below the calendar for
+// every mode (presets too). Centered, label + control on one line each.
+.rrule-ends {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-half);
+  margin: var(--s) 0;
+
+  &__field {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s);
+
+    > label {
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0.75;
+    }
+  }
+
+  &__control {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--s-half);
+  }
+
+  &__num,
+  &__date {
+    height: 34px;
+    padding: 0 var(--s);
+    border: 1px solid var(--separator-color, var(--extra-border-color));
+    border-radius: var(--card-border-radius);
+    background: var(--bg-lightest, transparent);
+    color: var(--text-color);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  &__num {
+    width: 4.5em;
+    text-align: center;
+  }
+
+  &__hint {
+    max-width: 520px;
+    font-size: 12px;
+    opacity: 0.6;
+    text-align: center;
+  }
+}
+
+// Bottom "switch to …" icon row inside a calendar context menu: the options that
+// would CHANGE the frequency are grouped under a per-target-freq icon button,
+// laid on one line. Global (not scoped) because MatMenu renders in a CDK overlay
+// outside this component's view.
+::ng-deep .cal-menu-switch {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--s-quarter, 4px);
+  padding: var(--s-quarter, 4px) var(--s, 8px);
+  margin-top: var(--s-quarter, 4px);
+  border-top: 1px solid var(--separator-color, var(--extra-border-color));
+
+  // A menu with no native top items (e.g. a weekday click in Daily mode) is all
+  // switch icons — no border then, it would float above nothing.
+  &:first-child {
+    margin-top: 0;
+    border-top: none;
+  }
+
+  // The switch icons are mat-icon-buttons (NOT mat-menu-items): clicking one
+  // toggles its options open/closed INLINE — no hover-opened sub-menu, and a
+  // plain icon-button isn't auto-focused so the menu never paints a stray
+  // focus circle on it.
+  .cal-menu-switch__btn {
+    min-width: 0;
+    min-height: 0;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    overflow: hidden; // clip the ripple / hover state-layer to the circle
+
+    mat-icon {
+      margin: 0;
+      color: var(--text-color-muted, currentColor);
+    }
+
+    // Expanded → highlighted so it's clear which frequency's options are showing.
+    &.is-active {
+      background: color-mix(in srgb, var(--c-accent) 20%, transparent);
+
+      mat-icon {
+        color: var(--c-accent);
+      }
+    }
+  }
+}
+
+// Zero-size fixed anchors for the calendar context menus — positioned at the
+// click point; the MatMenu opens from here.
+.cal-menu-anchor {
+  position: fixed;
+  width: 0;
+  height: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+// Live recurrence summary card, pinned above the action buttons (outside the
+// scroll area), so the evaluated rule stays in view while the form scrolls.
+.rrule-result {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 600px;
+  margin: var(--s) auto 0;
   padding: var(--s) var(--s2);
-  border-radius: var(--card-border-radius);
-  background: var(--extra-border-color);
+  border-radius: 10px;
+  background: var(--bg-lightest, var(--extra-border-color));
+  border-left: 3px solid var(--c-primary);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.5;
 
   &__human {
-    font-weight: bold;
+    font-weight: 600;
+    font-size: 14px;
   }
 
   &__next {
     margin-top: var(--s-quarter, 2px);
-    opacity: 0.85;
+    opacity: 0.8;
+  }
+
+  // Caption above the calendar picker (Option A) — shows the chosen start and
+  // hints that tapping a day changes it.
+  &__pick-hint {
+    margin-top: var(--s-half);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  &__pick-tap {
+    margin-left: var(--s-half);
+    opacity: 0.6;
+  }
+
+  // "Next: <date> · in N days" spotlight chip.
+  &__next-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-half);
+    margin-top: var(--s-half);
+    padding: 2px var(--s);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--c-accent) 14%, transparent);
+    font-size: 12px;
+
+    .mat-icon {
+      font-size: 15px;
+      width: 15px;
+      height: 15px;
+      color: var(--c-accent);
+    }
+  }
+
+  &__next-date {
+    font-weight: 600;
+  }
+
+  &__next-away {
+    opacity: 0.7;
+  }
+
+  // Rhythm stats row above the open calendar (count · ~every N days · ends …).
+  &__stats {
+    margin-top: var(--s);
+    font-size: 12px;
+    opacity: 0.75;
+    text-align: center;
+  }
+
+  &__legacy-warning {
+    margin-top: var(--s-quarter, 2px);
+    color: var(--c-warn);
+    font-size: 12px;
   }
 
   &__sep {
@@ -82,10 +434,73 @@ mat-dialog-actions {
   }
 
   &__expr {
-    margin-top: var(--s-quarter, 2px);
+    margin-top: var(--s-half);
     font-family: monospace;
-    opacity: 0.7;
+    font-size: 11px;
+    opacity: 0.55;
     word-break: break-all;
+  }
+
+  &__cal-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-quarter, 4px);
+    margin-top: var(--s);
+    padding: 2px var(--s);
+    color: var(--c-primary);
+    background: transparent;
+    border: none;
+    border-radius: var(--card-border-radius);
+    cursor: pointer;
+    font-size: 12px;
+
+    .mat-icon {
+      font-size: 18px;
+      width: 18px;
+      height: 18px;
+    }
+
+    &:hover {
+      background: var(--c-primary-10, rgba(0, 0, 0, 0.06));
+    }
+  }
+
+  &__cal {
+    display: block;
+    margin-top: var(--s);
+  }
+
+  &__sim-hint {
+    margin-top: var(--s-quarter, 4px);
+    font-size: 11px;
+    opacity: 0.6;
+  }
+
+  &__cal-empty {
+    margin-top: var(--s-quarter, 4px);
+    font-size: 11px;
+    opacity: 0.6;
+    font-style: italic;
+  }
+
+  &__sim {
+    display: flex;
+    align-items: center;
+    gap: var(--s);
+    margin-top: var(--s-quarter, 4px);
+    font-size: 12px;
+    font-weight: bold;
+    color: var(--c-primary);
+  }
+
+  &__sim-reset {
+    padding: 2px var(--s);
+    color: var(--text-color);
+    background: transparent;
+    border: 1px solid var(--extra-border-color);
+    border-radius: var(--card-border-radius);
+    cursor: pointer;
+    font-size: 11px;
   }
 }
 

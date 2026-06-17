@@ -14,15 +14,26 @@ import { CustomDateAdapter } from '../../../core/date-time-format/custom-date-ad
 
 import { DialogEditTaskRepeatCfgComponent } from './dialog-edit-task-repeat-cfg.component';
 import { TaskRepeatCfgService } from '../task-repeat-cfg.service';
+import { TaskService } from '../../tasks/task.service';
+import { TaskArchiveService } from '../../archive/task-archive.service';
 import { TagService } from '../../tag/tag.service';
 import { GlobalConfigService } from '../../config/global-config.service';
 import { DateTimeFormatService } from '../../../core/date-time-format/date-time-format.service';
 import { DEFAULT_TASK_REPEAT_CFG, TaskRepeatCfg } from '../task-repeat-cfg.model';
+import { DayData } from '../../../ui/heatmap/heatmap.component';
 import { TaskCopy } from '../../tasks/task.model';
+import { getDbDateStr } from '../../../util/get-db-date-str';
 import { TranslateService } from '@ngx-translate/core';
 import { T } from '../../../t.const';
 import { SnackService } from '../../../core/snack/snack.service';
 import { setRRuleEngineEnabled } from '../../config/rrule-engine-flag';
+
+// Mirrors the ordinal-day format the option builder now passes for the concise
+// "Monthly (15th)" label.
+const ordinalDay = (n: number): string => {
+  const suffix: Record<string, string> = { one: 'st', two: 'nd', few: 'rd', other: 'th' };
+  return `${n}${suffix[new Intl.PluralRules('en-US', { type: 'ordinal' }).select(n)] ?? 'th'}`;
+};
 
 describe('DialogEditTaskRepeatCfgComponent', () => {
   let mockDialogRef: jasmine.SpyObj<MatDialogRef<DialogEditTaskRepeatCfgComponent>>;
@@ -61,8 +72,13 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       targetDate?: string;
     },
     getTaskRepeatCfgById$ReturnValue?: Observable<TaskRepeatCfg> | Subject<TaskRepeatCfg>,
+    seriesTasks: TaskCopy[] = [],
   ): Promise<ComponentFixture<DialogEditTaskRepeatCfgComponent>> => {
-    mockDialogRef = jasmine.createSpyObj('MatDialogRef', ['close']);
+    mockDialogRef = jasmine.createSpyObj('MatDialogRef', [
+      'close',
+      'addPanelClass',
+      'removePanelClass',
+    ]);
     mockTaskRepeatCfgService = jasmine.createSpyObj('TaskRepeatCfgService', [
       'getTaskRepeatCfgById$',
       'updateTaskRepeatCfg',
@@ -82,7 +98,10 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       tagsNoMyDayAndNoList$: of([]),
     });
     mockGlobalConfigService = jasmine.createSpyObj('GlobalConfigService', [], {
-      cfg: () => ({ reminder: { defaultTaskRemindOption: null } }),
+      cfg: () => ({ reminder: { defaultTaskRemindOption: null }, tasks: {} }),
+      // CustomDateAdapter.getFirstDayOfWeek() reads this — needed by the result
+      // calendar preview (heatmap) build.
+      localization: () => ({ firstDayOfWeek: 0 }),
     });
     mockDateTimeFormatService = jasmine.createSpyObj('DateTimeFormatService', [], {
       currentLocale: () => 'en-US',
@@ -108,6 +127,11 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         { provide: MatDialogRef, useValue: mockDialogRef },
         { provide: MAT_DIALOG_DATA, useValue: dialogData },
         { provide: TaskRepeatCfgService, useValue: mockTaskRepeatCfgService },
+        { provide: TaskService, useValue: { allTasks$: of(seriesTasks) } },
+        {
+          provide: TaskArchiveService,
+          useValue: { load: () => Promise.resolve({ ids: [], entities: {} }) },
+        },
         { provide: TagService, useValue: mockTagService },
         { provide: GlobalConfigService, useValue: mockGlobalConfigService },
         { provide: DateTimeFormatService, useValue: mockDateTimeFormatService },
@@ -241,7 +265,7 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       });
 
       // Re-trigger form config initialization
-      (fixture.componentInstance as any)._initializeFormConfig();
+      (fixture.componentInstance as any)._buildQuickSettingOptions();
 
       const monthlyCall = instantCalls.find(
         (c) => c.key === T.F.TASK_REPEAT.F.Q_MONTHLY_CURRENT_DATE,
@@ -250,12 +274,13 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         (c) => c.key === T.F.TASK_REPEAT.F.Q_YEARLY_CURRENT_DATE,
       );
 
-      // Due date is May 1st — day should be "1", month/day should contain "5" and "1"
+      // Due date is May 1st — concise labels use the ordinal day ("1st") and the
+      // short month + day ("May 1").
       const dueDate = new Date(2026, 4, 1); // May 1st
-      const expectedDayStr = dueDate.toLocaleDateString('en-US', { day: 'numeric' });
+      const expectedDayStr = ordinalDay(dueDate.getDate());
       const expectedDayAndMonthStr = dueDate.toLocaleDateString('en-US', {
         day: 'numeric',
-        month: 'numeric',
+        month: 'short',
       });
 
       expect(monthlyCall).toBeDefined();
@@ -279,14 +304,14 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         return key;
       });
 
-      (fixture.componentInstance as any)._initializeFormConfig();
+      (fixture.componentInstance as any)._buildQuickSettingOptions();
 
       const monthlyCall = instantCalls.find(
         (c) => c.key === T.F.TASK_REPEAT.F.Q_MONTHLY_CURRENT_DATE,
       );
 
       const today = new Date();
-      const todayDayStr = today.toLocaleDateString('en-US', { day: 'numeric' });
+      const todayDayStr = ordinalDay(today.getDate());
 
       expect(monthlyCall).toBeDefined();
       expect(monthlyCall!.params.dateDayStr).toBe(todayDayStr);
@@ -310,15 +335,15 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         return key;
       });
 
-      (fixture.componentInstance as any)._initializeFormConfig();
+      (fixture.componentInstance as any)._buildQuickSettingOptions();
 
       const monthlyCall = instantCalls.find(
         (c) => c.key === T.F.TASK_REPEAT.F.Q_MONTHLY_CURRENT_DATE,
       );
 
-      // startDate is March 15 — day should be "15"
+      // startDate is March 15 — concise label uses the ordinal day ("15th").
       const startDate = new Date(2026, 2, 15); // March 15
-      const expectedDayStr = startDate.toLocaleDateString('en-US', { day: 'numeric' });
+      const expectedDayStr = ordinalDay(startDate.getDate());
 
       expect(monthlyCall).toBeDefined();
       expect(monthlyCall!.params.dateDayStr).toBe(expectedDayStr);
@@ -572,6 +597,542 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       // Now the button is disabled until isLoading becomes false,
       // which only happens after repeatCfgInitial is set
     }));
+  });
+
+  describe('result calendar preview (Phase 2)', () => {
+    const rruleCfg: TaskRepeatCfg = {
+      ...DEFAULT_TASK_REPEAT_CFG,
+      id: 'rr-cal-preview',
+      title: 'Biweekly Mon',
+      startDate: '2024-06-03',
+      quickSetting: 'RRULE',
+      repeatCycle: 'WEEKLY',
+      rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO',
+    };
+
+    it('shows the calendar immediately for a valid rule (no toggle)', async () => {
+      // The calendar doubles as the start-date picker, so it is always present
+      // for a valid rule rather than hidden behind a toggle.
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      expect(fixture.componentInstance.resultHeatmapData()).not.toBeNull();
+    });
+
+    it('projects future occurrences', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const hd = c.resultHeatmapData();
+      expect(hd).not.toBeNull();
+      expect(hd!.months!.length).toBeGreaterThan(0);
+      const hasProjected = hd!.months!.some((m) =>
+        m.weeks.some((w) => w.days.some((d) => !!d?.isProjected)),
+      );
+      expect(hasProjected).toBe(true);
+    });
+
+    it('exposes the next upcoming occurrence (date + non-negative countdown)', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const n = fixture.componentInstance.nextOccurrence();
+      expect(n).not.toBeNull();
+      expect(n!.dateStr).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(n!.daysAway).toBeGreaterThanOrEqual(0);
+    });
+
+    it('spotlights exactly one "next" cell in the home window', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const nextCells = [...c.resultHeatmapData()!.dayMap.values()].filter(
+        (d) => d.isNext,
+      );
+      expect(nextCells.length).toBe(1);
+    });
+
+    it('computes rhythm stats: count, average gap, and an end label', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const s = c.previewStats();
+      expect(s).not.toBeNull();
+      expect(s!.count).toBeGreaterThan(0);
+      // FREQ=WEEKLY;INTERVAL=2 → occurrences are 14 days apart.
+      expect(s!.avgGapDays).toBe(14);
+      expect(typeof s!.end).toBe('string');
+      expect(s!.end.length).toBeGreaterThan(0);
+    });
+
+    it('reports a finite end label for a COUNT rule', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: { ...rruleCfg, rrule: 'FREQ=WEEKLY;BYDAY=MO;COUNT=5' },
+      });
+      const c = fixture.componentInstance;
+      // Whether i18n is loaded (interpolates "5") or not (returns the key
+      // containing "AFTER"), a COUNT rule yields a finite end label — never the
+      // "runs forever" / NEVER one.
+      const end = c.previewStats()!.end;
+      expect(end).toMatch(/5|AFTER/i);
+      expect(end).not.toMatch(/forever|NEVER/i);
+    });
+
+    // Simulation only exists for repeat-from-completion schedules.
+    const completionCfg: TaskRepeatCfg = {
+      ...rruleCfg,
+      id: 'rr-cal-completion',
+      repeatFromCompletionDate: true,
+    };
+
+    it('toggles the simulated completion day on double-click (from-completion cfg)', async () => {
+      const fixture = await setupTestBed({ repeatCfg: completionCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+      // Re-double-clicking the same day clears it.
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBeNull();
+    });
+
+    it('does not offer simulate for a start-anchored schedule, and never mutates the flag', async () => {
+      // Simulation is a pure preview of from-completion re-anchoring; a
+      // start-anchored series stays fixed when an occurrence is completed, so the
+      // what-if is not offered there — and calling it (defensive) must NOT
+      // silently convert the schedule to from-completion.
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      expect(c.repeatCfg().repeatFromCompletionDate).toBeFalsy();
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      expect(c.menuDaySimAllowed()).toBe(false);
+      c.menuSimulate();
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBeNull();
+      expect(c.repeatCfg().repeatFromCompletionDate).toBeFalsy();
+    });
+
+    it('does not offer simulate for a COUNT rule (completion + COUNT is unsupported)', async () => {
+      // from-completion + COUNT never terminates and the save path rejects it,
+      // so simulate — which would re-anchor the COUNT window from the sim day —
+      // is withheld even on a from-completion cfg.
+      const fixture = await setupTestBed({
+        repeatCfg: { ...completionCfg, rrule: 'FREQ=WEEKLY;BYDAY=MO;COUNT=5' },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      expect(c.menuDaySimAllowed()).toBe(false);
+    });
+
+    it('offers simulate only on/after the start date (from-completion schedule)', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: { ...completionCfg, startDate: '2099-01-05' },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-04' } as DayData); // before start
+      expect(c.menuDaySimAllowed()).toBe(false);
+      c.menuDay.set({ dateStr: '2099-01-05' } as DayData); // the start
+      expect(c.menuDaySimAllowed()).toBe(true);
+      c.menuDay.set({ dateStr: '2099-01-09' } as DayData); // after start
+      expect(c.menuDaySimAllowed()).toBe(true);
+    });
+
+    it('clears a simulation that the new start date would precede', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: { ...completionCfg, startDate: '2099-01-01' },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+      // Move the start AFTER the sim → the sim is now before the start → dropped.
+      c.menuDay.set({ dateStr: '2099-01-10' } as DayData);
+      c.menuSetStart();
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBeNull();
+    });
+
+    it('keeps a simulation when the new start date precedes it', async () => {
+      // Moving the start to BEFORE the sim leaves the completion valid (it still
+      // sits on/after the start), so the sim must survive — including the
+      // sim-watcher effect that fires on the startDate slice change.
+      const fixture = await setupTestBed({
+        repeatCfg: { ...completionCfg, startDate: '2099-01-05' },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-20' } as DayData);
+      c.menuSimulate();
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBe('2099-01-20');
+      // Move the start EARLIER, still before the sim → the sim stays.
+      c.menuDay.set({ dateStr: '2099-01-10' } as DayData);
+      c.menuSetStart();
+      fixture.detectChanges();
+      expect(c.repeatCfg().startDate).toBe('2099-01-10');
+      expect(c.simulatedCompletion()).toBe('2099-01-20');
+    });
+
+    it('clears an active simulation when the rule is edited', async () => {
+      // A sim belongs to the rule it was clicked on; keeping it across an edit
+      // would re-anchor the NEW rule's series at a day picked for the old one.
+      const fixture = await setupTestBed({ repeatCfg: completionCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+      c.onRRuleChange('FREQ=MONTHLY;BYMONTHDAY=15');
+      expect(c.simulatedCompletion()).toBeNull();
+    });
+
+    it('manual fullscreen toggle adds/removes the fullscreen panel class', async () => {
+      // The calendar is always shown; fullscreen is purely the title-bar escape
+      // hatch for the wide year strip.
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      expect(c.isFullScreen()).toBe(false);
+      c.toggleFullScreen();
+      expect(c.isFullScreen()).toBe(true);
+      expect(mockDialogRef.addPanelClass).toHaveBeenCalledWith('dialog-fullscreen');
+      c.toggleFullScreen();
+      expect(c.isFullScreen()).toBe(false);
+      expect(mockDialogRef.removePanelClass).toHaveBeenCalledWith('dialog-fullscreen');
+    });
+
+    it('year arrows shift the projection window by whole years, both directions', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const home = c.resultHeatmapData()!;
+      // Window is padded to full calendar months.
+      expect(home.rangeStart.getDate()).toBe(1);
+      const homeStartYear = home.rangeStart.getFullYear();
+
+      c.previewNextYear();
+      expect(c.resultHeatmapData()!.rangeStart.getFullYear()).toBe(homeStartYear + 1);
+
+      c.previewPrevYear();
+      c.previewPrevYear();
+      expect(c.resultHeatmapData()!.rangeStart.getFullYear()).toBe(homeStartYear - 1);
+      expect(c.previewNavLabel()).toContain(String(homeStartYear - 1));
+    });
+
+    it('renders an empty HOME window with nav + hint instead of nothing (far-future start)', async () => {
+      // A valid rule with no occurrence in the next 365 days used to null out
+      // the preview entirely — including the ‹ › arrows, so the window where
+      // it DOES fire was unreachable.
+      const y = new Date().getFullYear() + 5;
+      const fixture = await setupTestBed({
+        repeatCfg: { ...rruleCfg, rrule: 'FREQ=DAILY', startDate: `${y}-01-15` },
+      });
+      const c = fixture.componentInstance;
+      expect(c.resultHeatmapData()).not.toBeNull();
+      expect(c.previewWindowEmpty()).toBe(true);
+      for (let i = 0; i < 5; i++) {
+        c.previewNextYear();
+      }
+      expect(c.previewWindowEmpty()).toBe(false);
+    });
+
+    it('keeps a navigated window rendered even when it has no occurrences (no stranding)', async () => {
+      // Far in the past, before the cfg's startDate, the window is empty — the
+      // calendar and its ‹ › nav must survive so the user can navigate back.
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      for (let i = 0; i < 5; i++) {
+        c.previewPrevYear();
+      }
+      expect(c.resultHeatmapData()).not.toBeNull();
+      // Back home it is populated again.
+      for (let i = 0; i < 5; i++) {
+        c.previewNextYear();
+      }
+      expect(c.resultHeatmapData()).not.toBeNull();
+    });
+
+    it('does not mark days already past as projected in the home window', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const home = c.resultHeatmapData()!;
+      const now = new Date();
+      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      [...home.dayMap.values()]
+        .filter((d) => d.isProjected)
+        .forEach((d) => expect(d.dateStr >= todayStr).toBe(true));
+    });
+
+    it('month navigation past the window edge pulls the window along', async () => {
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const home = c.resultHeatmapData()!;
+      const homeStartYear = home.rangeStart.getFullYear();
+      // A month fully after the window end → window shifts forward a year.
+      c.onPreviewMonthChange({
+        y: home.rangeEnd.getFullYear(),
+        m: home.rangeEnd.getMonth() + 1,
+      });
+      expect(c.resultHeatmapData()!.rangeStart.getFullYear()).toBe(homeStartYear + 1);
+      // A month still inside the window → no shift.
+      const cur = c.resultHeatmapData()!;
+      c.onPreviewMonthChange({
+        y: cur.rangeStart.getFullYear(),
+        m: cur.rangeStart.getMonth() + 2,
+      });
+      expect(c.resultHeatmapData()!.rangeStart.getFullYear()).toBe(homeStartYear + 1);
+    });
+
+    it('clears an active simulation when startDate or excluded days change (formly model edit)', async () => {
+      // These edits arrive only as a new formly model (no dedicated handler) —
+      // the schedule-slice effect must drop the sim, same as a rule edit.
+      const fixture = await setupTestBed({ repeatCfg: completionCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+      c.repeatCfg.update((cfg) => ({ ...cfg, startDate: '2024-07-01' }) as any);
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBeNull();
+
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+      c.repeatCfg.update(
+        (cfg) => ({ ...cfg, deletedInstanceDates: ['2099-01-05'] }) as any,
+      );
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBeNull();
+    });
+
+    it('keeps an active simulation across an unrelated (title) edit', async () => {
+      const fixture = await setupTestBed({ repeatCfg: completionCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2099-01-06' } as DayData);
+      c.menuSimulate();
+      c.repeatCfg.update((cfg) => ({ ...cfg, title: 'typing…' }) as any);
+      fixture.detectChanges();
+      expect(c.simulatedCompletion()).toBe('2099-01-06');
+    });
+
+    it('does not rebuild the projection when an unrelated field changes', async () => {
+      // formly emits a cloned model per keystroke in ANY field; the projection
+      // must only recompute when a schedule-relevant field changes.
+      const fixture = await setupTestBed({ repeatCfg: rruleCfg });
+      const c = fixture.componentInstance;
+      const before = c.resultHeatmapData();
+      expect(before).not.toBeNull();
+      c.repeatCfg.update((cfg) => ({ ...cfg, title: 'typing…' }) as any);
+      expect(c.resultHeatmapData()).toBe(before); // same reference — no rebuild
+      c.repeatCfg.update((cfg) => ({ ...cfg, rrule: 'FREQ=DAILY' }) as any);
+      expect(c.resultHeatmapData()).not.toBe(before); // schedule change rebuilds
+    });
+
+    it('merges the saved series tracked time into the calendar as a green activity overlay', async () => {
+      // #3: a purely forward window never showed activity (tracked time is in
+      // the PAST). With the look-back window, a recently tracked day of the
+      // series surfaces as a green (activityLevel) cell in the projection.
+      const trackedDate = new Date();
+      trackedDate.setDate(trackedDate.getDate() - 10);
+      const trackedDay = getDbDateStr(trackedDate);
+      const seriesTask = {
+        ...mockTask,
+        id: 'series-1',
+        repeatCfgId: 'rr-activity',
+        timeSpentOnDay: { [trackedDay]: 3_600_000 },
+      } as unknown as TaskCopy;
+
+      const fixture = await setupTestBed(
+        {
+          repeatCfg: {
+            ...mockRepeatCfg,
+            id: 'rr-activity',
+            quickSetting: 'RRULE',
+            rrule: 'FREQ=DAILY',
+          },
+        },
+        undefined,
+        [seriesTask],
+      );
+      const c = fixture.componentInstance;
+      // Flush the repeatCfgId → toObservable → switchMap(loadSeriesTasks) →
+      // Promise.all pipeline (a couple of microtask/macrotask turns).
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((r) => setTimeout(r));
+      fixture.detectChanges();
+      await fixture.whenStable();
+
+      expect(c.hasActivity()).toBe(true);
+      const day = c.resultHeatmapData()!.dayMap.get(trackedDay)!;
+      expect(day).toBeTruthy();
+      expect(day.timeSpent).toBe(3_600_000);
+      // Sole tracked day → busiest in view → top green level.
+      expect(day.activityLevel).toBe(4);
+
+      // Toggling activity OFF drops the green merge.
+      c.showActivity.set(false);
+      const dayOff = c.resultHeatmapData()!.dayMap.get(trackedDay)!;
+      expect(dayOff.activityLevel).toBeUndefined();
+    });
+  });
+
+  describe('calendar context-menu actions', () => {
+    const monthlyCfg: TaskRepeatCfg = {
+      ...DEFAULT_TASK_REPEAT_CFG,
+      id: 'cal-menu',
+      title: 'Monthly 10th',
+      startDate: '2026-06-15',
+      quickSetting: 'RRULE',
+      repeatCycle: 'MONTHLY',
+      rrule: 'FREQ=MONTHLY;BYMONTHDAY=10',
+    };
+
+    it('day menu: "on this day of month" adds BYMONTHDAY', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ date: new Date(2026, 5, 20), dateStr: '2026-06-20' } as DayData);
+      c.menuToggleMonthDay();
+      expect(c.repeatCfg().rrule).toBe('FREQ=MONTHLY;BYMONTHDAY=10,20');
+    });
+
+    it('day menu: "ends on" sets UNTIL for a day after the start', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ date: new Date(2027, 0, 1), dateStr: '2027-01-01' } as DayData);
+      expect(c.menuDayIsEnd()).toBe(false);
+      c.menuEndsOn();
+      expect(c.repeatCfg().rrule).toContain('UNTIL=20270101');
+    });
+
+    it('day menu: clicking the day that IS the end removes the end (toggle)', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          rrule: 'FREQ=MONTHLY;BYMONTHDAY=10;UNTIL=20270101T120000Z',
+        },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ date: new Date(2027, 0, 1), dateStr: '2027-01-01' } as DayData);
+      // The clicked day is the end → the menu flips to "Remove" and toggles off.
+      expect(c.menuDayIsEnd()).toBe(true);
+      c.menuEndsOn();
+      expect(c.repeatCfg().rrule).not.toContain('UNTIL');
+    });
+
+    it('weekday menu: nth ordinal adds BYDAY=2MO', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuWeekdayIdx.set(0); // MO
+      c.menuToggleNth(2, 'MONTHLY');
+      expect(c.repeatCfg().rrule).toBe('FREQ=MONTHLY;BYDAY=2MO');
+    });
+
+    it('weekday menu: the YEARLY nth variant produces a yearly nth rule', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuWeekdayIdx.set(0); // MO
+      c.menuToggleNth(2, 'YEARLY');
+      expect(c.repeatCfg().rrule).toContain('FREQ=YEARLY');
+      expect(c.repeatCfg().rrule).toContain('BYDAY=2MO');
+    });
+
+    it('weekday menu: selected day adds a plain BYDAY (monthly weekdays)', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuWeekdayIdx.set(2); // WE
+      c.menuToggleSelectedDay('MONTHLY');
+      expect(c.repeatCfg().rrule).toBe('FREQ=MONTHLY;BYDAY=WE');
+    });
+
+    it('weekday menu: the WEEKLY variant switches a monthly rule to weekly', async () => {
+      const fixture = await setupTestBed({ repeatCfg: monthlyCfg });
+      const c = fixture.componentInstance;
+      c.menuWeekdayIdx.set(2); // WE
+      c.menuToggleSelectedDay('WEEKLY');
+      expect(c.repeatCfg().rrule).toBe('FREQ=WEEKLY;BYDAY=WE');
+    });
+
+    it('month-label menu: toggles BYMONTH for the viewed month', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: { ...monthlyCfg, rrule: 'FREQ=DAILY', repeatCycle: 'DAILY' },
+      });
+      const c = fixture.componentInstance;
+      c.menuMonthIdx.set(5); // June → month 6
+      c.menuToggleMonth();
+      expect(c.repeatCfg().rrule).toContain('BYMONTH=6');
+    });
+
+    it('a calendar rule-edit switches the quick-setting to Custom (RRULE)', async () => {
+      // A preset (e.g. Daily) edited via the calendar becomes a custom rule.
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          rrule: 'FREQ=DAILY',
+          repeatCycle: 'DAILY',
+          quickSetting: 'DAILY',
+        },
+      });
+      const c = fixture.componentInstance;
+      expect(c.repeatCfg().quickSetting).toBe('DAILY');
+      c.menuMonthIdx.set(5);
+      c.menuToggleMonth();
+      expect(c.repeatCfg().quickSetting).toBe('RRULE');
+    });
+
+    it('weekday menu: "selected days" works in WEEKLY mode (adds BYDAY)', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          rrule: 'FREQ=WEEKLY;BYDAY=MO',
+          repeatCycle: 'WEEKLY',
+        },
+      });
+      const c = fixture.componentInstance;
+      c.menuWeekdayIdx.set(2); // WE
+      c.menuToggleSelectedDay('WEEKLY');
+      expect(c.repeatCfg().rrule).toBe('FREQ=WEEKLY;BYDAY=MO,WE');
+    });
+
+    it('moving the start on/after the end (UNTIL) clears the end back to Never', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          rrule: 'FREQ=DAILY;UNTIL=20260620T120000Z',
+          repeatCycle: 'DAILY',
+          startDate: '2026-06-01',
+        },
+      });
+      const c = fixture.componentInstance;
+      expect(c.repeatCfg().rrule).toContain('UNTIL');
+      c.menuDay.set({ dateStr: '2026-07-01' } as DayData); // after the 6/20 end
+      c.menuSetStart();
+      expect(c.repeatCfg().rrule).not.toContain('UNTIL');
+    });
+
+    it('setting the start re-anchors a running from-completion schedule', async () => {
+      // A from-completion schedule that has run anchors on lastTaskCreationDay, so
+      // an explicit start edit would otherwise be swallowed — clear the marker.
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          repeatFromCompletionDate: true,
+          lastTaskCreationDay: '2026-01-01',
+          startDate: '2026-06-01',
+        },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2026-07-01' } as DayData);
+      c.menuSetStart();
+      expect(c.repeatCfg().startDate).toBe('2026-07-01');
+      expect(c.repeatCfg().lastTaskCreationDay).toBeUndefined();
+    });
+
+    it('setting the start on a fixed schedule leaves lastTaskCreationDay alone', async () => {
+      const fixture = await setupTestBed({
+        repeatCfg: {
+          ...monthlyCfg,
+          repeatFromCompletionDate: false,
+          lastTaskCreationDay: '2026-01-01',
+          startDate: '2026-06-01',
+        },
+      });
+      const c = fixture.componentInstance;
+      c.menuDay.set({ dateStr: '2026-07-01' } as DayData);
+      c.menuSetStart();
+      expect(c.repeatCfg().startDate).toBe('2026-07-01');
+      expect(c.repeatCfg().lastTaskCreationDay).toBe('2026-01-01');
+    });
   });
 
   describe('RRULE builder mode', () => {
@@ -922,11 +1483,13 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       expect(fixture.componentInstance.repeatCfg().quickSetting).toBe('RRULE');
     });
 
-    it('offers the RRULE quick-setting option after the ASYNC load migrates a cfg into builder mode (flag off)', fakeAsync(async () => {
-      // includeRRule must be read live, not captured at construction: on the
-      // task/repeatCfgId path the cfg arrives async, AFTER _initializeFormConfig
-      // ran — a snapshot taken then would leave the select holding 'RRULE' with
-      // no matching option on a flag-off device.
+    it('offers the RRULE quick-setting option with the engine flag OFF, incl. on the async edit path', fakeAsync(async () => {
+      // The builder replaced the legacy Custom UI, so the option is ALWAYS
+      // offered regardless of the per-device engine flag — including on the
+      // task/repeatCfgId path, where the cfg arrives async and migrates into
+      // builder mode only after the form config was built. (A flag-gated
+      // option list would leave the select holding 'RRULE' with no matching
+      // option here.)
       setRRuleEngineEnabled(false);
       const taskWithRepeatCfg = {
         ...mockTask,
@@ -938,15 +1501,13 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       fixture.detectChanges();
       tick();
 
-      const field = component
-        .essentialFormFields()
-        .find((f) => f.key === 'quickSetting')!;
-      const evalOptions = field.expressionProperties![
-        'templateOptions.options'
-      ] as unknown as (model: Record<string, unknown>) => { value: string }[];
+      // Option building now lives in the chip picker's source method (live
+      // `includeRRule`), not a formly field's expressionProperties.
+      const buildOptions = (): { value: string }[] =>
+        (component as any)._buildQuickSettingOptions();
 
-      // Flag off, nothing loaded yet → no advanced option.
-      expect(evalOptions({}).some((o) => o.value === 'RRULE')).toBe(false);
+      // Custom ('RRULE') is always on offer, even with the engine flag off.
+      expect(buildOptions().some((o) => o.value === 'RRULE')).toBe(true);
 
       // Async load delivers a completion cfg that migrates to builder mode.
       repeatCfgSubject.next({
@@ -956,7 +1517,7 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
       } as TaskRepeatCfg);
       tick();
       expect(component.repeatCfg().quickSetting).toBe('RRULE');
-      expect(evalOptions({}).some((o) => o.value === 'RRULE')).toBe(true);
+      expect(buildOptions().some((o) => o.value === 'RRULE')).toBe(true);
     }));
 
     it('opens a NO-rrule completion-relative cfg in builder mode (migrates to rrule)', async () => {
@@ -1160,6 +1721,39 @@ describe('DialogEditTaskRepeatCfgComponent', () => {
         .args[2] as any;
       expect(savedCfg.rrule).toBe('FREQ=DAILY');
       expect(savedCfg.repeatCycle).toBe('DAILY');
+    });
+  });
+
+  describe('onQuickSettingSelect (chip picker)', () => {
+    // Replaces the old formly-select `change` handler coverage (#5806): the
+    // chip picker now drives quickSetting via onQuickSettingSelect.
+    it('uses the selected start date for date-writing presets (not today)', async () => {
+      const fixture = await setupTestBed({ task: mockTask });
+      const component = fixture.componentInstance;
+      component.repeatCfg.update((c) => ({ ...c, startDate: '2099-09-15' }));
+      component.onQuickSettingSelect('MONTHLY_CURRENT_DATE');
+      expect(component.repeatCfg().quickSetting).toBe('MONTHLY_CURRENT_DATE');
+      expect(component.repeatCfg().startDate).toBe('2099-09-15');
+    });
+
+    it('applies weekday flags from the selected start date for weekly presets', async () => {
+      const fixture = await setupTestBed({ task: mockTask });
+      const component = fixture.componentInstance;
+      // 2099-09-14 is a Monday.
+      component.repeatCfg.update((c) => ({ ...c, startDate: '2099-09-14' }));
+      component.onQuickSettingSelect('WEEKLY_CURRENT_WEEKDAY');
+      expect(component.repeatCfg().monday).toBe(true);
+      expect(component.repeatCfg().tuesday).toBe(false);
+    });
+
+    it('switching to Custom (RRULE) keeps the current rrule for the builder', async () => {
+      const fixture = await setupTestBed({ task: mockTask });
+      const component = fixture.componentInstance;
+      component.onQuickSettingSelect('DAILY');
+      const dailyRule = component.repeatCfg().rrule;
+      component.onQuickSettingSelect('RRULE');
+      expect(component.repeatCfg().quickSetting).toBe('RRULE');
+      expect(component.repeatCfg().rrule).toBe(dailyRule);
     });
   });
 });

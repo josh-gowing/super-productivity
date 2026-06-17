@@ -1,0 +1,96 @@
+<div class="rfp">
+  @if (label()) {
+    <label class="rfp-lbl">{{ label() }}</label>
+  }
+
+  <button
+    #trigger
+    type="button"
+    class="rfp-trigger"
+    [class.is-open]="isOpen()"
+    cdkOverlayOrigin
+    #origin="cdkOverlayOrigin"
+    [attr.aria-expanded]="isOpen()"
+    aria-haspopup="listbox"
+    (click)="isOpen() ? close() : open(trigger)"
+  >
+    <span class="rfp-trigger__label">{{ selectedLabel() }}</span>
+    <span
+      class="rfp-trigger__chevron"
+      aria-hidden="true"
+      >▾</span
+    >
+  </button>
+
+  <ng-template
+    cdkConnectedOverlay
+    [cdkConnectedOverlayOrigin]="origin"
+    [cdkConnectedOverlayOpen]="isOpen()"
+    [cdkConnectedOverlayPositions]="overlayPositions"
+    [cdkConnectedOverlayWidth]="triggerWidth()"
+    [cdkConnectedOverlayHasBackdrop]="true"
+    cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+    (backdropClick)="close()"
+    (overlayKeydown)="$event.key === 'Escape' && close()"
+    (detach)="close()"
+  >
+    <div
+      class="rfp-panel"
+      (keydown)="onPanelKeydown($event)"
+    >
+      <div
+        class="rfp-options"
+        role="listbox"
+        [attr.aria-label]="label() || null"
+      >
+        @for (o of presets(); track o.value) {
+          <button
+            #optBtn
+            type="button"
+            class="rfp-opt"
+            role="option"
+            [class.active]="o.value === value()"
+            [attr.aria-selected]="o.value === value()"
+            [tabindex]="isFocusable(o.value) ? 0 : -1"
+            (click)="select(o.value)"
+          >
+            {{ o.label }}
+          </button>
+        }
+
+        @if (customOption(); as c) {
+          <button
+            #optBtn
+            type="button"
+            class="rfp-opt rfp-opt--custom"
+            role="option"
+            [class.active]="c.value === value()"
+            [attr.aria-selected]="c.value === value()"
+            [tabindex]="isFocusable(c.value) ? 0 : -1"
+            (click)="select(c.value)"
+          >
+            {{ c.label }}
+          </button>
+        }
+      </div>
+
+      @if (canToggle()) {
+        <button
+          #optBtn
+          type="button"
+          class="rfp-opt rfp-opt--more"
+          [attr.aria-expanded]="isExpanded()"
+          [tabindex]="isFocusable(MORE_KEY) ? 0 : -1"
+          (click)="toggleExpanded()"
+        >
+          {{
+            (isExpanded()
+              ? T.F.TASK_REPEAT.F.QUICK_SETTING_FEWER
+              : T.F.TASK_REPEAT.F.QUICK_SETTING_MORE
+            ) | translate
+          }}
+        </button>
+      }
+    </div>
+  </ng-template>
+</div>
