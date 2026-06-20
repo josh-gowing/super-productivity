@@ -49,6 +49,29 @@
         </div>
       }
       <div class="wrap-buttons">
+        @if (isMultiple) {
+          <button
+            (click)="addAllToToday()"
+            [disabled]="isDisableControls"
+            color="primary"
+            mat-flat-button
+            type="button"
+          >
+            <mat-icon>wb_sunny</mat-icon>
+            {{ T.F.TASK.D_REMINDER_VIEW.SCHEDULE_FOR_TODAY | translate }}
+          </button>
+        } @else {
+          <button
+            (click)="play()"
+            [disabled]="isDisableControls"
+            color="primary"
+            mat-flat-button
+            type="button"
+          >
+            <mat-icon>play_arrow</mat-icon>
+            {{ T.F.TASK.D_REMINDER_VIEW.START | translate }}
+          </button>
+        }
         <button
           (dblclick)="snoozeAll(10)"
           [disabled]="isDisableControls"
@@ -60,59 +83,17 @@
           <mat-icon>snooze</mat-icon>
           {{ T.F.TASK.D_REMINDER_VIEW.SNOOZE | translate }}
         </button>
-        @if (isMultiple) {
-          <button
-            (click)="markAllAsDone()"
-            [disabled]="isDisableControls"
-            mat-stroked-button
-            color="primary"
-            type="button"
-          >
-            <mat-icon>check</mat-icon>
-            {{ T.F.TASK.D_REMINDER_VIEW.COMPLETE | translate }}
-          </button>
-        }
-        @if (!isMultiple) {
-          <button
-            (click)="markSingleAsDone()"
-            [disabled]="isDisableControls"
-            color="primary"
-            mat-stroked-button
-            type="button"
-          >
-            <mat-icon>check</mat-icon>
-            {{ T.F.TASK.D_REMINDER_VIEW.DONE | translate }}
-          </button>
-        }
-        @if (!(isSingleOnToday$ | async)) {
-          <button
-            (click)="addAllToToday()"
-            [disabled]="isDisableControls"
-            color="primary"
-            mat-stroked-button
-            type="button"
-          >
-            <mat-icon>wb_sunny</mat-icon>
-            {{
-              (isMultiple
-                ? T.F.TASK.D_REMINDER_VIEW.SCHEDULE_FOR_TODAY
-                : T.F.TASK.D_REMINDER_VIEW.ADD_TO_TODAY
-              ) | translate
-            }}
-          </button>
-        }
-        @if (!isMultiple || (isSingleOnToday$ | async)) {
-          <button
-            (click)="play()"
-            [disabled]="isDisableControls"
-            color="primary"
-            mat-stroked-button
-            type="button"
-          >
-            <mat-icon>play_arrow</mat-icon>
-            {{ T.F.TASK.D_REMINDER_VIEW.START | translate }}
-          </button>
-        }
+        <button
+          [disabled]="isDisableControls"
+          [matMenuTriggerFor]="moreMenu"
+          [matTooltip]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
+          [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
+          matTooltipShowDelay="0"
+          mat-icon-button
+          type="button"
+        >
+          <mat-icon>more_vert</mat-icon>
+        </button>
       </div>
     </div>
   </mat-dialog-actions>
@@ -149,7 +130,36 @@
       <mat-icon>today</mat-icon>
       {{ T.F.TASK.D_REMINDER_VIEW.RESCHEDULE_UNTIL_TOMORROW | translate }}
     </button>
-    @if (!isMultiple) {
+  </mat-menu>
+  <mat-menu #moreMenu="matMenu">
+    @if (isMultiple) {
+      <button
+        (click)="markAllAsDone()"
+        [disabled]="isDisableControls"
+        mat-menu-item
+      >
+        <mat-icon>check</mat-icon>
+        {{ T.F.TASK.D_REMINDER_VIEW.COMPLETE | translate }}
+      </button>
+    } @else {
+      <button
+        (click)="markSingleAsDone()"
+        [disabled]="isDisableControls"
+        mat-menu-item
+      >
+        <mat-icon>check</mat-icon>
+        {{ T.F.TASK.D_REMINDER_VIEW.DONE | translate }}
+      </button>
+      @if (!(isSingleOnToday$ | async)) {
+        <button
+          (click)="addAllToToday()"
+          [disabled]="isDisableControls"
+          mat-menu-item
+        >
+          <mat-icon>wb_sunny</mat-icon>
+          {{ T.F.TASK.D_REMINDER_VIEW.ADD_TO_TODAY | translate }}
+        </button>
+      }
       <button
         (click)="editReminder(tasks[0], true)"
         mat-menu-item
