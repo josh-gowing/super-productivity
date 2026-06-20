@@ -248,7 +248,7 @@
           <div>
             @if (isShowToggleButton()) {
               <button
-                (click)="toggleShowDetailPanel($event)"
+                (click)="onToggleDetailPanelBtnClick($event)"
                 title="{{ T.F.TASK.CMP.TOGGLE_DETAIL_PANEL | translate }}  {{
                   kb.taskToggleDetailPanelOpen
                     ? '[' + kb.taskToggleDetailPanelOpen + ']'

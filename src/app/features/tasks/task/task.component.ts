@@ -998,6 +998,19 @@ export class TaskComponent implements OnDestroy, AfterViewInit {
 
   private _wasClickedInDoubleClickRange = false;
 
+  // Clicking the detail-panel toggle button while it shows the accent "issue
+  // updated" icon also dismisses that badge (toggleButtonIcon() === 'update'
+  // iff issueWasUpdated). This is the always-available way to clear it — unlike
+  // the issue-content "mark as checked" button, it does not depend on the issue
+  // data (re)loading, so the badge can never get stuck (e.g. removed remote issue).
+  onToggleDetailPanelBtnClick(ev?: MouseEvent): void {
+    const task = this.task();
+    if (task.issueWasUpdated) {
+      this._taskService.markIssueUpdatesAsRead(task.id);
+    }
+    this.toggleShowDetailPanel(ev);
+  }
+
   toggleShowDetailPanel(ev?: MouseEvent): void {
     const isInTaskDetailPanel =
       this._elementRef.nativeElement.closest('task-detail-panel');
