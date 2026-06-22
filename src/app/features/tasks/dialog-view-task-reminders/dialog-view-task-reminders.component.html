@@ -49,6 +49,29 @@
         </div>
       }
       <div class="wrap-buttons">
+        <button
+          [disabled]="isDisableControls"
+          [matMenuTriggerFor]="moreMenu"
+          [matTooltip]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
+          [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
+          matTooltipShowDelay="0"
+          mat-icon-button
+          type="button"
+        >
+          <mat-icon>more_vert</mat-icon>
+        </button>
+        <button
+          (dblclick)="snoozeAll(10)"
+          [disabled]="isDisableControls"
+          [matMenuTriggerFor]="snoozeAllMenu"
+          color="primary"
+          mat-stroked-button
+          type="button"
+        >
+          <mat-icon>snooze</mat-icon>
+          {{ T.F.TASK.D_REMINDER_VIEW.SNOOZE | translate }}
+          <mat-icon iconPositionEnd>arrow_drop_down</mat-icon>
+        </button>
         @if (isMultiple || isAllDeadline) {
           <button
             (click)="addAllToToday()"
@@ -77,42 +100,6 @@
             {{ T.F.TASK.D_REMINDER_VIEW.START | translate }}
           </button>
         }
-        <button
-          (dblclick)="snoozeAll(10)"
-          [disabled]="isDisableControls"
-          [matMenuTriggerFor]="snoozeAllMenu"
-          color="primary"
-          mat-stroked-button
-          type="button"
-        >
-          <mat-icon>snooze</mat-icon>
-          {{ T.F.TASK.D_REMINDER_VIEW.SNOOZE | translate }}
-          <mat-icon iconPositionEnd>arrow_drop_down</mat-icon>
-        </button>
-        @if (!isMultiple) {
-          <button
-            (click)="markSingleAsDone()"
-            [disabled]="isDisableControls"
-            [matTooltip]="T.F.TASK.D_REMINDER_VIEW.MARK_AS_DONE | translate"
-            [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.MARK_AS_DONE | translate"
-            matTooltipShowDelay="0"
-            mat-icon-button
-            type="button"
-          >
-            <mat-icon>check</mat-icon>
-          </button>
-        }
-        <button
-          [disabled]="isDisableControls"
-          [matMenuTriggerFor]="moreMenu"
-          [matTooltip]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
-          [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
-          matTooltipShowDelay="0"
-          mat-icon-button
-          type="button"
-        >
-          <mat-icon>more_vert</mat-icon>
-        </button>
       </div>
     </div>
   </mat-dialog-actions>
@@ -169,15 +156,25 @@
         <mat-icon>done_all</mat-icon>
         {{ T.F.TASK.D_REMINDER_VIEW.COMPLETE | translate }}
       </button>
-    } @else if (isAllDeadline) {
+    } @else {
       <button
-        (click)="play()"
+        (click)="markSingleAsDone()"
         [disabled]="isDisableControls"
         mat-menu-item
       >
-        <mat-icon>play_arrow</mat-icon>
-        {{ T.F.TASK.D_REMINDER_VIEW.START | translate }}
+        <mat-icon>check</mat-icon>
+        {{ T.F.TASK.D_REMINDER_VIEW.DONE | translate }}
       </button>
+      @if (isAllDeadline) {
+        <button
+          (click)="play()"
+          [disabled]="isDisableControls"
+          mat-menu-item
+        >
+          <mat-icon>play_arrow</mat-icon>
+          {{ T.F.TASK.D_REMINDER_VIEW.START | translate }}
+        </button>
+      }
     }
     @if (!isMultiple && !isAllDeadline && !(isSingleOnToday$ | async)) {
       <button
