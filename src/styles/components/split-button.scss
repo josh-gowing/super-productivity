@@ -1,0 +1,29 @@
+// Joined "split button": a primary default action plus an adjacent dropdown
+// trigger that opens a menu of related options (e.g. snooze in the reminder
+// dialog). Lives in the shared layer so the joined treatment is reusable
+// rather than re-implemented locally per usage.
+.g-split-btn {
+  display: inline-flex;
+  align-items: stretch;
+
+  // Default-action button: square off the edge that meets the dropdown.
+  > button:first-of-type {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  // Dropdown trigger: compact, squared leading edge, overlapping the shared
+  // 1px border so the two read as a single control.
+  > button:last-of-type {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    margin-left: -1px;
+    min-width: 0;
+    padding-left: var(--s-half);
+    padding-right: var(--s-half);
+
+    .mat-mdc-button-persistent-ripple {
+      border-radius: 0;
+    }
+  }
+}

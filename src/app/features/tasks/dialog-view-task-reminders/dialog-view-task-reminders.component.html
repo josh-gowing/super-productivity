@@ -52,26 +52,37 @@
         <button
           [disabled]="isDisableControls"
           [matMenuTriggerFor]="moreMenu"
-          [matTooltip]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
           [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate"
-          matTooltipShowDelay="0"
-          mat-icon-button
+          mat-button
           type="button"
         >
-          <mat-icon>more_vert</mat-icon>
-        </button>
-        <button
-          (dblclick)="snoozeAll(10)"
-          [disabled]="isDisableControls"
-          [matMenuTriggerFor]="snoozeAllMenu"
-          color="primary"
-          mat-stroked-button
-          type="button"
-        >
-          <mat-icon>snooze</mat-icon>
-          {{ T.F.TASK.D_REMINDER_VIEW.SNOOZE | translate }}
+          {{ T.F.TASK.D_REMINDER_VIEW.MORE_ACTIONS | translate }}
           <mat-icon iconPositionEnd>arrow_drop_down</mat-icon>
         </button>
+        <div class="g-split-btn">
+          <button
+            (click)="snoozeAll(10)"
+            [disabled]="isDisableControls"
+            color="primary"
+            mat-stroked-button
+            type="button"
+          >
+            <mat-icon>snooze</mat-icon>
+            {{ T.F.TASK.D_REMINDER_VIEW.SNOOZE | translate }}
+          </button>
+          <button
+            [disabled]="isDisableControls"
+            [matMenuTriggerFor]="snoozeAllMenu"
+            [matTooltip]="T.F.TASK.D_REMINDER_VIEW.SNOOZE_OPTIONS | translate"
+            [attr.aria-label]="T.F.TASK.D_REMINDER_VIEW.SNOOZE_OPTIONS | translate"
+            matTooltipShowDelay="0"
+            color="primary"
+            mat-stroked-button
+            type="button"
+          >
+            <mat-icon>arrow_drop_down</mat-icon>
+          </button>
+        </div>
         @if (isMultiple || isAllDeadline) {
           <button
             (click)="addAllToToday()"
