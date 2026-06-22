@@ -1,7 +1,9 @@
 // Joined "split button": a primary default action plus an adjacent dropdown
 // trigger that opens a menu of related options (e.g. snooze in the reminder
 // dialog). Lives in the shared layer so the joined treatment is reusable
-// rather than re-implemented locally per usage.
+// rather than re-implemented locally per usage, and so it can pierce Material's
+// internal button elements. Structure/API is provided by the reusable
+// <split-button> UI component (src/app/ui/split-button).
 .g-split-btn {
   display: inline-flex;
   align-items: stretch;
@@ -12,18 +14,34 @@
     border-bottom-right-radius: 0;
   }
 
-  // Dropdown trigger: compact, squared leading edge, overlapping the shared
-  // 1px border so the two read as a single control.
+  // Dropdown trigger: a compact square that sits flush against the default
+  // action, sharing its 1px border so the two read as a single control.
   > button:last-of-type {
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
+    // Overlap the shared edge so there is no visible gap or double border.
     margin-left: -1px;
     min-width: 0;
-    padding-left: var(--s-half);
-    padding-right: var(--s-half);
+    width: 36px;
+    padding: 0;
+    // Center the lone icon both axes; Material's defaults assume icon + text.
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 
     .mat-mdc-button-persistent-ripple {
       border-radius: 0;
+    }
+
+    // The label wrapper otherwise keeps a min-width / text alignment meant for
+    // labelled buttons; collapse it so the icon is truly centered.
+    .mdc-button__label {
+      display: inline-flex;
+    }
+
+    mat-icon,
+    .mat-icon {
+      margin: 0;
     }
   }
 }

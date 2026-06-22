@@ -1,0 +1,25 @@
+<div class="g-split-btn">
+  <button
+    class="split-btn-main"
+    (click)="mainClick.emit($event)"
+    [color]="color()"
+    [disabled]="disabled()"
+    mat-stroked-button
+    type="button"
+  >
+    <ng-content></ng-content>
+  </button>
+  <button
+    class="split-btn-trigger"
+    [matMenuTriggerFor]="menu()"
+    [color]="color()"
+    [disabled]="disabled()"
+    [matTooltip]="triggerLabel() ? (triggerLabel() | translate) : ''"
+    [attr.aria-label]="triggerLabel() ? (triggerLabel() | translate) : null"
+    matTooltipShowDelay="0"
+    mat-stroked-button
+    type="button"
+  >
+    <mat-icon>{{ triggerIcon() }}</mat-icon>
+  </button>
+</div>

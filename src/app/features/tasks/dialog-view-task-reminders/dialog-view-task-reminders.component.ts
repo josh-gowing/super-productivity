@@ -29,6 +29,8 @@ import { DialogScheduleTaskComponent } from '../../planner/dialog-schedule-task/
 import { MatIcon } from '@angular/material/icon';
 import { MatButton, MatIconButton } from '@angular/material/button';
 import { MatMenu, MatMenuItem, MatMenuTrigger } from '@angular/material/menu';
+import { MatDivider } from '@angular/material/divider';
+import { SplitButtonComponent } from '../../../ui/split-button/split-button.component';
 import { AsyncPipe, NgTemplateOutlet } from '@angular/common';
 import { LocaleDatePipe } from 'src/app/ui/pipes/locale-date.pipe';
 import { LocalDateStrPipe } from 'src/app/ui/pipes/local-date-str.pipe';
@@ -74,6 +76,8 @@ export const shouldShowDeadlineScheduleHint = (
     MatMenuItem,
     MatDialogActions,
     MatButton,
+    MatDivider,
+    SplitButtonComponent,
     AsyncPipe,
     NgTemplateOutlet,
     TranslatePipe,

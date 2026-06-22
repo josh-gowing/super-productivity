@@ -217,11 +217,11 @@ test.describe('Deadline Reminders', () => {
     await page.waitForSelector(REMINDER_DIALOG_TASK_1, { state: 'visible' });
     await expect(page.locator(REMINDER_DIALOG_TASK_1)).toContainText(taskTitle);
 
-    // Open the snooze options menu (the split-button dropdown), then pick
-    // "Reschedule for tomorrow". The main snooze button now snoozes 10m directly.
+    // Open the overflow menu (the split-button dropdown right of snooze), then
+    // pick "Reschedule for tomorrow". The main snooze button snoozes 10m directly.
     const snoozeMenuBtn = page
       .locator(REMINDER_DIALOG)
-      .locator('button[aria-label="Snooze options"]');
+      .locator('button[aria-label="More actions"]');
     await snoozeMenuBtn.click();
 
     const rescheduleOption = page.locator(
