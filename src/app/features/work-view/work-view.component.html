@@ -309,6 +309,7 @@
                     @for (calEv of laterTodayCalendarEvents(); track calEv.id) {
                       <planner-calendar-event
                         [calendarEvent]="calEv"
+                        [showStartTime]="true"
                       ></planner-calendar-event>
                     }
                   </div>
