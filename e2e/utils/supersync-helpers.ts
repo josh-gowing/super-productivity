@@ -1087,26 +1087,27 @@ export const markTaskDoneByKey = async (
  * @param client - The simulated E2E client
  */
 export const archiveDoneTasks = async (client: SimulatedE2EClient): Promise<void> => {
-  // Click the "Finish Day" button to go to Daily Summary
+  // Click the "Finish Day" button to go to Daily Summary.
+  // Arm waitForURL *before* clicking via Promise.all: if the click lands a hair
+  // before Angular wires up the routerLink (animation/CD timing), a click-then-wait
+  // sequence silently no-ops and only fails 30s later. Racing them removes that gap.
   const finishDayBtn = client.page.locator('.e2e-finish-day');
   await finishDayBtn.waitFor({ state: 'visible', timeout: UI_VISIBLE_TIMEOUT });
-  await finishDayBtn.click();
-
-  // Wait for navigation to Daily Summary
-  await client.page.waitForURL(/daily-summary/);
+  await Promise.all([client.page.waitForURL(/daily-summary/), finishDayBtn.click()]);
 
   // Click "Save & Go Home" button (has sun icon wb_sunny)
   const saveAndGoHomeBtn = client.page.locator(
     'daily-summary button[mat-flat-button]:has(mat-icon:has-text("wb_sunny"))',
   );
   await saveAndGoHomeBtn.waitFor({ state: 'visible', timeout: UI_VISIBLE_TIMEOUT });
-  await saveAndGoHomeBtn.click();
-
   // Wait for navigation back to work view.
   // Use negative lookahead: /(active\/tasks|tag\/TODAY)/ would match the
   // current /daily-summary URL; adding (?!\/daily-summary) ensures we wait
   // for a real navigation. Also handles tag/TODAY without /tasks suffix.
-  await client.page.waitForURL(/(active\/tasks|tag\/TODAY(?!\/daily-summary))/);
+  await Promise.all([
+    client.page.waitForURL(/(active\/tasks|tag\/TODAY(?!\/daily-summary))/),
+    saveAndGoHomeBtn.click(),
+  ]);
   await client.page.waitForTimeout(UI_SETTLE_STANDARD);
 };
 

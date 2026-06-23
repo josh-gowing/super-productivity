@@ -23,7 +23,7 @@ import {
   SYNC_FORM,
   SyncCollapsibleProps,
 } from '../../../features/config/form-cfgs/sync-form.const';
-import { FormGroup, ReactiveFormsModule } from '@angular/forms';
+import { AbstractControl, FormGroup, ReactiveFormsModule } from '@angular/forms';
 import { FormlyFieldConfig, FormlyModule } from '@ngx-formly/core';
 import { SyncConfig } from '../../../features/config/global-config.model';
 import {
@@ -47,7 +47,13 @@ import {
   type WebdavPrivateCfg,
 } from '@sp/sync-providers/webdav';
 import { testWebdavConnection } from '../../../op-log/sync-providers/file-based/webdav/test-webdav-connection';
+import { discoverNextcloudUserId } from '../../../op-log/sync-providers/file-based/webdav/discover-nextcloud-user-id';
 import type { OneDrivePrivateCfg } from '../../../op-log/sync-providers/file-based/onedrive/onedrive.model';
+
+// `testWebdavConnection` reports a 404 (auth ok, wrong DAV path) via this
+// HTTP status; the package-side `WebDavHttpStatus` enum is not exported to
+// the app, so the discriminator value is named locally instead of inlined.
+const HTTP_NOT_FOUND = 404;
 
 @Component({
   selector: 'dialog-sync-cfg',
@@ -108,7 +114,11 @@ export class DialogSyncCfgComponent implements AfterViewInit {
     if (item.key === 'nextcloud' && item.fieldGroup) {
       return {
         ...item,
-        fieldGroup: [...item.fieldGroup, this._nextcloudTestConnectionBtn()],
+        fieldGroup: [
+          ...item.fieldGroup,
+          this._nextcloudDetectUserIdBtn(),
+          this._nextcloudTestConnectionBtn(),
+        ],
       };
     }
     if (
@@ -189,6 +199,14 @@ export class DialogSyncCfgComponent implements AfterViewInit {
     });
   }
 
+  private _nextcloudDetectUserIdBtn(): FormlyFieldConfig {
+    return this._actionBtn({
+      text: T.F.SYNC.FORM.NEXTCLOUD.L_DETECT_USER_ID,
+      className: 'mt3 block',
+      onClick: (model) => this._detectNextcloudUserId(model as NextcloudPrivateCfg),
+    });
+  }
+
   private _forceOverwriteBtn(): FormlyFieldConfig {
     return this._actionBtn({
       text: T.F.SYNC.S.BTN_FORCE_OVERWRITE,
@@ -232,14 +250,88 @@ export class DialogSyncCfgComponent implements AfterViewInit {
       });
       return;
     }
-    await this._testWebDavConnection({
-      ...cfg,
-      baseUrl: NextcloudProvider.buildBaseUrl(cfg),
-      userName: NextcloudProvider.getAuthUserName(cfg),
-    } as WebdavPrivateCfg);
+    await this._testWebDavConnection(
+      {
+        ...cfg,
+        baseUrl: NextcloudProvider.buildBaseUrl(cfg),
+        userName: NextcloudProvider.getAuthUserName(cfg),
+      } as WebdavPrivateCfg,
+      // A 404 on the Nextcloud base root means auth succeeded but the DAV
+      // path /remote.php/dav/files/<userName>/ doesn't exist — i.e. the
+      // "Username" field holds an email/display name instead of the
+      // account's user ID. Surface that instead of the cryptic bare-host
+      // message users misread as a stripped URL (issue #7617).
+      T.F.SYNC.FORM.NEXTCLOUD.S_TEST_FAIL_USER_NOT_FOUND,
+    );
   }
 
-  private async _testWebDavConnection(webDavCfg: WebdavPrivateCfg): Promise<void> {
+  /**
+   * Ask the Nextcloud server for the account's canonical user ID and write it
+   * into the "Username" field, so users don't have to hunt for it by hand
+   * (issue #7617). Authenticates with the login name / email (or whatever is
+   * in "Username") + app password; a 401 cleanly reports bad credentials.
+   */
+  private async _detectNextcloudUserId(cfg: NextcloudPrivateCfg): Promise<void> {
+    const login = cfg?.loginName?.trim() || cfg?.userName?.trim();
+    if (!cfg?.serverUrl?.trim() || !login || !cfg?.password) {
+      this._snackService.open({
+        type: 'ERROR',
+        msg: T.F.SYNC.FORM.NEXTCLOUD.S_DETECT_USER_ID_NEED_LOGIN,
+      });
+      return;
+    }
+    this._applyDetectedUserIdResult(await discoverNextcloudUserId(cfg));
+  }
+
+  /**
+   * Apply a `discoverNextcloudUserId` result: on success fill the "Username"
+   * field with the detected user ID and confirm; otherwise surface the
+   * readable failure. Split from the network call so it is unit-testable
+   * without a live server (mirrors `_reportWebdavTestResult`).
+   */
+  private _applyDetectedUserIdResult(result: {
+    success: boolean;
+    userId?: string;
+    error?: string;
+  }): void {
+    if (result.success && result.userId) {
+      // formly builds the form dynamically, so the controls are untyped here.
+      const userNameCtrl = this.form.get('nextcloud.userName') as AbstractControl | null;
+      const loginNameCtrl = this.form.get(
+        'nextcloud.loginName',
+      ) as AbstractControl | null;
+      // Preserve the credential that just authenticated: if "Login name" is
+      // empty and the user typed their login (e.g. email) into "Username",
+      // keep it as the login name before overwriting Username with the user
+      // ID — otherwise the next sync would auth as the ID, which some servers
+      // reject (turning a wrong-path 404 into an auth 401). See issue #7617.
+      const priorUserName = ((userNameCtrl?.value as string) ?? '').trim();
+      if (
+        !((loginNameCtrl?.value as string) ?? '').trim() &&
+        priorUserName &&
+        priorUserName !== result.userId
+      ) {
+        loginNameCtrl?.setValue(priorUserName);
+      }
+      userNameCtrl?.setValue(result.userId);
+      this._snackService.open({
+        type: 'SUCCESS',
+        msg: T.F.SYNC.FORM.NEXTCLOUD.S_DETECT_USER_ID_SUCCESS,
+        translateParams: { userId: result.userId },
+      });
+    } else {
+      this._snackService.open({
+        type: 'ERROR',
+        msg: T.F.SYNC.FORM.NEXTCLOUD.S_DETECT_USER_ID_FAIL,
+        translateParams: { error: result.error || 'Unknown error' },
+      });
+    }
+  }
+
+  private async _testWebDavConnection(
+    webDavCfg: WebdavPrivateCfg,
+    notFoundMsg?: string,
+  ): Promise<void> {
     if (
       !webDavCfg?.baseUrl ||
       !webDavCfg?.userName ||
@@ -255,22 +347,7 @@ export class DialogSyncCfgComponent implements AfterViewInit {
 
     try {
       const result = await testWebdavConnection(webDavCfg);
-      if (result.success) {
-        this._snackService.open({
-          type: 'SUCCESS',
-          msg: T.F.SYNC.FORM.WEB_DAV.S_TEST_SUCCESS,
-          translateParams: { url: result.fullUrl },
-        });
-      } else {
-        this._snackService.open({
-          type: 'ERROR',
-          msg: T.F.SYNC.FORM.WEB_DAV.S_TEST_FAIL,
-          translateParams: {
-            error: result.error || 'Unknown error',
-            url: result.fullUrl,
-          },
-        });
-      }
+      this._reportWebdavTestResult(result, notFoundMsg);
     } catch (e) {
       this._snackService.open({
         type: 'ERROR',
@@ -278,6 +355,40 @@ export class DialogSyncCfgComponent implements AfterViewInit {
         translateParams: {
           error: e instanceof Error ? e.message : 'Unexpected error',
           url: (webDavCfg.baseUrl as string) || 'N/A',
+        },
+      });
+    }
+  }
+
+  /**
+   * Open the success/failure snack for a connection-test result. When
+   * `notFoundMsg` is given (Nextcloud) and the failure is a 404, show that
+   * provider-specific hint instead of the generic message — a base-root 404
+   * means auth worked but the DAV user-id path is wrong (issue #7617).
+   */
+  private _reportWebdavTestResult(
+    result: { success: boolean; error?: string; fullUrl: string; errorCode?: number },
+    notFoundMsg?: string,
+  ): void {
+    if (result.success) {
+      this._snackService.open({
+        type: 'SUCCESS',
+        msg: T.F.SYNC.FORM.WEB_DAV.S_TEST_SUCCESS,
+        translateParams: { url: result.fullUrl },
+      });
+    } else if (notFoundMsg && result.errorCode === HTTP_NOT_FOUND) {
+      this._snackService.open({
+        type: 'ERROR',
+        msg: notFoundMsg,
+        translateParams: { url: result.fullUrl },
+      });
+    } else {
+      this._snackService.open({
+        type: 'ERROR',
+        msg: T.F.SYNC.FORM.WEB_DAV.S_TEST_FAIL,
+        translateParams: {
+          error: result.error || 'Unknown error',
+          url: result.fullUrl,
         },
       });
     }

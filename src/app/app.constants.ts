@@ -1,9 +1,24 @@
+import { InjectionToken } from '@angular/core';
 import { IS_ANDROID_WEB_VIEW } from './util/is-android-web-view';
 
 export const IS_ELECTRON = navigator.userAgent.toLowerCase().indexOf(' electron/') > -1;
+
+/**
+ * Injection token for IS_ELECTRON to enable testing.
+ * New DI-tested effects/services should prefer this token over the IS_ELECTRON
+ * constant to ensure testability and prevent logic drift.
+ */
+export const IS_ELECTRON_TOKEN = new InjectionToken<boolean>('IS_ELECTRON', {
+  providedIn: 'root',
+  factory: () => IS_ELECTRON,
+});
 // effectively IS_BROWSER
 export const IS_WEB_BROWSER = !IS_ELECTRON && !IS_ANDROID_WEB_VIEW;
-export const IS_GNOME_DESKTOP = IS_ELECTRON && window.ea.isGnomeDesktop();
+// Only GNOME+Wayland force-disables the custom title bar (the Window-Controls-
+// Overlay won't render there). Mirrors electron/common.const.ts so the renderer
+// and main process agree. See global-theme.service.ts / main-window.ts.
+// (window.ea.isGnomeDesktop() still exists on the bridge for plugin use.)
+export const IS_GNOME_WAYLAND = IS_ELECTRON && window.ea.isGnomeWayland();
 // True only inside the Electron build — preload exposes process.arch.
 // Web builds can't reliably distinguish Apple Silicon from Intel and stay false.
 export const IS_APPLE_SILICON = IS_ELECTRON && window.ea.isAppleSilicon();

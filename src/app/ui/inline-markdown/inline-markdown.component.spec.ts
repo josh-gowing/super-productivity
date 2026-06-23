@@ -1,14 +1,17 @@
 import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
-import { MatDialog } from '@angular/material/dialog';
+import { MatDialog, MatDialogState } from '@angular/material/dialog';
 import { MarkdownModule } from 'ngx-markdown';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { InlineMarkdownComponent } from './inline-markdown.component';
 import { GlobalConfigService } from '../../features/config/global-config.service';
 import { ClipboardImageService } from '../../core/clipboard-image/clipboard-image.service';
-import { provideMockStore } from '@ngrx/store/testing';
+import { MockStore, provideMockStore } from '@ngrx/store/testing';
 import { provideMockActions } from '@ngrx/effects/testing';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { TranslateModule } from '@ngx-translate/core';
+import { TaskSharedActions } from '../../root-store/meta/task-shared.actions';
+import { Log } from '../../core/log';
+import { Location } from '@angular/common';
 
 describe('InlineMarkdownComponent', () => {
   let component: InlineMarkdownComponent;
@@ -134,6 +137,37 @@ describe('InlineMarkdownComponent', () => {
       expect(window.getComputedStyle(textarea).whiteSpace).toBe('pre-wrap');
       expect(window.getComputedStyle(preview).overflowWrap).toBe('anywhere');
       expect(window.getComputedStyle(previewLink).overflowWrap).toBe('anywhere');
+    }));
+  });
+
+  describe('checklist glyph selectability', () => {
+    it('keeps the checkbox glyph unselectable while its label stays copyable', fakeAsync(() => {
+      component.model = 'placeholder';
+      fixture.detectChanges();
+      tick();
+      fixture.detectChanges();
+      tick();
+
+      const preview = fixture.nativeElement.querySelector(
+        'markdown.markdown-parsed',
+      ) as HTMLElement;
+      expect(preview).toBeTruthy();
+
+      // The custom checklist renderer (marked-options-factory) emits a Material
+      // Icons ligature span whose textContent is the glyph name. The unit-test
+      // module doesn't wire that renderer, so emulate its output to verify the
+      // stylesheet keeps the glyph out of the clipboard while the label is kept
+      // selectable.
+      preview.innerHTML =
+        '<li class="checkbox-wrapper undone">' +
+        '<span class="checkbox material-icons">check_box_outline_blank</span> ' +
+        '<span class="checkbox-label">buy milk</span></li>';
+      fixture.detectChanges();
+
+      const glyph = preview.querySelector('.checkbox') as HTMLElement;
+      const label = preview.querySelector('.checkbox-label') as HTMLElement;
+      expect(window.getComputedStyle(glyph).userSelect).toBe('none');
+      expect(window.getComputedStyle(label).userSelect).toBe('text');
     }));
   });
 
@@ -610,6 +644,90 @@ describe('InlineMarkdownComponent', () => {
       // Assert
       expect(component['_toggleShowEdit']).toHaveBeenCalled();
       expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+
+    it('should NOT enter edit mode if selection exists on click', () => {
+      // Arrange
+      component.model = 'Some regular text';
+      fixture.detectChanges();
+
+      const paragraph = document.createElement('p');
+      paragraph.textContent = 'Some regular text';
+      mockPreviewEl.element.nativeElement.appendChild(paragraph);
+
+      spyOn<any>(component, '_toggleShowEdit');
+      spyOn(window, 'getSelection').and.returnValue({
+        toString: () => 'Some',
+      } as any);
+
+      // Act
+      const mockEvent = {
+        target: paragraph,
+        clientX: 10,
+        clientY: 10,
+      } as unknown as MouseEvent;
+      component.clickPreview(mockEvent);
+
+      // Assert
+      expect(component['_toggleShowEdit']).not.toHaveBeenCalled();
+    });
+
+    it('should NOT enter edit mode if it was a drag (drag distance > 5)', () => {
+      // Arrange
+      component.model = 'Some regular text';
+      fixture.detectChanges();
+
+      const paragraph = document.createElement('p');
+      paragraph.textContent = 'Some regular text';
+      mockPreviewEl.element.nativeElement.appendChild(paragraph);
+
+      spyOn<any>(component, '_toggleShowEdit');
+      spyOn(window, 'getSelection').and.returnValue({
+        toString: () => '',
+      } as any);
+
+      // Act - simulate mousedown then click-drag
+      component.previewMousedown({ button: 0, clientX: 10, clientY: 10 } as MouseEvent);
+
+      const mockEvent = {
+        target: paragraph,
+        clientX: 20,
+        clientY: 20,
+      } as unknown as MouseEvent;
+      component.clickPreview(mockEvent);
+
+      // Assert
+      expect(component['_toggleShowEdit']).not.toHaveBeenCalled();
+    });
+
+    it('should NOT enter edit mode if there was an active selection on mousedown', () => {
+      // Arrange
+      component.model = 'Some regular text';
+      fixture.detectChanges();
+
+      const paragraph = document.createElement('p');
+      paragraph.textContent = 'Some regular text';
+      mockPreviewEl.element.nativeElement.appendChild(paragraph);
+
+      spyOn<any>(component, '_toggleShowEdit');
+      const getSelectionSpy = spyOn(window, 'getSelection');
+
+      // Selection exists on mousedown, but is cleared on mouseup/click
+      getSelectionSpy.and.returnValue({ toString: () => 'Some' } as any);
+      component.previewMousedown({ button: 0, clientX: 10, clientY: 10 } as MouseEvent);
+
+      getSelectionSpy.and.returnValue({ toString: () => '' } as any);
+
+      // Act
+      const mockEvent = {
+        target: paragraph,
+        clientX: 10,
+        clientY: 10,
+      } as unknown as MouseEvent;
+      component.clickPreview(mockEvent);
+
+      // Assert
+      expect(component['_toggleShowEdit']).not.toHaveBeenCalled();
     });
   });
 
@@ -1738,6 +1856,197 @@ describe('InlineMarkdownComponent', () => {
       fixture.detectChanges();
       component.uncheckAllChecklistItems();
       expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('fullscreen editor save after the host is destroyed mid-edit', () => {
+    let afterClosed$: Subject<unknown>;
+    let store: MockStore;
+
+    beforeEach(() => {
+      afterClosed$ = new Subject<unknown>();
+      mockMatDialog.open.and.returnValue({
+        afterClosed: () => afterClosed$.asObservable(),
+      } as any);
+      store = TestBed.inject(MockStore);
+      spyOn(store, 'dispatch');
+      spyOn(component.changed, 'emit');
+      fixture.componentRef.setInput('taskId', 'task-1');
+      fixture.detectChanges();
+    });
+
+    // Regression: the fullscreen dialog is a detached overlay. When the focus
+    // session ends mid-edit it destroys the component that opened the dialog, so
+    // emitting `changed` on save would reach no listener and the note is lost.
+    it('persists the note directly to the task when destroyed while the dialog is open', () => {
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next('saved note');
+
+      expect(store.dispatch).toHaveBeenCalledWith(
+        TaskSharedActions.updateTask({
+          task: { id: 'task-1', changes: { notes: 'saved note' } },
+        }),
+      );
+      expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+
+    it('emits via `changed` (no direct dispatch) when still alive', () => {
+      component.openFullScreen();
+
+      afterClosed$.next('saved note');
+
+      expect(component.changed.emit).toHaveBeenCalledWith('saved note');
+      expect(store.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('persists a replacement of pre-existing notes when destroyed mid-edit', () => {
+      component.model = 'original notes';
+      fixture.detectChanges();
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next('original notes plus more');
+
+      expect(store.dispatch).toHaveBeenCalledWith(
+        TaskSharedActions.updateTask({
+          task: { id: 'task-1', changes: { notes: 'original notes plus more' } },
+        }),
+      );
+    });
+
+    it('clears the note (DELETE) directly when destroyed mid-edit', () => {
+      component.model = 'some real notes';
+      fixture.detectChanges();
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next({ action: 'DELETE' });
+
+      expect(store.dispatch).toHaveBeenCalledWith(
+        TaskSharedActions.updateTask({ task: { id: 'task-1', changes: { notes: '' } } }),
+      );
+      expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the dialog is closed without a result (Close, not Save)', () => {
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next(undefined);
+
+      expect(store.dispatch).not.toHaveBeenCalled();
+      expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+
+    it('does not persist when the content is unchanged (no default-text write-back)', () => {
+      component.model = 'How can I best achieve it now?';
+      fixture.detectChanges();
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next('How can I best achieve it now?');
+
+      expect(store.dispatch).not.toHaveBeenCalled();
+      expect(component.changed.emit).not.toHaveBeenCalled();
+    });
+
+    it('treats a whitespace-only diff of the loaded text as unchanged', () => {
+      component.model = 'How can I best achieve it now?';
+      fixture.detectChanges();
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      // The editor can re-emit the placeholder with a trailing newline; that is
+      // not a real edit and must not be written back as a note.
+      afterClosed$.next('How can I best achieve it now?\n');
+
+      expect(store.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('warns rather than silently dropping when destroyed without a taskId', () => {
+      const warnSpy = spyOn(Log, 'warn');
+      fixture.componentRef.setInput('taskId', undefined);
+      component.model = 'orig';
+      fixture.detectChanges();
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      afterClosed$.next('edited content');
+
+      expect(store.dispatch).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    });
+  });
+
+  // The navigation→save→close mechanics live in open-fullscreen-markdown-dialog
+  // (and its own spec); here we assert the opener's end of the contract: a
+  // navigation-close must PERSIST the edit, not just close it.
+  describe('fullscreen editor persists the edit on a navigation-close (#8434)', () => {
+    let afterClosed$: Subject<unknown>;
+    let store: MockStore;
+    let locationCb: ((value: PopStateEvent) => void) | undefined;
+
+    beforeEach(() => {
+      afterClosed$ = new Subject<unknown>();
+      locationCb = undefined;
+
+      // Capture the Location listener so a navigation can be simulated.
+      const location = TestBed.inject(Location);
+      spyOn(location, 'subscribe').and.callFake((cb: (value: PopStateEvent) => void) => {
+        locationCb = cb;
+        return { unsubscribe: () => {} } as never;
+      });
+
+      mockMatDialog.open.and.returnValue({
+        afterClosed: () => afterClosed$.asObservable(),
+        componentInstance: { close: () => {} },
+        getState: () => MatDialogState.OPEN,
+      } as never);
+      store = TestBed.inject(MockStore);
+      spyOn(store, 'dispatch');
+      fixture.componentRef.setInput('taskId', 'task-1');
+      fixture.detectChanges();
+    });
+
+    const navigate = (): void => locationCb!({} as PopStateEvent);
+
+    // Guards against a future revert to a direct _matDialog.open (which would
+    // reintroduce the data loss): the helper always disables closeOnNavigation.
+    it('routes the fullscreen dialog through the nav-persisting helper', () => {
+      component.openFullScreen();
+
+      const config = mockMatDialog.open.calls.mostRecent().args[1];
+      expect(config?.closeOnNavigation).toBe(false);
+    });
+
+    // When still alive the note routes out via `changed`.
+    it('persists the edit via `changed` when a navigation closes the dialog', () => {
+      spyOn(component.changed, 'emit');
+      component.openFullScreen();
+
+      navigate();
+      // The dialog resolves through its save path with the typed content.
+      afterClosed$.next('typed before resize');
+
+      expect(component.changed.emit).toHaveBeenCalledWith('typed before resize');
+    });
+
+    // The production scenario: the breakpoint switch destroys this host while
+    // the editor is open, so the save must land via the direct dispatch (#8432).
+    it('persists directly when a navigation closes the dialog after host destroy', () => {
+      component.openFullScreen();
+      component.ngOnDestroy();
+
+      navigate();
+      afterClosed$.next('typed before resize');
+
+      expect(store.dispatch).toHaveBeenCalledWith(
+        TaskSharedActions.updateTask({
+          task: { id: 'task-1', changes: { notes: 'typed before resize' } },
+        }),
+      );
     });
   });
 });

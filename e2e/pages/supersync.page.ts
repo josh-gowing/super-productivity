@@ -954,27 +954,10 @@ export class SuperSyncPage extends BasePage {
           .isVisible()
           .catch(() => false);
         if (decryptErrorVisible) {
-          if (config.decryptionFailedPassword) {
-            console.log(
-              '[SuperSyncPage] Decryption Failed dialog — entering password to retry',
-            );
-            const passwordInput = decryptErrorDialog.locator('input[type="password"]');
-            await passwordInput.fill(config.decryptionFailedPassword);
-            const retryBtn = decryptErrorDialog.locator(
-              'button[mat-flat-button][color="primary"]',
-            );
-            await retryBtn.click();
-            await decryptErrorDialog.waitFor({ state: 'hidden', timeout: 30000 });
-          } else {
-            console.log(
-              '[SuperSyncPage] Decryption Failed dialog — no password provided, cancelling',
-            );
-            const cancelBtn = decryptErrorDialog.locator(
-              'mat-dialog-actions button[mat-button]',
-            );
-            await cancelBtn.click();
-            await decryptErrorDialog.waitFor({ state: 'hidden', timeout: 5000 });
-          }
+          await this._handleDecryptErrorDialog(
+            decryptErrorDialog,
+            config.decryptionFailedPassword,
+          );
           continue;
         }
 
@@ -988,37 +971,52 @@ export class SuperSyncPage extends BasePage {
         await this.page.waitForTimeout(1000);
       }
 
-      // After a successful sync on SuperSync, _promptSuperSyncEncryptionIfNeeded()
-      // fires asynchronously (lazy import) and may open the enable_encryption dialog.
-      // Handle it BEFORE asserting all dialogs are closed — the dialog has
-      // disableClose:true and won't close on its own.
-      const lateEnableEncDialog = await enableEncryptionDialog
-        .first()
-        .waitFor({ state: 'visible', timeout: 5000 })
-        .then(() => true)
-        .catch(() => false);
-      if (lateEnableEncDialog) {
-        console.log(
-          '[SuperSyncPage] Late enable-encryption dialog appeared — setting password',
-        );
-        const topEncDlg = enableEncryptionDialog.last();
-        const confirmBtn = topEncDlg.locator('button[mat-flat-button]');
-        // Re-fill until the value-accessor binds and the button enables — a
-        // fill() on a freshly-opened dialog can land before [(ngModel)] is wired,
-        // leaving the field empty and the confirm button permanently disabled.
-        await expect(async () => {
-          await topEncDlg.locator('input[type="password"]').first().fill(defaultPassword);
-          await topEncDlg.locator('input[type="password"]').nth(1).fill(defaultPassword);
-          await expect(confirmBtn).toBeEnabled({ timeout: 1000 });
-        }).toPass({ timeout: 10000 });
-        await confirmBtn.click();
-        await topEncDlg.waitFor({ state: 'hidden', timeout: 15000 });
-      }
-
-      // Wait for all dialogs to close
-      await expect(this.page.locator('mat-dialog-container')).toHaveCount(0, {
-        timeout: 15000,
-      });
+      // After a successful sync on SuperSync, dialogs can still fire async past
+      // the loop above and neither closes on its own:
+      //   - _promptSuperSyncEncryptionIfNeeded() (lazy import) opens the
+      //     mandatory enable-encryption dialog (disableClose:true), and
+      //   - a re-sync that re-hits still-encrypted server ops re-opens the
+      //     "Decryption Failed" dialog.
+      // Both must be dismissed before the overlay can empty, and on a loaded CI
+      // runner they can land after a one-shot appearance wait would elapse —
+      // which made a one-shot `toHaveCount(0)` flake: it sat watching the stuck
+      // dialog for the full timeout and never reached 0. Poll instead — dismiss
+      // whichever late dialog is present each round, then re-check the overlay is
+      // empty. This converges whether a dialog appears early, late, or never.
+      const lateDecryptErrorDialog = this.page.locator('dialog-handle-decrypt-error');
+      await expect(async () => {
+        if (
+          await enableEncryptionDialog
+            .first()
+            .isVisible()
+            .catch(() => false)
+        ) {
+          console.log(
+            '[SuperSyncPage] Late enable-encryption dialog appeared — setting password',
+          );
+          await this._fillAndConfirmEncryptionDialog(
+            enableEncryptionDialog.last(),
+            defaultPassword,
+          );
+        } else if (await lateDecryptErrorDialog.isVisible().catch(() => false)) {
+          await this._handleDecryptErrorDialog(
+            lateDecryptErrorDialog,
+            config.decryptionFailedPassword,
+          );
+        } else {
+          // No dialog up yet — give a late async one a chance to appear before
+          // treating the overlay as settled, so the poll can't slip through a
+          // transient empty gap before the disableClose dialog fires. If one
+          // appears, the toHaveCount below fails and the next round dismisses it.
+          await Promise.race([
+            enableEncryptionDialog.first().waitFor({ state: 'visible', timeout: 5000 }),
+            lateDecryptErrorDialog.waitFor({ state: 'visible', timeout: 5000 }),
+          ]).catch(() => {});
+        }
+        await expect(this.page.locator('mat-dialog-container')).toHaveCount(0, {
+          timeout: 1000,
+        });
+      }).toPass({ timeout: 45000 });
 
       // Wait for sync to complete (either already done or triggered after dialog)
       const checkAlreadyVisible = await this.syncCheckIcon.isVisible().catch(() => false);
@@ -1368,6 +1366,41 @@ export class SuperSyncPage extends BasePage {
       .catch(() => {});
 
     await this.ensureOverlaysClosed();
+  }
+
+  /**
+   * Dismiss the "Decryption Failed" dialog (dialog-handle-decrypt-error). It
+   * appears when the server still holds ops encrypted with a previous password
+   * (e.g. after an encryption change via import). With the old password it is
+   * retried ("Retry Decrypt"); without one it is cancelled. It can also fire
+   * late/async after a re-sync, so it is handled both in the setup dialog loop
+   * and in the final dialog drain.
+   */
+  private async _handleDecryptErrorDialog(
+    decryptErrorDialog: Locator,
+    decryptionFailedPassword?: string,
+  ): Promise<void> {
+    if (decryptionFailedPassword) {
+      console.log(
+        '[SuperSyncPage] Decryption Failed dialog — entering password to retry',
+      );
+      const passwordInput = decryptErrorDialog.locator('input[type="password"]');
+      await passwordInput.fill(decryptionFailedPassword);
+      const retryBtn = decryptErrorDialog.locator(
+        'button[mat-flat-button][color="primary"]',
+      );
+      await retryBtn.click();
+      await decryptErrorDialog.waitFor({ state: 'hidden', timeout: 30000 });
+    } else {
+      console.log(
+        '[SuperSyncPage] Decryption Failed dialog — no password provided, cancelling',
+      );
+      const cancelBtn = decryptErrorDialog.locator(
+        'mat-dialog-actions button[mat-button]',
+      );
+      await cancelBtn.click();
+      await decryptErrorDialog.waitFor({ state: 'hidden', timeout: 5000 });
+    }
   }
 
   /**
