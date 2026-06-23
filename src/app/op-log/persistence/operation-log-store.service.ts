@@ -999,7 +999,9 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       STORE_NAMES.OPS,
       // Pure read on the hottest path (getUnsynced/getAppliedOpIds); readonly
       // so it doesn't take an exclusive write lock that serializes appends.
-      { direction: 'prev', mode: 'readonly' },
+      // `limit: 1` so the SQLite backend reads only the highest-seq row instead
+      // of shipping the whole `ops` table across the native bridge to read one key.
+      { direction: 'prev', mode: 'readonly', limit: 1 },
       (_value, key) => {
         lastSeq = key as number;
         return 'stop';
