@@ -552,10 +552,19 @@ console.log(data); // '{ count: 42 }'
 Plugins with `"permissions": ["nodeExecution"]` can run Node.js scripts in the Electron
 desktop app after the user allows the desktop permission prompt.
 
-The desktop grant is currently issued only for packaged built-in plugins whose
-manifest can be verified by the main process. Uploaded plugins that request
-`nodeExecution` are rejected until uploaded plugin installation is moved to a
-main-process-owned verification path.
+Both built-in and uploaded (community) plugins may request `nodeExecution`. The grant is
+issued by the Electron **main** process after a native consent dialog, and is bound to
+the plugin id for the current app session (it is never persisted or synced). For uploaded
+plugins the app cannot verify the manifest, so the dialog flags the plugin as unverified
+third-party code with full machine access that Super Productivity cannot sandbox, and
+defaults to **Deny** — only allow plugins whose source you trust. If the user denies,
+the plugin stays enabled but its node calls fail until it is re-enabled or the app is
+restarted (consent is re-requested once per session).
+
+> **Security note:** a granted `nodeExecution` plugin can run any program with full
+> access to your files and system. The file/IPC channel a plugin uses to talk to a
+> companion process is an open local channel — treat any data it reads as untrusted
+> input (never `eval`/`require` its contents).
 
 ```javascript
 const result = await plugin.executeNodeScript({

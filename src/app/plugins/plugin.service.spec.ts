@@ -255,7 +255,10 @@ describe('PluginService', () => {
     const result = await service.enableAndActivatePlugin(manifest.id);
 
     expect(result).toBeNull();
-    expect(pluginBridge.requestNodeExecutionGrant).toHaveBeenCalledOnceWith(manifest.id);
+    expect(pluginBridge.requestNodeExecutionGrant).toHaveBeenCalledOnceWith(manifest.id, {
+      name: manifest.name,
+      version: manifest.version,
+    });
     expect(pluginMetaPersistenceService.setPluginEnabled).not.toHaveBeenCalled();
     expect(pluginLoader.loadPluginAssets).not.toHaveBeenCalled();
     expect(service.getAllPluginStates().get(manifest.id)).toEqual(
@@ -264,6 +267,31 @@ describe('PluginService', () => {
         isEnabled: false,
       }),
     );
+  });
+
+  it('does not re-prompt for nodeExecution after a denial within the same session', async () => {
+    const runtime = service as unknown as { _isElectronRuntime: () => boolean };
+    spyOn(runtime, '_isElectronRuntime').and.returnValue(true);
+    const manifest: PluginManifest = {
+      ...mockManifest,
+      id: 'node-plugin',
+      name: 'Node Plugin',
+      permissions: ['nodeExecution'],
+    };
+    const ensureGrant = (
+      service as unknown as {
+        _ensureNodeExecutionGrant: (m: PluginManifest) => Promise<boolean>;
+      }
+    )._ensureNodeExecutionGrant.bind(service);
+
+    // First interactive attempt prompts and is denied (requestNodeExecutionGrant -> null).
+    await expectAsync(service.checkNodeExecutionPermission(manifest)).toBeResolvedTo(
+      false,
+    );
+    // A later non-interactive grant attempt this session (e.g. startup re-entry via
+    // _fireOnReady) must NOT re-open the native prompt.
+    await expectAsync(ensureGrant(manifest)).toBeResolvedTo(false);
+    expect(pluginBridge.requestNodeExecutionGrant).toHaveBeenCalledTimes(1);
   });
 
   it('stores main-issued nodeExecution grants for Electron plugins', async () => {
@@ -281,7 +309,10 @@ describe('PluginService', () => {
       true,
     );
 
-    expect(pluginBridge.requestNodeExecutionGrant).toHaveBeenCalledOnceWith(manifest.id);
+    expect(pluginBridge.requestNodeExecutionGrant).toHaveBeenCalledOnceWith(manifest.id, {
+      name: manifest.name,
+      version: manifest.version,
+    });
     expect(pluginBridge.setNodeExecutionGrantToken).toHaveBeenCalledOnceWith(
       manifest.id,
       'token-1',

@@ -109,6 +109,11 @@ export class PluginService implements OnDestroy {
   private _pluginIcons: Map<string, string> = new Map(); // Store plugin ID -> SVG icon content
   private _pluginIframeGenerations: Map<string, number> = new Map();
   private _pluginIconsSignal = signal<Map<string, string>>(new Map());
+  // Plugin ids the user denied nodeExecution for this app session. In-memory only —
+  // never persisted or synced (consent is session-scoped). Prevents re-prompting from
+  // the multiple grant call-sites of a single enable flow, and keeps a denial sticky
+  // until the user explicitly re-enables the plugin. Cleared in checkNodeExecutionPermission.
+  private readonly _nodeExecutionDeniedThisSession = new Set<string>();
 
   // Lazy loading state management
   private _pluginStates = signal<Map<string, PluginState>>(new Map());
@@ -1796,14 +1801,25 @@ export class PluginService implements OnDestroy {
     if (this._pluginBridge.hasNodeExecutionGrantToken(manifest.id)) {
       return true;
     }
+    // A single enable flow reaches this from several call-sites; once the user has
+    // denied this session, don't re-open the native prompt until they re-enable.
+    if (this._nodeExecutionDeniedThisSession.has(manifest.id)) {
+      return false;
+    }
     let grant: { token: string } | null;
     try {
-      grant = await this._pluginBridge.requestNodeExecutionGrant(manifest.id);
+      // name/version are sent for the consent dialog only; main treats them as
+      // self-declared/unverified for uploaded plugins (it never trusts them for auth).
+      grant = await this._pluginBridge.requestNodeExecutionGrant(manifest.id, {
+        name: manifest.name,
+        version: manifest.version,
+      });
     } catch (error) {
       PluginLog.err(`Failed to get nodeExecution grant for ${manifest.id}:`, error);
       return false;
     }
     if (!grant) {
+      this._nodeExecutionDeniedThisSession.add(manifest.id);
       return false;
     }
 
@@ -1813,10 +1829,13 @@ export class PluginService implements OnDestroy {
 
   private async _revokeNodeExecutionGrant(pluginId: string): Promise<void> {
     const grantToken = this._pluginBridge.revokeNodeExecutionGrantToken(pluginId);
-    if (!grantToken || !this._isElectronRuntime()) {
+    if (!this._isElectronRuntime()) {
       return;
     }
-    await this._pluginBridge.revokeNodeExecutionGrant(pluginId, grantToken);
+    // Always tell main to drop the grant for this id, even if the renderer no longer
+    // holds the token (main revokes by pluginId + webContents), so a re-upload under
+    // the same id can never inherit a live session grant.
+    await this._pluginBridge.revokeNodeExecutionGrant(pluginId, grantToken ?? '');
   }
 
   /**
@@ -1836,6 +1855,9 @@ export class PluginService implements OnDestroy {
       return false;
     }
 
+    // This is the interactive (user-initiated) entry point, so an explicit enable
+    // attempt clears any earlier this-session denial and re-opens the prompt.
+    this._nodeExecutionDeniedThisSession.delete(manifest.id);
     return this._ensureNodeExecutionGrant(manifest);
   }
 
@@ -1886,16 +1908,14 @@ export class PluginService implements OnDestroy {
   }
 
   private _assertUploadedPluginAllowed(manifest: PluginManifest): void {
+    // Uploaded plugins may not reuse a bundled plugin's id (it would let unverified
+    // code impersonate a built-in). nodeExecution is no longer blocked here: uploaded
+    // node plugins are gated by the main-process consent dialog at grant time instead.
     if (this._isBundledPluginId(manifest.id)) {
       throw new Error(
         this._translateService.instant(T.PLUGINS.PLUGIN_ID_RESERVED, {
           pluginId: manifest.id,
         }),
-      );
-    }
-    if (manifest.permissions?.includes('nodeExecution')) {
-      throw new Error(
-        this._translateService.instant(T.PLUGINS.NODE_EXECUTION_BUILT_IN_ONLY),
       );
     }
   }

@@ -21,7 +21,10 @@ import {
 import { ElectronDistChannel } from './shared-with-frontend/get-dist-channel';
 
 export interface PluginNodeExecutionElectronApi {
-  requestGrant(pluginId: string): Promise<{ token: string } | null>;
+  requestGrant(
+    pluginId: string,
+    displayInfo?: { name?: string; version?: string },
+  ): Promise<{ token: string } | null>;
   executeScript(
     pluginId: string,
     grantToken: string,

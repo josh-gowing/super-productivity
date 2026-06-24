@@ -16,9 +16,50 @@ const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const MAX_TIMEOUT = 300000; // 5 minutes
 const BUILT_IN_PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+// Uploaded (community) plugin ids are NOT held to the strict built-in kebab rule —
+// they may legitimately use dots/uppercase — but an uploaded id is attacker-controlled
+// and used both as a grant Map key and as consent-dialog text, so it must reject
+// anything unsafe for those uses (control/zero-width/bidi chars that could spoof the
+// dialog, whitespace that could inject extra dialog lines, the ':' persistence
+// delimiter) and stay within a sane length.
+const MAX_UPLOADED_PLUGIN_ID_LENGTH = 100;
+const UNSAFE_ID_CHARS_RE =
+  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069:\s]/;
+// Self-declared name/version are display-only; strip control/bidi chars and collapse
+// whitespace (global flag is for replace, not test, so no lastIndex statefulness).
+const UNSAFE_DISPLAY_CHARS_RE =
+  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+const assertSafePluginId = (pluginId: unknown): string => {
+  if (typeof pluginId !== 'string' || pluginId.length === 0) {
+    throw new Error('Invalid pluginId');
+  }
+  if (pluginId.length > MAX_UPLOADED_PLUGIN_ID_LENGTH) {
+    throw new Error('Invalid pluginId');
+  }
+  if (UNSAFE_ID_CHARS_RE.test(pluginId)) {
+    throw new Error('Invalid pluginId');
+  }
+  return pluginId;
+};
+
+const sanitizeDialogString = (value: unknown, maxLength: number): string => {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const cleaned = value.replace(UNSAFE_DISPLAY_CHARS_RE, '').replace(/\s+/g, ' ').trim();
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}…` : cleaned;
+};
+
 interface NodeExecutionGrant {
   token: string;
   webContentsId: number;
+}
+
+/** Self-declared, unverified display metadata supplied by the renderer for uploaded plugins. */
+interface NodeExecutionGrantDisplayInfo {
+  name?: string;
+  version?: string;
 }
 
 interface WebContentsGrantCleanup {
@@ -48,42 +89,39 @@ class PluginNodeExecutor {
   private setupIpcHandler(): void {
     ipcMain.handle(
       IPC.PLUGIN_REQUEST_NODE_EXECUTION_GRANT,
-      async (event, pluginId: string) => {
+      async (event, pluginId: string, displayInfo?: NodeExecutionGrantDisplayInfo) => {
         const window = BrowserWindow.fromWebContents(event.sender);
         if (!window) {
           throw new Error('No window found for event sender');
         }
 
+        // Sanitize first: the id is used as a grant Map key AND shown in the consent
+        // dialog, and for uploaded plugins it is attacker-controlled.
+        const safeId = assertSafePluginId(pluginId);
+
         const webContentsId = event.sender.id;
-        const existingGrant = this.grants.get(pluginId);
+        const existingGrant = this.grants.get(safeId);
         if (existingGrant) {
           if (existingGrant.webContentsId === webContentsId) {
             return { token: existingGrant.token };
           }
-          this.grants.delete(pluginId);
+          this.grants.delete(safeId);
           this.releaseGrantCleanupIfUnused(existingGrant.webContentsId);
         }
 
-        const manifest = this.getVerifiedBuiltInNodeExecutionManifest(pluginId);
+        // Bundled vs uploaded is decided by the main-owned filesystem, never by a
+        // renderer-supplied flag: a bundled id always uses its verified on-disk
+        // manifest, so uploaded code can't borrow a built-in plugin's trusted name.
+        const dialogOptions = this.getBuiltInManifestPath(safeId)
+          ? this.describeVerifiedBuiltInDialog(safeId)
+          : this.describeUnverifiedUploadedDialog(safeId, displayInfo);
+
         const requestUrl = event.sender.getURL();
         this.registerGrantCleanup(event.sender);
 
-        let result;
+        let result: Electron.MessageBoxReturnValue;
         try {
-          result = await dialog.showMessageBox(window, {
-            type: 'warning',
-            buttons: ['Allow', 'Deny'],
-            defaultId: 1,
-            cancelId: 1,
-            title: 'Allow plugin Node.js execution?',
-            message: `Allow "${manifest.name}" to run Node.js scripts?`,
-            detail: [
-              `Plugin ID: ${pluginId}`,
-              `Version: ${manifest.version}`,
-              '',
-              'This permission is valid for the current app session. Node.js execution can access local files and desktop APIs. Only allow plugins you trust.',
-            ].join('\n'),
-          });
+          result = await dialog.showMessageBox(window, dialogOptions);
         } catch (error) {
           this.releaseGrantCleanupIfUnused(webContentsId);
           throw error;
@@ -94,19 +132,19 @@ class PluginNodeExecutor {
           !this.grantCleanupByWebContents.has(webContentsId) ||
           event.sender.getURL() !== requestUrl
         ) {
-          this.grants.delete(pluginId);
+          this.grants.delete(safeId);
           this.releaseGrantCleanupIfUnused(webContentsId);
           return null;
         }
 
         if (result.response !== 0) {
-          this.grants.delete(pluginId);
+          this.grants.delete(safeId);
           this.releaseGrantCleanupIfUnused(webContentsId);
           return null;
         }
 
         const token = randomBytes(32).toString('base64url');
-        this.grants.set(pluginId, {
+        this.grants.set(safeId, {
           token,
           webContentsId,
         });
@@ -116,9 +154,15 @@ class PluginNodeExecutor {
 
     ipcMain.handle(
       IPC.PLUGIN_REVOKE_NODE_EXECUTION_GRANT,
-      (event, pluginId: string, grantToken: string) => {
+      // grantToken is accepted for signature compatibility but intentionally not
+      // required: revoking only removes a capability, and the issuing window must be
+      // able to drop its own grant during teardown even if it no longer holds the
+      // token (e.g. on re-upload) — otherwise a re-uploaded plugin reusing the id
+      // could inherit a live session grant. The webContents binding still prevents
+      // another window from revoking this one's grant.
+      (event, pluginId: string, _grantToken?: string) => {
         const grant = this.grants.get(pluginId);
-        if (grant?.token === grantToken && grant.webContentsId === event.sender.id) {
+        if (grant && grant.webContentsId === event.sender.id) {
           this.grants.delete(pluginId);
         }
       },
@@ -211,6 +255,56 @@ class PluginNodeExecutor {
       }
     }
     this.unregisterGrantCleanup(webContentsId);
+  }
+
+  /** Consent dialog for a verified built-in plugin (name/version read from disk). */
+  private describeVerifiedBuiltInDialog(pluginId: string): Electron.MessageBoxOptions {
+    const manifest = this.getVerifiedBuiltInNodeExecutionManifest(pluginId);
+    return {
+      type: 'warning',
+      buttons: ['Allow', 'Deny'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Allow plugin Node.js execution?',
+      message: `Allow "${manifest.name}" to run Node.js scripts?`,
+      detail: [
+        `Plugin ID: ${pluginId}`,
+        `Version: ${manifest.version}`,
+        '',
+        'This permission is valid for the current app session. Node.js execution can access local files and desktop APIs. Only allow plugins you trust.',
+      ].join('\n'),
+    };
+  }
+
+  /**
+   * Consent dialog for an uploaded (community) plugin. The app cannot verify an
+   * uploaded plugin's identity, so the dialog anchors on the validated id and marks
+   * the renderer-supplied name/version as self-declared/unverified. Default = Deny.
+   */
+  private describeUnverifiedUploadedDialog(
+    pluginId: string,
+    displayInfo?: NodeExecutionGrantDisplayInfo,
+  ): Electron.MessageBoxOptions {
+    const name = sanitizeDialogString(displayInfo?.name, 80) || '(unnamed)';
+    const version = sanitizeDialogString(displayInfo?.version, 32) || '(unknown)';
+    return {
+      type: 'warning',
+      buttons: ['Allow', 'Deny'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Allow this plugin to run code on your machine?',
+      message: `Plugin "${pluginId}" wants to run Node.js code`,
+      detail: [
+        `Plugin ID: ${pluginId}`,
+        `Name (self-declared, unverified): ${name}`,
+        `Version (self-declared): ${version}`,
+        '',
+        'This is a third-party plugin. Super Productivity cannot verify its identity and cannot sandbox it.',
+        'If you allow it, the plugin can run any program with full access to your files and system for this app session.',
+        '',
+        'Only allow this if you trust the source of this plugin.',
+      ].join('\n'),
+    };
   }
 
   private getVerifiedBuiltInNodeExecutionManifest(pluginId: string): PluginManifest {
