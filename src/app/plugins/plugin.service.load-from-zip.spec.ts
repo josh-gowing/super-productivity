@@ -220,7 +220,7 @@ describe('PluginService loadPluginFromZip iframe-only plugins', () => {
     expect(pluginCache.storePlugin).not.toHaveBeenCalled();
   });
 
-  it('rejects uploaded plugins that declare nodeExecution before storing or loading code', async () => {
+  it('accepts uploaded plugins that declare nodeExecution (gated later by main-process consent)', async () => {
     const nodeExecutionManifest: PluginManifest = {
       ...iframeManifest,
       id: 'uploaded-node-plugin',
@@ -229,13 +229,17 @@ describe('PluginService loadPluginFromZip iframe-only plugins', () => {
     };
     const files: Record<string, string> = {};
     files['manifest.json'] = JSON.stringify(nodeExecutionManifest);
-    files['plugin.js'] = 'PluginAPI.log.log("should not run")';
+    files['plugin.js'] = 'PluginAPI.log.log("node plugin")';
     const file = createZipFile(files);
 
-    await expectAsync(service.loadPluginFromZip(file)).toBeRejectedWithError(
-      T.PLUGINS.NODE_EXECUTION_BUILT_IN_ONLY,
-    );
-    expect(pluginCache.storePlugin).not.toHaveBeenCalled();
-    expect(pluginRunner.loadPlugin).not.toHaveBeenCalled();
+    // Resolving (instead of throwing NODE_EXECUTION_BUILT_IN_ONLY) is the behaviour
+    // change: uploaded node plugins are no longer rejected at upload time. The
+    // nodeExecution capability is gated by the main-process consent dialog at grant
+    // time instead.
+    const instance = await service.loadPluginFromZip(file);
+
+    expect(instance).toBeTruthy();
+    expect(instance.manifest.id).toBe('uploaded-node-plugin');
+    expect(pluginCache.storePlugin).toHaveBeenCalled();
   });
 });

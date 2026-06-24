@@ -221,7 +221,7 @@ test('does not mint a token when the sender navigates while consent is pending',
   assert.equal(await grantPromise, null);
 });
 
-test('revoke requires the issuing webContents and token', async () => {
+test('revoke is scoped to the issuing webContents', async () => {
   loadModule();
   const webContents = new FakeWebContents(6);
   const otherWebContents = new FakeWebContents(7);
@@ -252,6 +252,140 @@ test('revoke requires the issuing webContents and token', async () => {
       callIpc('PLUGIN_EXEC_NODE_SCRIPT', webContents, 'sync-md', grant.token, {
         script: 'return true;',
       }),
+    /not authorized/,
+  );
+});
+
+test('issues a grant to an uploaded (non-bundled) plugin and labels it unverified', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(10);
+
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    webContents,
+    'uploaded-node-plugin',
+    { name: 'Uploaded Node Plugin', version: '1.2.3' },
+  );
+
+  assert.equal(typeof grant.token, 'string');
+  assert.equal(dialogCalls.length, 1);
+  const opts = dialogCalls[0][1];
+  // Dialog anchors on the validated id and flags the self-declared name as unverified,
+  // and defaults to Deny.
+  assert.match(opts.detail, /Plugin ID: uploaded-node-plugin/);
+  assert.match(opts.detail, /self-declared, unverified/);
+  assert.equal(opts.defaultId, 1);
+});
+
+test('uploaded plugin executes after grant; a denied request leaves exec unauthorized', async () => {
+  loadModule();
+  const allowWc = new FakeWebContents(11);
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    allowWc,
+    'uploaded-node-plugin',
+    { name: 'Uploaded', version: '1.0.0' },
+  );
+  const okResult = await callIpc(
+    'PLUGIN_EXEC_NODE_SCRIPT',
+    allowWc,
+    'uploaded-node-plugin',
+    grant.token,
+    { script: 'return args[0] + 1;', args: [4] },
+  );
+  assert.equal(okResult.success, true);
+  assert.equal(okResult.result, 5);
+
+  // A denied request mints no token, so exec stays unauthorized.
+  nextDialogResult = { response: 1 };
+  const denyWc = new FakeWebContents(12);
+  const denied = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    denyWc,
+    'denied-plugin',
+    { name: 'Denied', version: '1.0.0' },
+  );
+  assert.equal(denied, null);
+  await assert.rejects(
+    () =>
+      callIpc('PLUGIN_EXEC_NODE_SCRIPT', denyWc, 'denied-plugin', 'made-up-token', {
+        script: 'return true;',
+      }),
+    /not authorized/,
+  );
+});
+
+test('accepts a non-kebab uploaded id (dots/uppercase) the built-in rule would reject', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(13);
+
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    webContents,
+    'Community.Plugin-2',
+    { name: 'Community Plugin', version: '2.0.0' },
+  );
+
+  assert.equal(typeof grant.token, 'string');
+});
+
+test('rejects unsafe ids and sanitizes self-declared display strings', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(14);
+
+  // A newline in the id is rejected outright (it is a grant Map key + dialog text).
+  await assert.rejects(
+    () =>
+      callIpc('PLUGIN_REQUEST_NODE_EXECUTION_GRANT', webContents, 'evil\nid', {
+        name: 'x',
+        version: '1',
+      }),
+    /Invalid pluginId/,
+  );
+
+  // A crafted name cannot inject an extra dialog line and is length-capped.
+  const craftedName = `${'A'.repeat(500)}\nVerified by Super Productivity`;
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    webContents,
+    'crafted-name-plugin',
+    { name: craftedName, version: '1.0.0' },
+  );
+  assert.equal(typeof grant.token, 'string');
+  const detail = dialogCalls[dialogCalls.length - 1][1].detail;
+  assert.equal(detail.includes('Verified by Super Productivity'), false);
+  assert.ok(detail.includes('…'));
+});
+
+test('revoke from the issuing webContents drops the grant even without the token', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(15);
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    webContents,
+    'uploaded-node-plugin',
+    { name: 'Uploaded', version: '1.0.0' },
+  );
+
+  // Teardown/re-upload revokes by id without resupplying the token, so a re-uploaded
+  // plugin reusing the id cannot inherit this live grant.
+  await callIpc(
+    'PLUGIN_REVOKE_NODE_EXECUTION_GRANT',
+    webContents,
+    'uploaded-node-plugin',
+    '',
+  );
+  await assert.rejects(
+    () =>
+      callIpc(
+        'PLUGIN_EXEC_NODE_SCRIPT',
+        webContents,
+        'uploaded-node-plugin',
+        grant.token,
+        {
+          script: 'return true;',
+        },
+      ),
     /not authorized/,
   );
 });

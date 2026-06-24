@@ -245,8 +245,11 @@ const ea: ElectronAPI = {
     }
     pluginNodeExecutionApiConsumed = true;
     return {
-      requestGrant: (pluginId: string) =>
-        _invoke('PLUGIN_REQUEST_NODE_EXECUTION_GRANT', pluginId) as Promise<{
+      requestGrant: (
+        pluginId: string,
+        displayInfo?: { name?: string; version?: string },
+      ) =>
+        _invoke('PLUGIN_REQUEST_NODE_EXECUTION_GRANT', pluginId, displayInfo) as Promise<{
           token: string;
         } | null>,
       executeScript: (
