@@ -147,7 +147,7 @@ export class ScheduleEventComponent implements AfterViewInit, OnDestroy {
 
   readonly scheduledClockStr = computed(() => {
     const evt = this.se();
-    const is12Hour = !this._dateTimeFormatService.is24HourFormat;
+    const is12Hour = !this._dateTimeFormatService.is24HourFormat();
     return getClockStringFromHours(
       is12Hour && evt.startHours > 12 ? evt.startHours - 12 : evt.startHours,
     );
@@ -159,7 +159,7 @@ export class ScheduleEventComponent implements AfterViewInit, OnDestroy {
 
   readonly hoverTitle = computed(() => {
     const evt = this.se();
-    const is12Hour = !this._dateTimeFormatService.is24HourFormat;
+    const is12Hour = !this._dateTimeFormatService.is24HourFormat();
     const startClockStr = getClockStringFromHours(
       is12Hour && evt.startHours > 12 ? evt.startHours - 12 : evt.startHours,
     );
