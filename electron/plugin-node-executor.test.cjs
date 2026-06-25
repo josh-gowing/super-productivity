@@ -109,6 +109,10 @@ const installMocks = () => {
       return consentStore;
     }
 
+    if (request === 'electron-log/main') {
+      return { log: () => {}, error: () => {} };
+    }
+
     if (request === 'electron') {
       return {
         app: {

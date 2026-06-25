@@ -239,9 +239,11 @@ export class PluginManagementComponent {
       // Unload the plugin (this will unregister hooks and remove from loaded plugins)
       this._pluginService.unloadPlugin(plugin.manifest.id);
 
-      // Disabling a node plugin revokes its persisted nodeExecution consent, so
-      // re-enabling re-prompts (issue #8512 Phase 2 — "consent is revocable" via the
-      // existing toggle, no separate UI).
+      // Disabling a node plugin revokes its nodeExecution access — it drops the live
+      // session grant and, for uploaded plugins, the persisted consent — so re-enabling
+      // re-prompts (issue #8512 Phase 2: "consent is revocable" via the existing toggle,
+      // no separate UI). Built-in plugins have no persisted consent, so this only clears
+      // their session grant.
       if (this.requiresNodeExecution(plugin)) {
         await this._pluginService.clearNodeExecutionConsent(plugin.manifest.id);
       }

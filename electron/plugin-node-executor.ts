@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import type { WebContents } from 'electron';
+import { error as logError } from 'electron-log/main';
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
@@ -213,10 +214,9 @@ class PluginNodeExecutor {
               grantedAt: Date.now(),
             });
           } catch (error) {
-            console.error(
-              `Failed to persist nodeExecution consent for ${safeId}:`,
-              error,
-            );
+            // Host diagnostic → exportable log (electron-log), distinct from the
+            // sandboxed plugin's own console output. Only the validated id is logged.
+            logError(`Failed to persist nodeExecution consent for ${safeId}:`, error);
           }
         }
         return this.mintGrant(safeId, webContentsId);
