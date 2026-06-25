@@ -62,18 +62,29 @@ const BUNDLED_PLUGIN_PATHS = [
   'assets/bundled-plugins/doc-mode',
 ] as const;
 
+// Reserved ids: an uploaded plugin may not reuse a bundled plugin's manifest id (it would
+// let unverified code impersonate a built-in — and, with nodeExecution now openable to
+// uploaded plugins, claim a bundled dir's "verified built-in" consent dialog in the main
+// process, which decides bundled-vs-uploaded by on-disk dir). This set MUST contain the
+// manifest id of every entry in BUNDLED_PLUGIN_PATHS; the invariant is guarded by
+// electron/bundled-plugin-ids.test.cjs (a filesystem-reading node test, since a browser
+// Karma spec cannot read the manifests) so the two lists cannot silently drift again.
 const BUNDLED_PLUGIN_IDS = new Set<string>([
   'ai-productivity-prompts',
   'api-test-plugin',
   'automations',
+  'azure-devops-issue-provider',
   'brain-dump',
   'caldav-calendar-provider',
   'clickup-issue-provider',
   'doc-mode',
+  'gitea-issue-provider',
   'github-issue-provider',
   'google-calendar-provider',
+  'linear-issue-provider',
   'procrastination-buster',
   'sync-md',
+  'trello-issue-provider',
   'voice-reminder',
   'yesterday-tasks',
 ]);
@@ -1567,6 +1578,10 @@ export class PluginService implements OnDestroy {
     // Remove icon content
     this._pluginIcons.delete(pluginId);
     this._pluginIconsSignal.set(new Map(this._pluginIcons));
+
+    // Drop any session nodeExecution denial so a fresh re-upload of this id is prompted
+    // again rather than silently failing closed against the removed plugin's decision.
+    this._nodeExecutionDeniedThisSession.delete(pluginId);
 
     // Remove from plugin states
     this._deletePluginState(pluginId);

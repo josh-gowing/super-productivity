@@ -117,19 +117,7 @@ import {
 } from '../features/simple-counter/store/simple-counter.actions';
 import { getDbDateStr } from '../util/get-db-date-str';
 import { DataInitService } from '../core/data-init/data-init.service';
-
-interface PluginNodeExecutionElectronApi {
-  requestGrant(
-    pluginId: string,
-    displayInfo?: { name?: string; version?: string },
-  ): Promise<{ token: string } | null>;
-  executeScript(
-    pluginId: string,
-    grantToken: string,
-    request: PluginNodeScriptRequest,
-  ): Promise<PluginNodeScriptResult>;
-  revokeGrant(pluginId: string, grantToken: string): Promise<void>;
-}
+import { PluginNodeExecutionElectronApi } from '../../../electron/shared-with-frontend/plugin-node-execution.model';
 
 type PluginDateFormat = 'short' | 'medium' | 'long' | 'time' | 'datetime';
 

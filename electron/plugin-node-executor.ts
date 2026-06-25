@@ -16,19 +16,23 @@ const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const MAX_TIMEOUT = 300000; // 5 minutes
 const BUILT_IN_PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
-// Uploaded (community) plugin ids are NOT held to the strict built-in kebab rule —
-// they may legitimately use dots/uppercase — but an uploaded id is attacker-controlled
-// and used both as a grant Map key and as consent-dialog text, so it must reject
-// anything unsafe for those uses (control/zero-width/bidi chars that could spoof the
-// dialog, whitespace that could inject extra dialog lines, the ':' persistence
-// delimiter) and stay within a sane length.
+// An uploaded (community) plugin id is attacker-controlled and used both as a grant Map
+// key and as the consent dialog's trust anchor ("Plugin ID: ..."), and as a path segment
+// in getBuiltInManifestPath(). It is NOT held to the strict built-in kebab rule —
+// community ids may use dots/uppercase, e.g. `super-productivity-mcp` — but it must be a
+// single safe ASCII token. We use an allowlist rather than a denylist on purpose: the
+// allowlist rejects control/zero-width/bidi/homoglyph characters that could spoof the
+// dialog, whitespace that could inject extra dialog lines, the ':' persistence delimiter,
+// and path separators / leading-dot segments ('.', '..', '/', '\\') — all by construction,
+// with no Unicode range to keep updated as new code points are assigned.
 const MAX_UPLOADED_PLUGIN_ID_LENGTH = 100;
-const UNSAFE_ID_CHARS_RE =
-  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069:\s]/;
-// Self-declared name/version are display-only; strip control/bidi chars and collapse
-// whitespace (global flag is for replace, not test, so no lastIndex statefulness).
-const UNSAFE_DISPLAY_CHARS_RE =
-  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+const SAFE_UPLOADED_PLUGIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Self-declared name/version are display-only. Strip every Unicode control (Cc) and
+// format (Cf) character — this covers C0/C1 controls, all zero-width characters, the BOM,
+// and every bidi control (incl. U+061C ALM, the word-joiner range, and the isolate marks)
+// without enumerating ranges — then collapse whitespace so a crafted value cannot inject
+// extra dialog lines. (Global flag is for replace, not test, so no lastIndex statefulness.)
+const UNSAFE_DISPLAY_CHARS_RE = /[\p{Cc}\p{Cf}]/gu;
 
 const assertSafePluginId = (pluginId: unknown): string => {
   if (typeof pluginId !== 'string' || pluginId.length === 0) {
@@ -37,18 +41,11 @@ const assertSafePluginId = (pluginId: unknown): string => {
   if (pluginId.length > MAX_UPLOADED_PLUGIN_ID_LENGTH) {
     throw new Error('Invalid pluginId');
   }
-  if (UNSAFE_ID_CHARS_RE.test(pluginId)) {
-    throw new Error('Invalid pluginId');
-  }
-  // The id is used as a path segment in getBuiltInManifestPath() (existsSync probe),
-  // so reject path separators and dot-segments — otherwise an id like '..' could probe
-  // outside the bundled-plugins dir and render misleadingly in the dialog.
-  if (
-    pluginId.includes('/') ||
-    pluginId.includes('\\') ||
-    pluginId === '.' ||
-    pluginId === '..'
-  ) {
+  // Allowlist match also rejects path separators ('/'/'\\'), leading-dot segments
+  // ('.', '..'), ':', whitespace and all non-ASCII (bidi/zero-width/homoglyph), so the id
+  // can neither escape the bundled-plugins dir in getBuiltInManifestPath() nor spoof the
+  // consent dialog's trust anchor.
+  if (!SAFE_UPLOADED_PLUGIN_ID_RE.test(pluginId)) {
     throw new Error('Invalid pluginId');
   }
   return pluginId;
@@ -133,11 +130,14 @@ class PluginNodeExecutor {
         }
 
         // Bundled vs uploaded is decided by the main-owned filesystem, never by a
-        // renderer-supplied flag: a bundled id always uses its verified on-disk
-        // manifest, so uploaded code can't borrow a built-in plugin's trusted name.
-        const dialogOptions = this.getBuiltInManifestPath(safeId)
-          ? this.describeVerifiedBuiltInDialog(safeId)
-          : this.describeUnverifiedUploadedDialog(safeId, displayInfo);
+        // renderer-supplied flag, and only an id that resolves to a cleanly-verified
+        // on-disk manifest gets the trusted built-in dialog. A partial or colliding match
+        // (id mismatch, missing nodeExecution permission, unreadable manifest) returns
+        // null and falls back to the unverified dialog, so uploaded code can never borrow
+        // a built-in plugin's trusted name even if its id collides with a bundled dir.
+        const dialogOptions =
+          this.describeVerifiedBuiltInDialog(safeId) ??
+          this.describeUnverifiedUploadedDialog(safeId, displayInfo);
 
         const requestUrl = event.sender.getURL();
         this.registerGrantCleanup(event.sender);
@@ -184,9 +184,18 @@ class PluginNodeExecutor {
       // could inherit a live session grant. The webContents binding still prevents
       // another window from revoking this one's grant.
       (event, pluginId: string, _grantToken?: string) => {
-        const grant = this.grants.get(pluginId);
+        // Key the lookup through the same validator the request handler uses, so the
+        // "always revoke by id on teardown/re-upload" guarantee holds even if the id
+        // canonicalisation ever changes (an unsafe id can never hold a grant anyway).
+        let safeId: string;
+        try {
+          safeId = assertSafePluginId(pluginId);
+        } catch {
+          return;
+        }
+        const grant = this.grants.get(safeId);
         if (grant && grant.webContentsId === event.sender.id) {
-          this.grants.delete(pluginId);
+          this.grants.delete(safeId);
         }
       },
     );
@@ -204,7 +213,15 @@ class PluginNodeExecutor {
           throw new Error('No window found for event sender');
         }
 
-        const grant = this.grants.get(pluginId);
+        // Validate the id the same way the grant handler does so the Map keys match.
+        // An unsafe id can never hold a grant, so treat it as unauthorized.
+        let safeId: string;
+        try {
+          safeId = assertSafePluginId(pluginId);
+        } catch {
+          throw new Error('Plugin is not authorized for nodeExecution');
+        }
+        const grant = this.grants.get(safeId);
         if (
           !grant ||
           grant.token !== grantToken ||
@@ -213,7 +230,7 @@ class PluginNodeExecutor {
           throw new Error('Plugin is not authorized for nodeExecution');
         }
 
-        return await this.executeScript(pluginId, request);
+        return await this.executeScript(safeId, request);
       },
     );
   }
@@ -280,9 +297,23 @@ class PluginNodeExecutor {
     this.unregisterGrantCleanup(webContentsId);
   }
 
-  /** Consent dialog for a verified built-in plugin (name/version read from disk). */
-  private describeVerifiedBuiltInDialog(pluginId: string): Electron.MessageBoxOptions {
-    const manifest = this.getVerifiedBuiltInNodeExecutionManifest(pluginId);
+  /**
+   * Consent dialog for a verified built-in plugin (name/version read from disk).
+   * Returns null when the id does not resolve to a cleanly-verified built-in
+   * nodeExecution manifest (no on-disk match, id mismatch, missing permission, or
+   * unreadable/invalid manifest), so the caller falls back to the unverified-uploaded
+   * dialog — a partial or colliding match must never *upgrade* trust to the built-in
+   * dialog.
+   */
+  private describeVerifiedBuiltInDialog(
+    pluginId: string,
+  ): Electron.MessageBoxOptions | null {
+    let manifest: PluginManifest;
+    try {
+      manifest = this.getVerifiedBuiltInNodeExecutionManifest(pluginId);
+    } catch {
+      return null;
+    }
     return {
       ...NODE_CONSENT_DIALOG_BASE,
       title: 'Allow plugin Node.js execution?',

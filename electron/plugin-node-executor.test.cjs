@@ -402,3 +402,79 @@ test('revoke from the issuing webContents drops the grant even without the token
     /not authorized/,
   );
 });
+
+test('rejects bidi/zero-width/homoglyph and leading-dot ids the allowlist must exclude', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(16);
+
+  // These are exactly the dialog-anchor spoofing vectors a denylist of explicit Unicode
+  // ranges tends to miss; the allowlist rejects every non-[A-Za-z0-9._-] id by construction.
+  const badIds = [
+    `sync${String.fromCodePoint(0x061c)}md`, // U+061C ARABIC LETTER MARK (bidi)
+    `sync${String.fromCodePoint(0x2060)}md`, // U+2060 WORD JOINER (zero-width)
+    `sync${String.fromCodePoint(0x3164)}md`, // U+3164 HANGUL FILLER (invisible)
+    `${String.fromCodePoint(0xff53)}ync-md`, // U+FF53 fullwidth 's' (homoglyph)
+    '.hidden', // leading dot-segment
+    '-leading-dash',
+    'a b', // whitespace
+  ];
+
+  for (const badId of badIds) {
+    await assert.rejects(
+      () =>
+        callIpc('PLUGIN_REQUEST_NODE_EXECUTION_GRANT', webContents, badId, {
+          name: 'x',
+          version: '1',
+        }),
+      /Invalid pluginId/,
+      `expected ${JSON.stringify(badId)} to be rejected`,
+    );
+  }
+});
+
+test('strips bidi/zero-width chars from self-declared display strings', async () => {
+  loadModule();
+  const webContents = new FakeWebContents(17);
+
+  const name = `Tru${String.fromCodePoint(0x061c)}sted${String.fromCodePoint(0x2060)} Plugin`;
+  const grant = await callIpc(
+    'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+    webContents,
+    'display-sanitize-plugin',
+    { name, version: `1.0${String.fromCodePoint(0xfeff)}.0` },
+  );
+
+  assert.equal(typeof grant.token, 'string');
+  const detail = dialogCalls[dialogCalls.length - 1][1].detail;
+  // The control/format chars are gone; the visible text survives.
+  assert.equal(detail.includes(String.fromCodePoint(0x061c)), false);
+  assert.equal(detail.includes(String.fromCodePoint(0x2060)), false);
+  assert.equal(detail.includes(String.fromCodePoint(0xfeff)), false);
+  assert.match(detail, /Trusted Plugin/);
+});
+
+test('never upgrades trust: an on-disk match that does not cleanly verify uses the unverified dialog', async () => {
+  // Simulate a bundled dir whose manifest exists but is not a grantable nodeExecution
+  // built-in (here: missing the permission). The verified-built-in branch must return
+  // null and fall back to the unverified-uploaded dialog rather than throw or upgrade.
+  const originalPermissions = BUILT_IN_PLUGIN_MANIFEST.permissions;
+  BUILT_IN_PLUGIN_MANIFEST.permissions = [];
+  try {
+    loadModule();
+    const webContents = new FakeWebContents(18);
+    const grant = await callIpc(
+      'PLUGIN_REQUEST_NODE_EXECUTION_GRANT',
+      webContents,
+      BUILT_IN_PLUGIN_MANIFEST.id,
+      { name: 'Impersonator', version: '9.9.9' },
+    );
+
+    assert.equal(typeof grant.token, 'string');
+    const opts = dialogCalls[dialogCalls.length - 1][1];
+    assert.match(opts.title, /run code on your machine/);
+    assert.match(opts.detail, /self-declared, unverified/);
+    assert.equal(opts.defaultId, 1);
+  } finally {
+    BUILT_IN_PLUGIN_MANIFEST.permissions = originalPermissions;
+  }
+});
