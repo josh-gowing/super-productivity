@@ -110,7 +110,8 @@ test('never treats a prototype-member id as a stored consent', async () => {
   // SECURITY regression: the consents map is keyed on an attacker-controlled pluginId.
   // A plain object would resolve e.g. consents['constructor'] to Object.prototype.constructor
   // (a truthy function), which the executor would mistake for a prior grant and mint a
-  // token with NO dialog. The null-prototype map + own-property reads must return null.
+  // token with NO dialog. A `Map` returns undefined for any unstored key, so reads must
+  // return null for every prototype-member id.
   const store = loadConsentStore();
   const protoIds = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'];
 
@@ -138,6 +139,41 @@ test('never treats a prototype-member id as a stored consent', async () => {
     name: 'Real',
     version: '1',
     grantedAt: 1,
+  });
+});
+
+test('a hand-edited on-disk `__proto__` data key round-trips inertly without polluting Object.prototype', async () => {
+  // The store serializes the consents Map via Object.fromEntries and rebuilds it via
+  // Object.entries. A maliciously hand-edited file naming a prototype member as a data key
+  // must load as an ordinary, ignorable entry — never a prototype write, never a grant.
+  await fs.writeFile(
+    getStorePath(),
+    '{"pluginNodeExecutionConsent":{"version":1,"consents":' +
+      '{"__proto__":{"name":"X","version":"1","grantedAt":1},' +
+      '"real-plugin":{"name":"Real","version":"1","grantedAt":2}}}}',
+    'utf8',
+  );
+
+  const store = loadConsentStore();
+  // A real (non-prototype) plugin still loads; loading did not pollute Object.prototype.
+  assert.deepEqual(await store.getNodeExecutionConsent('real-plugin'), {
+    name: 'Real',
+    version: '1',
+    grantedAt: 2,
+  });
+  assert.equal({}.name, undefined, 'Object.prototype must not be polluted on load');
+
+  // A subsequent write re-serializes via Object.fromEntries without polluting either.
+  await store.setNodeExecutionConsent('another', {
+    name: 'A',
+    version: '1',
+    grantedAt: 3,
+  });
+  assert.equal({}.name, undefined, 'Object.prototype must not be polluted on save');
+  assert.deepEqual(await store.getNodeExecutionConsent('another'), {
+    name: 'A',
+    version: '1',
+    grantedAt: 3,
   });
 });
 

@@ -37,23 +37,17 @@ export interface PersistedNodeExecutionConsent {
 
 interface NodeExecutionConsentBlob {
   version: number;
-  consents: { [pluginId: string]: PersistedNodeExecutionConsent };
+  // SECURITY: keyed on an attacker-controlled pluginId. A `Map` (not a plain object) is
+  // used so an id that names an `Object.prototype` member (`constructor`, `toString`,
+  // `valueOf`, `hasOwnProperty`, …) is just an ordinary key that returns `undefined` when
+  // absent — it can never resolve to an inherited function the executor would mistake for
+  // a stored grant. Mirrors the sibling `grants` Map in plugin-node-executor.ts.
+  consents: Map<string, PersistedNodeExecutionConsent>;
 }
-
-const hasOwn = (obj: object, key: string): boolean =>
-  Object.prototype.hasOwnProperty.call(obj, key);
-
-// SECURITY: the consents map is keyed on an attacker-controlled pluginId. Use a
-// null-prototype object so an id that names an `Object.prototype` member
-// (`constructor`, `toString`, `valueOf`, `hasOwnProperty`, …) cannot resolve to an
-// inherited function and be mistaken for a stored grant. All reads additionally go
-// through an own-property guard (`hasOwn`) as belt-and-suspenders.
-const emptyConsents = (): { [pluginId: string]: PersistedNodeExecutionConsent } =>
-  Object.create(null);
 
 const emptyBlob = (): NodeExecutionConsentBlob => ({
   version: NODE_EXECUTION_CONSENT_STORE_VERSION,
-  consents: emptyConsents(),
+  consents: new Map(),
 });
 
 const loadBlob = async (): Promise<NodeExecutionConsentBlob> => {
@@ -62,9 +56,9 @@ const loadBlob = async (): Promise<NodeExecutionConsentBlob> => {
   if (!raw || typeof raw !== 'object') {
     return emptyBlob();
   }
-  const blob = raw as Partial<NodeExecutionConsentBlob>;
+  const blob = raw as { version?: unknown; consents?: unknown };
   // Forward-safe: a future on-disk format we don't understand is ignored (the user is
-  // re-prompted) rather than mis-read into a spurious grant. Never downgrade-corrupt it.
+  // re-prompted) rather than mis-read into a spurious grant.
   if (
     blob.version !== NODE_EXECUTION_CONSENT_STORE_VERSION ||
     !blob.consents ||
@@ -72,12 +66,19 @@ const loadBlob = async (): Promise<NodeExecutionConsentBlob> => {
   ) {
     return emptyBlob();
   }
-  // Copy onto a null-prototype map (JSON.parse produces a normal object), so the
-  // prototype-key footgun cannot survive a round-trip through disk either.
-  return {
-    version: NODE_EXECUTION_CONSENT_STORE_VERSION,
-    consents: Object.assign(emptyConsents(), blob.consents),
-  };
+  // Build the Map from the persisted plain object. Only well-formed object entries count —
+  // a corrupt/tampered primitive is dropped (the user re-prompts) rather than mis-read as
+  // a grant. A literal `__proto__`/`constructor` key from a hand-edited file is just an
+  // ordinary Map key here, never a prototype write.
+  const consents = new Map<string, PersistedNodeExecutionConsent>();
+  for (const [pluginId, entry] of Object.entries(
+    blob.consents as Record<string, unknown>,
+  )) {
+    if (entry && typeof entry === 'object') {
+      consents.set(pluginId, entry as PersistedNodeExecutionConsent);
+    }
+  }
+  return { version: NODE_EXECUTION_CONSENT_STORE_VERSION, consents };
 };
 
 // Serialize read-modify-write mutations so two concurrent grants/clears can't clobber
@@ -91,7 +92,16 @@ const mutate = (apply: (blob: NodeExecutionConsentBlob) => boolean): Promise<voi
   const run = async (): Promise<void> => {
     const blob = await loadBlob();
     if (apply(blob)) {
-      await saveSimpleStore(SimpleStoreKey.PLUGIN_NODE_EXECUTION_CONSENT, blob);
+      // Serialize the Map to a plain object for JSON persistence. `Object.fromEntries`
+      // uses define-semantics, so even a literal `__proto__` key becomes an own data
+      // property — it cannot pollute a prototype. Downgrade note: an older client that
+      // finds a newer on-disk `version` reads it as empty (loadBlob) and this write then
+      // replaces it with a v1 blob, discarding a future client's consents — worst case a
+      // re-prompt, never a spurious grant.
+      await saveSimpleStore(SimpleStoreKey.PLUGIN_NODE_EXECUTION_CONSENT, {
+        version: blob.version,
+        consents: Object.fromEntries(blob.consents),
+      });
     }
   };
   _mutationQueue = _mutationQueue.then(run, run);
@@ -102,14 +112,7 @@ export const getNodeExecutionConsent = async (
   pluginId: string,
 ): Promise<PersistedNodeExecutionConsent | null> => {
   const blob = await loadBlob();
-  if (!hasOwn(blob.consents, pluginId)) {
-    return null;
-  }
-  const consent = blob.consents[pluginId];
-  // Only a well-formed object counts as consent — never a truthy non-object (a corrupt
-  // or tampered entry) and, with the null-prototype map + own-property guard above,
-  // never an inherited prototype member.
-  return consent && typeof consent === 'object' ? consent : null;
+  return blob.consents.get(pluginId) ?? null;
 };
 
 export const setNodeExecutionConsent = async (
@@ -117,19 +120,15 @@ export const setNodeExecutionConsent = async (
   consent: PersistedNodeExecutionConsent,
 ): Promise<void> =>
   mutate((blob) => {
-    blob.consents[pluginId] = {
+    blob.consents.set(pluginId, {
       name: consent.name,
       version: consent.version,
       grantedAt: consent.grantedAt,
-    };
+    });
     return true;
   });
 
+// `Map.delete` returns true only when an entry existed, which is exactly the
+// "write only if changed" signal `mutate` wants — a clear of an absent id is a no-op.
 export const clearNodeExecutionConsent = async (pluginId: string): Promise<void> =>
-  mutate((blob) => {
-    if (!hasOwn(blob.consents, pluginId)) {
-      return false;
-    }
-    delete blob.consents[pluginId];
-    return true;
-  });
+  mutate((blob) => blob.consents.delete(pluginId));
