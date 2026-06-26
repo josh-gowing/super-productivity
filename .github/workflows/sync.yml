@@ -1,0 +1,13 @@
+name: Sync fork
+on:
+  schedule:
+    - cron: '0 6 * * *'      # daily at 06:00 UTC
+  workflow_dispatch:          # manual "Run workflow" button
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync with upstream
+        run: gh repo sync ${{ github.repository }} --source super-productivity/super-productivity --force
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
