@@ -16,9 +16,8 @@ import { MentionConfigService } from '../mention-config.service';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
 import { MarkdownModule } from 'ngx-markdown';
-import { DEFAULT_TASK, TaskWithSubTasks } from '../task.model';
+import { DEFAULT_TASK, TaskDetailTargetPanel, TaskWithSubTasks } from '../task.model';
 import { TaskDetailItemComponent } from './task-additional-info-item/task-detail-item.component';
-import { AddSubtaskInputService } from '../add-subtask-input/add-subtask-input.service';
 
 const MOCK_TASK: TaskWithSubTasks = {
   ...(DEFAULT_TASK as TaskWithSubTasks),
@@ -328,6 +327,96 @@ describe('TaskDetailPanelComponent stale-focus guard', () => {
 
     expect(item.elementRef.nativeElement.focus).not.toHaveBeenCalled();
   }));
+
+  // A late panel auto-focus must not blur an open "add subtask" draft: the
+  // draft's blur handler closes it, which left "Add subtask" silently broken
+  // when opened from the Planner under load (#8617/#8630).
+  it('does not steal focus from an open add-subtask draft', fakeAsync(() => {
+    (component as unknown as { itemEls: () => TaskDetailItemComponent[] }).itemEls =
+      () => [makeItem()];
+    const focusItemSpy = spyOn(component, 'focusItem');
+
+    // The user opened the inline draft (it owns focus)...
+    component.isAddSubtaskInputVisible.set(true);
+    // ...then the on-open auto-focus timer fires late.
+    (component as unknown as { _focusFirst: () => void })._focusFirst();
+
+    tick(200);
+
+    expect(focusItemSpy).not.toHaveBeenCalled();
+  }));
+});
+
+// Opening the notes panel via a checklist's progress badge routes through
+// TaskDetailTargetPanel.Notes. It must land on the RENDERED checklist (preview),
+// not auto-open the raw-markdown editor: doing both briefly flashed the raw
+// "- [ ] " source before focusItem() blurred the editor back to preview.
+describe('TaskDetailPanelComponent notes target does not auto-edit', () => {
+  let component: TaskDetailPanelComponent;
+  let fixture: ComponentFixture<TaskDetailPanelComponent>;
+
+  const makeItem = (): TaskDetailItemComponent =>
+    ({
+      elementRef: { nativeElement: { focus: jasmine.createSpy('focus') } },
+    }) as unknown as TaskDetailItemComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [TaskDetailPanelComponent],
+      providers: [
+        {
+          provide: TaskService,
+          useValue: {
+            taskDetailPanelTargetPanel$: of(TaskDetailTargetPanel.Notes),
+            selectedTaskId: () => 'B',
+            getByIdWithSubTaskData$: () => of(null),
+            update: () => undefined,
+            setSelectedId: () => undefined,
+            focusTaskIfPossible: () => undefined,
+          },
+        },
+        { provide: TaskAttachmentService, useValue: {} },
+        { provide: ClipboardImageService, useValue: {} },
+        { provide: LayoutService, useValue: {} },
+        { provide: GlobalConfigService, useValue: { cfg: () => ({}) } },
+        { provide: IssueService, useValue: { getById$: () => of(null) } },
+        {
+          provide: TaskRepeatCfgService,
+          useValue: { getTaskRepeatCfgByIdAllowUndefined$: () => of(null) },
+        },
+        { provide: DateTimeFormatService, useValue: { currentLocale: () => 'en-US' } },
+        { provide: MatDialog, useValue: {} },
+        { provide: Store, useValue: { select: () => EMPTY, dispatch: () => undefined } },
+        { provide: TranslateService, useValue: { instant: (k: string) => k } },
+        { provide: MentionConfigService, useValue: { mentionConfig$: EMPTY } },
+      ],
+    })
+      .overrideComponent(TaskDetailPanelComponent, {
+        set: { template: '', imports: [], schemas: [NO_ERRORS_SCHEMA] },
+      })
+      .compileComponents();
+
+    fixture = TestBed.createComponent(TaskDetailPanelComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('task', fakeTask('B'));
+  });
+
+  it('focuses the notes section without entering edit mode', fakeAsync(() => {
+    // Provide a notes wrapper so the real focus path (not the devError branch) runs.
+    const noteItem = makeItem();
+    (
+      component as unknown as { noteWrapperElRef: () => TaskDetailItemComponent }
+    ).noteWrapperElRef = () => noteItem;
+    const focusItemSpy = spyOn(component, 'focusItem');
+
+    fixture.detectChanges(); // ngAfterViewInit subscribes; target emits after delay(50)
+    tick(50);
+
+    // The notes section is focused...
+    expect(focusItemSpy).toHaveBeenCalledWith(noteItem);
+    // ...but the editor is NOT auto-opened (no raw-text flash).
+    expect(component.panelState.isFocusNotes()).toBe(false);
+  }));
 });
 
 /**
@@ -339,7 +428,6 @@ describe('TaskDetailPanelComponent stale-focus guard', () => {
 describe('TaskDetailPanelComponent add sub-task', () => {
   let component: TaskDetailPanelComponent;
   let addSubTaskToSpy: jasmine.Spy;
-  let addSubtaskInputServiceSpy: jasmine.SpyObj<AddSubtaskInputService>;
 
   const keydown = (key: string, target: HTMLElement): KeyboardEvent => {
     const ev = new KeyboardEvent('keydown', {
@@ -353,10 +441,6 @@ describe('TaskDetailPanelComponent add sub-task', () => {
 
   beforeEach(async () => {
     addSubTaskToSpy = jasmine.createSpy('addSubTaskTo').and.returnValue('new-sub-id');
-    addSubtaskInputServiceSpy = jasmine.createSpyObj<AddSubtaskInputService>(
-      'AddSubtaskInputService',
-      ['requestOpen'],
-    );
 
     await TestBed.configureTestingModule({
       imports: [TaskDetailPanelComponent],
@@ -371,10 +455,10 @@ describe('TaskDetailPanelComponent add sub-task', () => {
             setSelectedId: () => undefined,
             focusTaskIfPossible: () => undefined,
             addSubTaskTo: addSubTaskToSpy,
+            showSubTasks: () => undefined,
             focusTaskById: () => undefined,
           },
         },
-        { provide: AddSubtaskInputService, useValue: addSubtaskInputServiceSpy },
         { provide: TaskAttachmentService, useValue: {} },
         { provide: ClipboardImageService, useValue: {} },
         { provide: LayoutService, useValue: {} },
@@ -405,10 +489,39 @@ describe('TaskDetailPanelComponent add sub-task', () => {
     fixture.detectChanges();
   });
 
-  it('requests the inline subtask input for the shown task', () => {
+  it('shows the inline subtask input in the panel for a top-level task', () => {
     component.addSubTask();
-    expect(addSubtaskInputServiceSpy.requestOpen).toHaveBeenCalledWith('P');
+    // The input is hosted by the panel itself (not delegated to a <task> row),
+    // so it works regardless of which view opened the panel (#8617).
+    expect(component.isAddSubtaskInputVisible()).toBe(true);
+    expect(component.isSubTasksExpanded()).toBe(true);
     expect(addSubTaskToSpy).not.toHaveBeenCalled();
+  });
+
+  it('creates a sibling directly when adding a subtask from a subtask panel', () => {
+    const fixture = TestBed.createComponent(TaskDetailPanelComponent);
+    const subComponent = fixture.componentInstance;
+    fixture.componentRef.setInput('task', {
+      id: 'SUB',
+      parentId: 'P',
+      subTasks: [],
+      tagIds: [],
+    } as unknown as TaskWithSubTasks);
+    fixture.detectChanges();
+
+    subComponent.addSubTask();
+
+    expect(addSubTaskToSpy).toHaveBeenCalledWith('P');
+    expect(subComponent.isAddSubtaskInputVisible()).toBe(false);
+  });
+
+  it('hides the input again when it is closed', () => {
+    component.addSubTask();
+    expect(component.isAddSubtaskInputVisible()).toBe(true);
+    component.onAddSubtaskInputClosed('blur');
+    expect(component.isAddSubtaskInputVisible()).toBe(false);
+    // The section stays expanded so the just-added subtasks remain visible.
+    expect(component.isSubTasksExpanded()).toBe(true);
   });
 
   it('routes the add-subtask shortcut to addSubTask (with prevent/stopPropagation)', () => {

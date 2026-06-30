@@ -4,6 +4,7 @@ import {
   Component,
   computed,
   DestroyRef,
+  ElementRef,
   HostListener,
   inject,
   input,
@@ -30,6 +31,7 @@ import { T } from '../../../t.const';
 import { TaskService } from '../task.service';
 import {
   expandAnimation,
+  expandFadeAnimation,
   expandFadeInOnlyAnimation,
 } from '../../../ui/animations/expand.ani';
 import { fadeAnimation } from '../../../ui/animations/fade.ani';
@@ -87,14 +89,23 @@ import { checkKeyCombo } from '../../../util/check-key-combo';
 import { IS_MAC } from '../../../util/is-mac';
 import { ClipboardImageService } from '../../../core/clipboard-image/clipboard-image.service';
 import { DropPasteIcons } from '../../../core/drop-paste-input/drop-paste.model';
-import { AddSubtaskInputService } from '../add-subtask-input/add-subtask-input.service';
+import {
+  AddSubtaskInputComponent,
+  AddSubtaskInputCloseReason,
+} from '../add-subtask-input/add-subtask-input.component';
 
 @Component({
   selector: 'task-detail-panel',
   templateUrl: './task-detail-panel.component.html',
   styleUrls: ['./task-detail-panel.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  animations: [expandAnimation, expandFadeInOnlyAnimation, fadeAnimation, swirlAnimation],
+  animations: [
+    expandAnimation,
+    expandFadeAnimation,
+    expandFadeInOnlyAnimation,
+    fadeAnimation,
+    swirlAnimation,
+  ],
   imports: [
     TaskTitleComponent,
     TaskDetailItemComponent,
@@ -115,6 +126,7 @@ import { AddSubtaskInputService } from '../add-subtask-input/add-subtask-input.s
     MsToStringPipe,
     TranslatePipe,
     IssueIconPipe,
+    AddSubtaskInputComponent,
   ],
 })
 export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestroy {
@@ -132,7 +144,6 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
   private _translateService = inject(TranslateService);
   private _destroyRef = inject(DestroyRef);
   private _dateTimeFormatService = inject(DateTimeFormatService);
-  private _addSubtaskInputService = inject(AddSubtaskInputService);
 
   // Inputs
   task = input.required<TaskWithSubTasks>();
@@ -143,6 +154,16 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
   itemEls = viewChildren(TaskDetailItemComponent);
   attachmentPanelElRef = viewChild<TaskDetailItemComponent>('attachmentPanelElRef');
   noteWrapperElRef = viewChild<TaskDetailItemComponent>('noteWrapperElRef');
+  addSubtaskInput = viewChild(AddSubtaskInputComponent);
+  addSubTaskBtn = viewChild<ElementRef<HTMLButtonElement>>('addSubTaskBtn');
+
+  // The detail panel hosts its own inline subtask draft input rather than
+  // delegating to the <task> row that renders the parent: in the Planner (and
+  // other non-list views) that row does not exist, so the delegated request was
+  // silently dropped (#8617). isSubTasksExpanded controls the sub-task section
+  // so the input is visible even when triggered while the section is collapsed.
+  readonly isAddSubtaskInputVisible = signal(false);
+  readonly isSubTasksExpanded = signal(false);
 
   // Constants
   IS_TOUCH_PRIMARY = IS_TOUCH_PRIMARY;
@@ -352,10 +373,6 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
     return task && !task.parentId;
   });
 
-  isSubTaskPanelExpandedInitially = computed(() => {
-    return this.isDialogMode();
-  });
-
   showTimeEstimate = computed(() => !this.task().subTasks?.length);
 
   hasAttachments = computed(() => {
@@ -442,6 +459,11 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
       takeUntilDestroyed(this._destroyRef),
     )
     .subscribe(() => {
+      // Don't carry a half-open subtask draft or the expanded sub-task section
+      // over to the next task (the panel component is reused across tasks,
+      // unlike per-row <task> components).
+      this.isAddSubtaskInputVisible.set(false);
+      this.isSubTasksExpanded.set(false);
       // Only auto-focus panel content when focus is already inside the panel,
       // to avoid stealing focus from the main task list during navigation (#6578)
       if (document.activeElement?.closest('task-detail-panel')) {
@@ -532,7 +554,14 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
             }
           } else if (v === TaskDetailTargetPanel.Notes) {
             const noteWrapperElRef = this.noteWrapperElRef();
-            this.panelState.isFocusNotes.set(true);
+            // Focus the notes section in its rendered (preview) state — do NOT
+            // also enter edit mode. This target opens via a checklist progress
+            // badge or the "open notes" (N) shortcut; both should land on the
+            // rendered notes, not the raw editor. Setting isFocusNotes opened
+            // the textarea that focusItem() below immediately blurred back to
+            // preview — a flash of raw "- [ ] " source (only visible for
+            // checklists). Preview was always the settled state; explicit edits
+            // still work via click/Enter (editActionTriggered).
             if (!noteWrapperElRef) {
               devError('this.noteWrapperElRef not ready');
               this._focusFirst();
@@ -615,7 +644,46 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
 
   addSubTask(): void {
     const task = this.task();
-    this._addSubtaskInputService.requestOpen(task.parentId || task.id);
+    // The sub-task section (and thus the inline input) only renders for a
+    // top-level task. On a subtask's own panel "add subtask" means "add a
+    // sibling under my parent" — there is no section to host the input, so
+    // create it directly (matches the pre-inline-draft behaviour).
+    if (task.parentId) {
+      this.taskService.addSubTaskTo(task.parentId);
+      return;
+    }
+
+    if (task._hideSubTasksMode === HideSubTasksMode.HideAll) {
+      this.taskService.showSubTasks(task.id);
+    }
+    const wasExpanded = this.isSubTasksExpanded();
+    this.isSubTasksExpanded.set(true);
+    this.isAddSubtaskInputVisible.set(true);
+    // When already expanded the input is immediately focusable. When we just
+    // expanded it, the panel body is visibility:hidden until the expand
+    // animation finishes — onSubTasksAfterExpand() handles focus in that case.
+    if (wasExpanded) {
+      window.setTimeout(() => this.addSubtaskInput()?.focus());
+    }
+  }
+
+  onSubTasksAfterExpand(): void {
+    // Defer focus: with animations disabled Material fires afterExpand
+    // synchronously inside the same change-detection pass, before the
+    // addSubtaskInput viewChild is committed (it would be undefined here).
+    if (this.isAddSubtaskInputVisible()) {
+      window.setTimeout(() => this.addSubtaskInput()?.focus());
+    }
+  }
+
+  onAddSubtaskInputClosed(reason: AddSubtaskInputCloseReason): void {
+    this.isAddSubtaskInputVisible.set(false);
+    // Keep the sub-task section expanded so the just-added sub-tasks stay
+    // visible. On Escape (a keyboard cancel) return focus to the trigger so
+    // keyboard navigation continues from the panel rather than falling to body.
+    if (reason === 'escape') {
+      window.setTimeout(() => this.addSubTaskBtn()?.nativeElement.focus());
+    }
   }
 
   collapseParent(): void {
@@ -700,6 +768,14 @@ export class TaskDetailPanelComponent implements OnInit, AfterViewInit, OnDestro
     window.clearTimeout(this._focusTimeout);
     const scheduledForTaskId = this.task().id;
     this._focusTimeout = window.setTimeout(() => {
+      // Never steal focus from an open inline "add subtask" draft. The panel's
+      // on-open auto-focus runs behind delay(50) + 150ms timers; under load
+      // those can fire *after* the user already opened the draft. Focusing a
+      // panel item then blurs the draft input, whose blur handler closes the
+      // draft — leaving "Add subtask" silently broken (#8617/#8630).
+      if (this.isAddSubtaskInputVisible()) {
+        return;
+      }
       if (this.task().id === scheduledForTaskId) {
         focusFn();
       }
