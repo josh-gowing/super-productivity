@@ -2341,6 +2341,11 @@
       "L_SHOW_PREPARATION_SCREEN": "Show preparation screen before each session (rocket countdown)",
       "TITLE": "Focus Mode"
     },
+    "FOCUS_MODE_LOCAL": {
+      "HELP": "These settings apply only to this device and are not synced.",
+      "L_IS_LOOP_BREAK_END_ALARM": "Loop the break-end sound until I dismiss the break (this device only)",
+      "TITLE": "Focus Mode (this device)"
+    },
     "TASK_WIDGET": {
       "TITLE": "Task Widget",
       "IS_ENABLED": "Enable task widget",

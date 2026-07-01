@@ -302,6 +302,10 @@ export type TaskWidgetConfig = Readonly<{
   opacity?: number;
 }>;
 
+export type FocusModeLocalConfig = Readonly<{
+  isLoopBreakEndAlarm?: boolean;
+}>;
+
 export type ClipboardImagesConfig = Readonly<{
   imagePath?: string | null;
 }>;
@@ -348,7 +352,10 @@ export type GlobalConfigSectionKey = keyof GlobalConfigState | 'EMPTY';
 // handler. Kept separate from `GlobalConfigSectionKey` so it cannot leak into
 // `updateGlobalConfigSection` action payloads (which would create phantom ops
 // in the sync log).
-export type GlobalConfigFormSectionKey = GlobalConfigSectionKey | 'taskWidget';
+export type GlobalConfigFormSectionKey =
+  | GlobalConfigSectionKey
+  | 'taskWidget'
+  | 'focusModeLocal';
 
 export type GlobalSectionConfig =
   | MiscConfig
@@ -361,7 +368,8 @@ export type GlobalSectionConfig =
   | DailySummaryNote
   | SyncConfig
   | ClipboardImagesConfig
-  | TaskWidgetConfig;
+  | TaskWidgetConfig
+  | FocusModeLocalConfig;
 type Omit<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>>;
 
 export interface LimitedFormlyFieldConfig<FormModel> extends Omit<
