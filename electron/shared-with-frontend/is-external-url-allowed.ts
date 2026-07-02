@@ -136,3 +136,121 @@ export const isPathSafeToOpen = (path: unknown): boolean => {
   }
   return true;
 };
+
+/**
+ * Executable / script extensions that `shell.openPath` must never launch.
+ *
+ * `shell.openPath` hands the file to the OS default handler, and on Windows
+ * `ShellExecute` *runs* these from a plain file with no exec bit — so a renderer
+ * (a plugin or XSS) that can drop a file into a writable dir (e.g. the
+ * local-file sync folder via `FILE_SYNC_SAVE`) and then call
+ * `window.ea.openPath()` on it gets native code execution that bypasses the
+ * `nodeExecution` consent gate. A malicious synced FILE attachment whose path
+ * points at such a file is the same vector on user click.
+ *
+ * shortcut: a curated denylist — executable extensions vary by platform and new
+ * ones appear. If this proves leaky, the upgrade path is to invert it into an
+ * allowlist of openable document types (or a user confirm) at the openPath sink.
+ */
+const EXECUTABLE_FILE_EXTENSIONS = new Set<string>([
+  // Windows — run directly by ShellExecute
+  'exe',
+  'com',
+  'bat',
+  'cmd',
+  'pif',
+  'scr',
+  'cpl',
+  'msi',
+  'msp',
+  'msc',
+  'vbs',
+  'vbe',
+  'js',
+  'jse',
+  'ws',
+  'wsf',
+  'wsh',
+  'ps1',
+  'psm1',
+  'psc1',
+  'hta',
+  'reg',
+  'inf',
+  'scf',
+  'lnk',
+  'url',
+  'jar',
+  'jnlp',
+  'gadget',
+  'application',
+  'appref-ms', // ClickOnce launcher (sibling of .application)
+  'settingcontent-ms', // runs arbitrary commands via ShellExecute (LOLBin RCE)
+  'library-ms', // crafted library files have been used for code exec
+  'wsc', // Windows Script Component (sibling of .wsf/.wsh)
+  'chm', // compiled HTML help — executes on open
+  'hlp', // legacy WinHelp — executes on open
+  'diagcab', // Windows troubleshooter package — runs on open
+  'msix',
+  'msixbundle',
+  'appx',
+  'appxbundle',
+  // macOS
+  'command',
+  'app',
+  'workflow',
+  'action',
+  'scpt',
+  'pkg', // launches the Installer for an arbitrary package
+  'terminal', // Terminal settings file that also runs a command on open
+  'fileloc', // location files abused to run commands (CVE-2022-42821)
+  'inetloc',
+  // Linux / cross-platform
+  'sh',
+  'bash',
+  'zsh',
+  'csh',
+  'ksh',
+  'run',
+  'out',
+  'bin',
+  'appimage',
+  'desktop',
+  'deb',
+  'rpm',
+]);
+
+/**
+ * True if `path` ends in a known-executable/script extension (see
+ * {@link EXECUTABLE_FILE_EXTENSIONS}). Windows strips trailing dots/spaces from
+ * filenames (so `evil.bat.` / `evil.bat ` execute as `evil.bat`) and supports
+ * NTFS alternate data streams (`evil.bat::$DATA`), so both are normalized away
+ * before the check. Double extensions (`invoice.pdf.bat`) resolve to `.bat`.
+ */
+export const hasExecutableFileExtension = (path: unknown): boolean => {
+  if (typeof path !== 'string') {
+    return false;
+  }
+  const trimmed = path.trim();
+  // Drop the query/fragment ONLY for a real `file://` URL (`file:///x.bat?y`). In
+  // a bare filesystem path `#` is a legal filename char on Windows/NTFS (and `#`,
+  // `?` and `:` are all legal on POSIX), so splitting on them there would let
+  // `evil.txt#.bat` — whose real extension ShellExecute reads as `.bat` — slip
+  // through as the harmless-looking `.txt`. Require the `//` so a POSIX file that
+  // merely starts with the literal `file:` isn't mistaken for a URL either.
+  const withoutQuery = /^file:\/\//i.test(trimmed) ? trimmed.split(/[?#]/)[0] : trimmed;
+  // Strip trailing Windows dots/spaces (a real filesystem normalization).
+  const candidate = withoutQuery.replace(/[ .]+$/, '');
+  const lastSep = Math.max(candidate.lastIndexOf('/'), candidate.lastIndexOf('\\'));
+  const base = candidate.slice(lastSep + 1);
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) {
+    return false; // no extension, or a dotfile with none
+  }
+  // `.slice` after the dot, then strip an NTFS ADS suffix (`bat:$DATA`).
+  const ext = base
+    .slice(dot + 1)
+    .toLowerCase()
+    .split(':')[0];
+  return EXECUTABLE_FILE_EXTENSIONS.has(ext);
+};

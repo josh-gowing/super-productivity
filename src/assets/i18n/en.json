@@ -6,6 +6,12 @@
       "MSG": "Do you want to install Super Productivity as a PWA (Progressive Web App)?"
     },
     "B_OFFLINE": "You are disconnected from the internet. Syncing and requesting issue provider data will not work.",
+    "B_SUPER_SYNC_ENCRYPTION": {
+      "ALREADY_ENCRYPTED": "This account is already encrypted on another device. Enter your existing password to keep syncing.",
+      "ENABLE": "Enable encryption",
+      "LATER": "Later",
+      "MSG": "SuperSync is end-to-end encrypted, but this account still syncs without a password. Set one to protect your data — it stays and is re-uploaded encrypted on the next sync."
+    },
     "B_SYNC_SAFETY": {
       "DISMISS": "Not now",
       "MSG": "You've been using Super Productivity for a while. Set up sync to back up your data and keep it safe across devices.",
@@ -92,6 +98,7 @@
     },
     "ATTACHMENT": {
       "LOCAL_FILE_UNAVAILABLE": "This attachment is only available on the device where it was added.",
+      "COMMAND_UNSUPPORTED": "Command attachments can no longer run commands.",
       "DIALOG_EDIT": {
         "ADD_ATTACHMENT": "Add Link",
         "EDIT_ATTACHMENT": "Edit Link",
@@ -415,7 +422,7 @@
         "FILTER_USER": "Filter username",
         "GITLAB_BASE_URL": "Custom GitLab base URL (optional)",
         "PROJECT": "user name/project",
-        "PROJECT_HINT": "e.g. super-productivity/super-productivity",
+        "PROJECT_HINT": "Project path (namespace/project-slug) or numeric project ID, not the display name (e.g. super-productivity/super-productivity or 12345)",
         "SCOPE": "Scope",
         "SCOPE_ALL": "All",
         "SCOPE_ASSIGNED": "Assigned to me",
@@ -1100,10 +1107,12 @@
     },
     "SCHEDULE": {
       "CALENDAR_VISIBILITY": "Calendar visibility",
+      "CLICK_TO_CREATE_TASK": "click to create task",
       "D_INITIAL": {
         "TEXT": "<p>The Schedule will provide you with a better picture of how one's planned tasks play out over time. It is automatically generated from your Tasks and requires only <strong>time estimates on them to work</strong>.</p><p>Two things are distinguished: <strong>Scheduled Tasks</strong>, which are shown at their planned time and <strong>Regular Tasks</strong>, which should flow around those fixed events.</p><p>If you provide a work start and end time (recommended), regular tasks will never be placed outside of these boundaries.</p>",
         "TITLE": "Schedule"
       },
+      "DROP_TASKS_HERE_TO_SCHEDULE": "Drop tasks here to schedule them",
       "END": "Work End",
       "EXCESS_TASK_TOOLTIP": "This task does not fully fit this day.",
       "EXCESS_TASKS_DAY_TOOLTIP": "{{count}} tasks do not fit into the available time",
@@ -1115,14 +1124,18 @@
       "NEXT_WEEK": "Next Week",
       "PREVIOUS_MONTH": "Previous Month",
       "PREVIOUS_WEEK": "Previous Week",
+      "PLAN_TASK_FOR_DAY_PLACEHOLDER": "Plan task for day...",
       "VIEW_MONTH": "View Month",
       "VIEW_WEEK": "View Week",
       "NO_TASKS": "Currently there are no tasks. Please add some tasks via the plus (+) button in the top bar.",
       "NOW": "Now",
       "PLAN_END_DAY": "End of {{date}}",
       "PLAN_START_DAY": "Start of {{date}}",
+      "SCHEDULE_TASK_PLACEHOLDER": "Schedule task...",
       "SHIFT_KEY_INFO": "Hold Shift to toggle day planning mode",
-      "START": "Work Start"
+      "START": "Work Start",
+      "TOGGLE_DAY_PLANNING_HINT": "Ctrl+1 to toggle day planning",
+      "TOGGLE_TIME_SCHEDULING_HINT": "Ctrl+1 to toggle time scheduling"
     },
     "SEARCH_BAR": {
       "INCLUDE_COMPLETED": "Include completed and archived tasks",
@@ -2649,7 +2662,6 @@
     "OPEN_SETTINGS_ERROR": "Could not open settings",
     "PERSISTENCE_DISALLOWED": "Data will not be persisted permanently. Be aware that this can lead to data loss!",
     "PERSISTENCE_ERROR": "Error when requesting to persist data: {{err}}",
-    "RUNNING_X": "Running \"{{str}}\".",
     "SAVE_BLOCKED_DURING_SYNC": "Sync in progress - some changes may need to be re-saved",
     "SHARE_FAILED": "Sharing failed. Please copy manually.",
     "SHARE_FAILED_FALLBACK": "Sharing failed. Copied to clipboard instead.",
@@ -2826,15 +2838,11 @@
     "CONNECT": {
       "CONNECT": "Connect",
       "CONNECTING": "Connecting…",
-      "EMAIL_HINT": "A Space needs a verified email before it can create tokens.",
-      "INTRO": "Paste a Plainspace API token to import the tasks assigned to you and to share projects. Creating one in Plainspace only takes a moment:",
+      "INTRO": "Collaborate on projects with others. Tasks assigned to you import automatically and stay in sync.",
       "INVALID": "That token didn't work. Make sure you copied the whole token (it starts with \"pat_\") and try again.",
       "OPEN_LINK": "Open Plainspace",
-      "STEP_1": "Open Plainspace and pick one of your Spaces (or create one).",
-      "STEP_2": "Open the People panel, then expand Advanced → API tokens.",
-      "STEP_3": "Name a token (e.g. \"Super Productivity\") and create it.",
-      "STEP_4": "Copy the token and paste it below.",
       "TITLE": "Connect to Plainspace",
+      "TOKEN_HELP": "Create an API token on Plainspace, then paste it below.",
       "TOKEN_LABEL": "API token",
       "TOKEN_PLACEHOLDER": "pat_…"
     },
@@ -2851,11 +2859,13 @@
     },
     "LOGIN_REQUIRED": "A Plainspace API token is required to share a project.",
     "NO_UNCLAIMED": "No unclaimed tasks right now.",
+    "OFFLINE": "You're offline. Connecting to Plainspace needs an internet connection.",
     "OPEN_IN_PLAINSPACE": "Open in Plainspace",
     "RECURRING": "Recurring task",
     "SHARE_DESCRIPTION": "Creates a shared Plainspace space and links it to this project so you can collaborate with others.",
     "SHARE_FAILED": "Could not share this project on Plainspace.",
     "SHARE_LABEL": "Collaborate on this project on Plainspace (Beta)",
+    "SHARE_MENU": "Collaborate on Plainspace (Beta)",
     "SHARE_SUCCESS": "Project shared on Plainspace. Tasks assigned to you will import automatically.",
     "SPACE_PICKER": {
       "CREATE_NEW": "Create new space",

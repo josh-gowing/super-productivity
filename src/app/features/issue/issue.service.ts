@@ -1,6 +1,7 @@
 import { inject, Injectable } from '@angular/core';
 import { unique } from '../../util/unique';
 import { generateCalendarTaskId } from '../calendar-integration/generate-calendar-task-id';
+import { generatePlainspaceTaskId } from './providers/plainspace/generate-plainspace-task-id';
 import {
   BuiltInIssueProviderKey,
   IssueData,
@@ -239,22 +240,28 @@ export class IssueService {
   async checkAndImportNewIssuesToBacklogForProject(
     providerKey: IssueProviderKey,
     issueProviderId: string,
+    isBackgroundPoll = false,
   ): Promise<void> {
     const service = this._getService(providerKey);
     if (!service?.getNewIssuesToAddToBacklog) {
       return;
     }
-    this._snackService.open({
-      svgIco: this._getProviderIcon(providerKey),
-      msg: T.F.ISSUE.S.POLLING_BACKLOG,
-      isSpinner: true,
-      translateParams: {
-        issueProviderName: this._getProviderName(providerKey),
-        issuesStr: this._translateService.instant(
-          this._getIssueStrings(providerKey).ISSUES_STR,
-        ),
-      },
-    });
+    // Background ('always'-mode) polls run every few minutes regardless of
+    // navigation, so keep them quiet — only the import result snack below is
+    // shown, and only when something is actually added.
+    if (!isBackgroundPoll) {
+      this._snackService.open({
+        svgIco: this._getProviderIcon(providerKey),
+        msg: T.F.ISSUE.S.POLLING_BACKLOG,
+        isSpinner: true,
+        translateParams: {
+          issueProviderName: this._getProviderName(providerKey),
+          issuesStr: this._translateService.instant(
+            this._getIssueStrings(providerKey).ISSUES_STR,
+          ),
+        },
+      });
+    }
 
     const allExistingIssueIds: string[] | number[] =
       await this._taskService.getAllIssueIdsForProviderEverywhere(issueProviderId);
@@ -270,11 +277,17 @@ export class IssueService {
 
     issuesToAdd.forEach((issue: IssueDataReduced) => {
       // TODO add correct project id
+      // Every import here is an automatic backlog poll targeting the provider's
+      // default project, so the currently-viewed context is incidental and must
+      // not leak its tag onto the task (#8673). Flagging it here (rather than in
+      // the effect) also covers the classic poll's mid-fetch context-switch race
+      // — getTaskDefaults reads the *live* context after several awaits.
       this.addTaskFromIssue({
         issueDataReduced: issue,
         issueProviderId,
         issueProviderKey: providerKey,
         isAddToBacklog: true,
+        isAutoImport: true,
       });
     });
 
@@ -535,6 +548,7 @@ export class IssueService {
     additional = {},
     isAddToBacklog = false,
     isForceDefaultProject = false,
+    isAutoImport = false,
   }: {
     issueDataReduced: IssueDataReduced;
     issueProviderId: string;
@@ -542,6 +556,10 @@ export class IssueService {
     additional?: Partial<Task>;
     isAddToBacklog?: boolean;
     isForceDefaultProject?: boolean;
+    // Automatic (non-user-initiated) import — a background backlog poll or
+    // calendar auto-import. Such imports fire regardless of what the user is
+    // viewing, so they must not inherit the active context's tag (#8673).
+    isAutoImport?: boolean;
   }): Promise<string | undefined> {
     if (!issueDataReduced || !issueDataReduced.id || !issueProviderId) {
       throw new Error('No issueData');
@@ -568,6 +586,14 @@ export class IssueService {
       additional = {
         ...additional,
         id: generateCalendarTaskId(issueProviderId, issueDataReduced.id.toString()),
+      };
+    } else if (issueProviderKey === PLAINSPACE_TYPE) {
+      // Plainspace auto-imports in the background on every device, so concurrent
+      // imports of the same issue must converge on one task id (see
+      // generatePlainspaceTaskId) instead of creating cross-device duplicates.
+      additional = {
+        ...additional,
+        id: generatePlainspaceTaskId(issueProviderId, issueDataReduced.id.toString()),
       };
     }
 
@@ -615,7 +641,13 @@ export class IssueService {
         }
         return result;
       } else {
+        // An automatic import (background backlog poll / calendar auto-import)
+        // fires regardless of what the user is currently viewing, so the active
+        // tag is incidental. Inheriting it would stamp an unrelated tag onto the
+        // imported task and sync that stray tag to every device. Only inherit the
+        // ambient tag for user-initiated (foreground) imports.
         const contextTagIds =
+          !isAutoImport &&
           this._workContextService.activeWorkContextType === WorkContextType.TAG &&
           this._workContextService.activeWorkContextId !== TODAY_TAG.id
             ? [this._workContextService.activeWorkContextId]

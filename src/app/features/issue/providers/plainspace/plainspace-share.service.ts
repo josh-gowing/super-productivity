@@ -12,6 +12,7 @@ import { DEFAULT_PLAINSPACE_CFG } from './plainspace-cfg-form.const';
 import { SnackService } from '../../../../core/snack/snack.service';
 import { Log } from '../../../../core/log';
 import { T } from '../../../../t.const';
+import { isOnline } from '../../../../util/is-online';
 import { PlainspaceAccountService } from '../../../plainspace/plainspace-account.service';
 import { PlainspaceConnectDialogComponent } from '../../../plainspace/connect-dialog/plainspace-connect-dialog.component';
 import {
@@ -23,8 +24,8 @@ import {
  * Provisions Plainspace sharing for a project: ensures the user is signed in,
  * creates a remote space and registers a bound `PLAINSPACE` issue-provider
  * instance (so tasks assigned to me / unassigned auto-import to the project
- * backlog). Used by the "Share on Plainspace" toggle in the create-project
- * dialog.
+ * backlog). Used by the project context menu's "Collaborate on Plainspace"
+ * action and the create-project dialog's share toggle.
  */
 @Injectable({ providedIn: 'root' })
 export class PlainspaceShareService {
@@ -48,6 +49,12 @@ export class PlainspaceShareService {
     title: string,
   ): Promise<string | null> {
     try {
+      // Sharing is an online action — say so plainly instead of letting the
+      // space picker fail later with a confusing "check your token" error.
+      if (!isOnline()) {
+        this._snackService.open({ type: 'ERROR', msg: T.PLAINSPACE.OFFLINE });
+        return null;
+      }
       if (!(await this._ensureConnected())) {
         this._snackService.open({ type: 'ERROR', msg: T.PLAINSPACE.LOGIN_REQUIRED });
         return null;
@@ -111,8 +118,8 @@ export class PlainspaceShareService {
 
   /**
    * Ensures a Plainspace account is connected, opening the guided connect dialog
-   * (link + step-by-step) if not. The dialog validates the pasted token against
-   * the host and resolves to whether a connection was established.
+   * if not. A stored token that has since gone stale is left to the space
+   * picker, which detects it and offers a reconnect.
    */
   private async _ensureConnected(): Promise<boolean> {
     if (this._accountService.isLoggedIn()) {

@@ -37,6 +37,24 @@ export const selectIssueProvidersWithDisabledLast = createSelector(
   },
 );
 
+/**
+ * Whether a project already has a bound `PLAINSPACE` issue provider (i.e. it is
+ * shared/collaborated on). Includes disabled providers so the "Collaborate on
+ * Plainspace" entry point can be hidden once a project is shared, rather than
+ * silently provisioning a second space on a repeat click. Trade-off: a disabled
+ * Plainspace provider therefore also hides the action — re-enable it in the
+ * integrations panel to resume (chosen over risking a duplicate remote space).
+ */
+export const selectIsProjectSharedOnPlainspace = (
+  projectId: string,
+  // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+) =>
+  createSelector(selectAll, (issueProviders: IssueProvider[]): boolean =>
+    issueProviders.some(
+      (ip) => ip?.issueProviderKey === 'PLAINSPACE' && ip.defaultProjectId === projectId,
+    ),
+  );
+
 export const selectIssueProviderById = <T extends IssueProvider>(
   id: string,
   issueProviderKey: IssueProviderKey | null,

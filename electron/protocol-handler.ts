@@ -86,6 +86,14 @@ export const processProtocolUrl = (url: string, mainWin: BrowserWindow | null): 
           mainWin.webContents.send(IPC.TASK_TOGGLE_START);
         }
         break;
+      case 'plainspace-connect':
+        // Bounce-back from the plainspace.org connect flow ("Open Super
+        // Productivity"): just surface the window. The user pastes the token
+        // they copied there; no payload to forward.
+        if (mainWin && mainWin.webContents) {
+          showOrFocus(mainWin);
+        }
+        break;
       // The following three mirror the `globalShowHide` / `globalAddNote` / `globalAddTask`
       // global shortcuts. On Wayland the compositor owns global hotkeys, so users bind keys
       // to `xdg-open superproductivity://<action>` instead (#7114).

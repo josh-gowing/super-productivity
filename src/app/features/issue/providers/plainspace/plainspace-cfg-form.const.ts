@@ -16,6 +16,11 @@ export const DEFAULT_PLAINSPACE_CFG: PlainspaceCfg = {
   // Tasks assigned to me auto-import into the bound project's backlog, and the
   // poll keeps them in sync — Plainspace is meant to feel automatic.
   isAutoAddToBacklog: true,
+  // Poll in the background regardless of which project is open, so assigned
+  // tasks appear without navigating to the bound project. The backlog-poll
+  // spinner is suppressed for these background polls (see
+  // checkAndImportNewIssuesToBacklogForProject).
+  pollingMode: 'always',
 };
 
 export const PLAINSPACE_CONFIG_FORM: LimitedFormlyFieldConfig<IssueProviderPlainspace>[] =

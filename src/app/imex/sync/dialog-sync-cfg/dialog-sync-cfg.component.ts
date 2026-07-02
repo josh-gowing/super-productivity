@@ -605,7 +605,7 @@ export class DialogSyncCfgComponent implements AfterViewInit {
     };
 
     // Strip _isInitialSetup before saving — it's only for form hideExpressions
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    // and the fresh-setup encryption-prompt decision below.
     const { _isInitialSetup, ...cfgWithoutFlag } = this._tmpUpdatedCfg;
     const configToSave = {
       ...cfgWithoutFlag,
@@ -632,6 +632,15 @@ export class DialogSyncCfgComponent implements AfterViewInit {
 
     await this.syncConfigService.updateSettingsFromForm(configToSave as SyncConfig, true);
     this._matDialogRef.close();
+
+    // Enabling SuperSync from a previously-disabled state: arm the one-time setup
+    // encryption modal for the setup sync. Done OUTSIDE the isOnline() guard because
+    // an offline save still needs the flag armed for whenever the setup sync finally
+    // runs (else the prompt is silently skipped and the account syncs unencrypted).
+    // Established/returning accounts are nudged by the calm migration banner instead.
+    if (_isInitialSetup && providerId === SyncProviderId.SuperSync) {
+      this.syncWrapperService.markPromptEncryptionAfterSetupSync();
+    }
 
     if (isOnline()) {
       this.syncWrapperService.sync(true);
