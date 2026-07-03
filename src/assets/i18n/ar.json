@@ -11,13 +11,21 @@
       "MSG": "أنت تستخدم Super Productivity منذ فترة. قم بإعداد المزامنة لعمل نسخة احتياطية من بياناتك والحفاظ عليها آمنة عبر جميع أجهزتك.",
       "SETUP": "إعداد المزامنة"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "تحميل",
+      "MSG": "تتوفر نسخة جديدة من Super Productivity ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_BACKGROUND": "تغيير الخلفية",
       "CHANGE_PROJECT_SETTINGS": "تغيير إعدادات المشروع",
       "CHANGE_TAG_SETTINGS": "تغيير إعدادات الوسم"
     },
     "UPDATE_WEB_APP": "نسخة جديدة متاحة. تحميل نسخة جديدة؟",
-    "SKIP_SYNC_WAIT": "تخطي انتظار المزامنة"
+    "SKIP_SYNC_WAIT": "تخطي انتظار المزامنة",
+    "UPDATE_CHECK": {
+      "ERROR": "تعذر التحقق من وجود تحديثات. يرجى المحاولة مرة أخرى لاحقًا.",
+      "UP_TO_DATE": "أنت تستخدم أحدث نسخة ({{version}})."
+    }
   },
   "BL": {
     "NO_TASKS": "لا توجد حاليًا أية مهام في الأعمال المتراكمة"
@@ -208,11 +216,13 @@
     },
     "D_RATE": {
       "A_HOW": "كيفية التقييم",
+      "BANNER_ACTION": "بالتأكيد!",
       "BTN_DONT_BOTHER": "لا تسأل مرة أخرى",
       "BTN_FEEDBACK": "إرسال ملاحظات",
       "BTN_LATER": "ربما لاحقًا",
       "BTN_RATE_APP_STORE": "قيّم على App Store",
       "BTN_RATE_PLAY_STORE": "قيّم على Play Store",
+      "BTN_STAR_GITHUB": "قيّمنا بنجمة على GitHub",
       "FEEDBACK_BACK": "رجوع",
       "FEEDBACK_CONTRIBUTE": "ساهم في المشروع",
       "FEEDBACK_CONTRIBUTE_DESC": "البرمجة، التصميم، الترجمة وغير ذلك",
@@ -2241,6 +2251,8 @@
       "DARK_MODE_SYSTEM": "نظام",
       "FIRST_DAY_OF_WEEK": "اول يوم من الاسبوع",
       "HELP": "<p><strong>ألا ترى إعلامات سطح المكتب؟</strong> بالنسبة للنوافذ ، قد ترغب في التحقق من النظام> الإشعارات والإجراءات والتحقق من تمكين الإشعارات المطلوبة.</p>",
+      "IS_CHECK_FOR_UPDATES": "التحقق تلقائيًا من وجود نسخ جديدة (سطح المكتب فقط)",
+      "IS_CHECK_FOR_UPDATES_HINT": "يتحقق من أحدث إصدار على GitHub مرة واحدة يوميًا ويعرض إشعارًا عند توفر نسخة أحدث. يتم إجراء طلب ويب عادي فقط — لا يتم إرسال أي بيانات شخصية.",
       "IS_CONFIRM_BEFORE_EXIT": "تأكيد قبل الخروج من التطبيق",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "قم بالتأكيد قبل الخروج من التطبيق دون الانتهاء من اليوم الأول",
       "IS_DARK_MODE": "وضع الظلام",
@@ -2495,6 +2507,7 @@
       "KEYBOARD": "كيفية: لوحة المفاتيح المتقدمة",
       "REDDIT_COMMUNITY": "مجتمع ريديت",
       "REPORT_A_PROBLEM": "الإبلاغ عن مشكلة",
+      "SEND_FEEDBACK": "إرسال ملاحظات",
       "START_WELCOME": "ابدأ جولة الترحيب",
       "SYNC": "كيفية: تكوين المزامنة"
     },
@@ -2710,6 +2723,7 @@
     "ALL_TASKS_TITLE": "جميع المهام"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "التحقق من وجود تحديثات",
     "GLOBAL_SETTINGS": "الاعدادات العامة",
     "NO_PLUGINS_INSTALLED": "لا توجد إضافات مثبتة حاليا",
     "PLUGINS": "الإضافات",

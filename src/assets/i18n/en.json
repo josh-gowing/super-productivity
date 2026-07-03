@@ -17,11 +17,19 @@
       "MSG": "You've been using Super Productivity for a while. Set up sync to back up your data and keep it safe across devices.",
       "SETUP": "Set up sync"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Download",
+      "MSG": "A new version of Super Productivity is available ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_PROJECT_SETTINGS": "Change Project Settings",
       "CHANGE_TAG_SETTINGS": "Change Tag Settings"
     },
     "SKIP_SYNC_WAIT": "Skip waiting for sync",
+    "UPDATE_CHECK": {
+      "ERROR": "Could not check for updates. Please try again later.",
+      "UP_TO_DATE": "You are on the latest version ({{version}})."
+    },
     "UPDATE_WEB_APP": "New version available. Load new version?"
   },
   "BL": {
@@ -262,11 +270,13 @@
     },
     "D_RATE": {
       "A_HOW": "How to rate",
+      "BANNER_ACTION": "Sure!",
       "BTN_DONT_BOTHER": "Don't ask again",
       "BTN_FEEDBACK": "Give feedback",
       "BTN_LATER": "Maybe later",
       "BTN_RATE_APP_STORE": "Rate on App Store",
       "BTN_RATE_PLAY_STORE": "Rate on Play Store",
+      "BTN_STAR_GITHUB": "Star us on GitHub",
       "FEEDBACK_BACK": "Back",
       "FEEDBACK_CONTRIBUTE": "Contribute to the project",
       "FEEDBACK_CONTRIBUTE_DESC": "Code, design, translations, and more",
@@ -1192,6 +1202,10 @@
       "A": {
         "REMOTE_MODEL_VERSION_NEWER": "The remote model version is newer than the local one. Please update your local app to the newest version!"
       },
+      "B": {
+        "CONTENT_CONFLICT_RESOLVED": "Conflicting edits to {{taskList}} were auto-resolved by keeping the most recent version. Older edits may have been discarded — please double-check.",
+        "CONTENT_CONFLICT_UNTITLED": "Untitled task"
+      },
       "BTN_RESTORE_FROM_HISTORY": "Restore from History",
       "BTN_SYNC_NOW": "Sync Now",
       "C": {
@@ -1365,13 +1379,18 @@
           "ENABLE_ENCRYPTION_TITLE": "Enable Encryption?",
           "ENABLE_ENCRYPTION_WARNING": "WARNING: This will re-upload your data with encryption. If you forget your encryption password, your data cannot be recovered!",
           "ENABLE_ENCRYPTION_WHAT_HAPPENS": "What will happen:",
+          "ENCRYPTION_SETUP_INTRO": "<strong>Set a password to encrypt your data before it is uploaded</strong>, so it never leaves this device unencrypted. This is optional — you can also enable or change it later.",
           "L_CHANGE_ENCRYPTION_PASSWORD": "Change Encryption Password",
           "L_CONFIRM_PASSWORD": "Confirm Password",
           "L_NEW_PASSWORD": "New Encryption Password",
           "L_REMOVE_ENCRYPTION": "Or Remove Encryption",
           "PASSWORD_MIN_LENGTH": "Password must be at least 8 characters",
           "PASSWORDS_DONT_MATCH": "Passwords do not match",
-          "REMOVE_ENCRYPTION_WARNING": "Removing encryption will re-upload your data without encryption. All devices will need to reconfigure."
+          "REMOVE_ENCRYPTION_WARNING": "Removing encryption will re-upload your data without encryption. All devices will need to reconfigure.",
+          "SETUP_ENCRYPTION_BTN": "Encrypt & Continue",
+          "SETUP_ENCRYPTION_PASSWORD_WARNING": "Use the same password on all devices. If you forget it, encrypted data cannot be recovered.",
+          "SETUP_ENCRYPTION_TITLE": "Encrypt before first upload?",
+          "SETUP_SKIP_ENCRYPTION_BTN": "Skip"
         },
         "GOOGLE": {
           "L_SYNC_FILE_NAME": "Sync File Name"
@@ -1579,7 +1598,7 @@
         "UNKNOWN_ERROR": "Unknown Sync Error: {{err}}",
         "UPLOAD_ERROR": "Unknown Upload Error (Settings correct?): {{err}}",
         "UPLOAD_OPS_REJECTED": "{{count}} operation(s) were permanently rejected by the server and won't be synced.",
-        "VECTOR_CLOCK_LIMIT_REACHED": "Sync has tracked {{originalSize}} devices/browsers, exceeding the limit of {{maxSize}}. Inactive device entries were pruned. Consider a sync reset if you experience issues.",
+        "VECTOR_CLOCK_LIMIT_REACHED": "Sync tidied up old device entries ({{originalSize}} → {{maxSize}}). This is normal — no action needed.",
         "VERSION_TOO_OLD": "Your app version is too old for the synced data. Please update!",
         "VERSION_UNSUPPORTED": "Cannot sync: data requires a newer app version. Please update.",
         "WEB_CRYPTO_NOT_AVAILABLE": "Encryption is not available on this device. On Android, encryption requires a secure context (HTTPS) which is not available. Please disable encryption in sync settings or sync from a desktop web browser."
@@ -2502,6 +2521,8 @@
       "DEFAULT_START_PAGE": "Default start page",
       "FIRST_DAY_OF_WEEK": "First day of the week",
       "HELP": "<p><strong>Not seeing desktop notifications?</strong> For Windows you may want to check 'System' > 'Notifications & actions' and verify the required notifications are enabled.</p>",
+      "IS_CHECK_FOR_UPDATES": "Automatically check for new versions (desktop only)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Checks the latest release on GitHub once a day and shows a notice when a newer version is available. Only a standard web request is made — no personal data is sent.",
       "IS_CONFIRM_BEFORE_EXIT": "Confirm before exiting the app",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Confirm before exiting the app without finishing day first",
       "IS_DARK_MODE": "Dark Mode",
@@ -2527,7 +2548,11 @@
       "THEME_REMOVE_BUTTON": "Remove theme",
       "THEME_REMOVED_TOAST": "Theme removed; reverted to Default.",
       "THEME_SELECT_LABEL": "Select Theme",
-      "TITLE": "Misc Settings"
+      "TITLE": "Misc Settings",
+      "WALLPAPER": "Wallpaper",
+      "WALLPAPER_BUTTON": "Set wallpaper…",
+      "WALLPAPER_DIALOG_TITLE": "Global wallpaper",
+      "WALLPAPER_HINT": "Shown on pages without their own background (Planner, Schedule, Boards, Settings…). Tags and projects with their own image override it."
     },
     "POMODORO": {
       "BREAK_DURATION": "Short break duration",
@@ -2700,6 +2725,7 @@
       "KEYBOARD": "How to: Keyboard Navigation",
       "REDDIT_COMMUNITY": "Reddit community",
       "REPORT_A_PROBLEM": "Report a problem",
+      "SEND_FEEDBACK": "Send feedback",
       "START_WELCOME": "Start welcome tour",
       "SYNC": "How to: Configure sync"
     },
@@ -2860,6 +2886,7 @@
     "LOGIN_REQUIRED": "A Plainspace API token is required to share a project.",
     "NO_UNCLAIMED": "No unclaimed tasks right now.",
     "OFFLINE": "You're offline. Connecting to Plainspace needs an internet connection.",
+    "OPEN_FAILED": "Could not open the Plainspace project — check your connection and try again.",
     "OPEN_IN_PLAINSPACE": "Open in Plainspace",
     "RECURRING": "Recurring task",
     "SHARE_DESCRIPTION": "Creates a shared Plainspace space and links it to this project so you can collaborate with others.",
@@ -2971,6 +2998,7 @@
     "DIALOG_TITLE": "System Update"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Check for updates",
     "CLICK_TO_COPY_VERSION": "Click to copy version",
     "FAILED_TO_COPY_TO_CLIPBOARD": "Failed to copy to clipboard",
     "GLOBAL_SETTINGS": "Global Settings",

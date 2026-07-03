@@ -11,11 +11,19 @@
       "MSG": "Već neko vrijeme koristiš Super Productivity. Postavi sinkronizaciju kako bi sigurnosno kopirao svoje podatke i čuvao ih sigurnima na svim uređajima.",
       "SETUP": "Postavi sinkronizaciju"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Preuzmi",
+      "MSG": "Dostupna je nova verzija aplikacije Super Productivity ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_PROJECT_SETTINGS": "Promijeni postavke projekta",
       "CHANGE_TAG_SETTINGS": "Promijeni postavke oznaka"
     },
     "SKIP_SYNC_WAIT": "Preskoči čekanje sinkronizacije",
+    "UPDATE_CHECK": {
+      "ERROR": "Provjera ažuriranja nije uspjela. Pokušaj ponovno kasnije.",
+      "UP_TO_DATE": "Imaš najnoviju verziju ({{version}})."
+    },
     "UPDATE_WEB_APP": "Dostupna je nova verzija. Učitaj novu verziju?"
   },
   "BL": {
@@ -225,11 +233,13 @@
     },
     "D_RATE": {
       "A_HOW": "Kako ocijeniti",
+      "BANNER_ACTION": "Naravno!",
       "BTN_DONT_BOTHER": "Ne pitaj ponovno",
       "BTN_FEEDBACK": "Pošalji povratnu informaciju",
       "BTN_LATER": "Možda kasnije",
       "BTN_RATE_APP_STORE": "Ocijeni na App Storeu",
       "BTN_RATE_PLAY_STORE": "Ocijeni na Play Storeu",
+      "BTN_STAR_GITHUB": "Označite nas zvjezdicom na GitHubu",
       "FEEDBACK_BACK": "Natrag",
       "FEEDBACK_CONTRIBUTE": "Doprinesi projektu",
       "FEEDBACK_CONTRIBUTE_DESC": "Kod, dizajn, prijevodi i više",
@@ -2287,6 +2297,8 @@
       "DEFAULT_START_PAGE": "Zadana početna stranica",
       "FIRST_DAY_OF_WEEK": "Prvi dan u tjednu",
       "HELP": "<p><strong>Ne vidiš obavijesti na računalu?</strong> Za Windows provjerite 'Sustav' > 'Obavijesti i akcije' i provjerite jesu li potrebne obavijesti omogućene.</p>",
+      "IS_CHECK_FOR_UPDATES": "Automatski provjeravaj nove verzije (samo za desktop)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Jednom dnevno provjerava najnovije izdanje na GitHubu i prikazuje obavijest kad je dostupna novija verzija. Šalje se samo standardni web zahtjev — osobni podaci se ne šalju.",
       "IS_CONFIRM_BEFORE_EXIT": "Potvrdi prije izlaska iz aplikacije",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Potvrdi prije izlaska iz aplikacije bez završetka dana",
       "IS_DARK_MODE": "Tamni modus",
@@ -2484,6 +2496,7 @@
       "KEYBOARD": "Kako: Napredna tipkovnica",
       "REDDIT_COMMUNITY": "Reddit zajednica",
       "REPORT_A_PROBLEM": "Prijavi problem",
+      "SEND_FEEDBACK": "Pošalji povratnu informaciju",
       "START_WELCOME": "Pokreni uvodni vodič",
       "SYNC": "Kako: Konfigurirati sinkronizaciju"
     },
@@ -2702,6 +2715,7 @@
     "DIALOG_TITLE": "Aktualiziranje sustava"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Provjeri ažuriranja",
     "FAILED_TO_COPY_TO_CLIPBOARD": "Nije uspjelo kopiranje u međuspremnik",
     "GLOBAL_SETTINGS": "Globalne postavke",
     "NO_PLUGINS_INSTALLED": "Trenutačno nema instaliranih dodataka",

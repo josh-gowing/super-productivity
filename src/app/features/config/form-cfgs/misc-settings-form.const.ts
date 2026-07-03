@@ -6,6 +6,7 @@ import {
 import { T } from '../../../t.const';
 import { IS_ELECTRON, IS_GNOME_WAYLAND } from '../../../app.constants';
 import { isValidSplitTime } from '../../../util/is-valid-split-time';
+import { isUpdateCheckPossible } from '../../../core/update-check/is-update-check-possible.util';
 
 export const MISC_SETTINGS_FORM_CFG: ConfigFormSection<MiscConfig> = {
   title: T.GCF.MISC.TITLE,
@@ -46,6 +47,26 @@ export const MISC_SETTINGS_FORM_CFG: ConfigFormSection<MiscConfig> = {
             templateOptions: {
               label: T.GCF.MISC.IS_LOCAL_REST_API_ENABLED,
               description: T.GCF.MISC.IS_LOCAL_REST_API_ENABLED_HINT,
+            },
+          },
+        ]
+      : []) as LimitedFormlyFieldConfig<MiscConfig>[]),
+    // Hidden on channels that self-update (store/snap builds); the value still
+    // syncs like the rest of misc config, it just has no effect there.
+    ...((isUpdateCheckPossible()
+      ? [
+          {
+            key: 'isCheckForUpdates',
+            type: 'checkbox',
+            // Display-only seed for the paths where the key can still be absent
+            // (pre-hydration initial state, partial section updates) — hydration
+            // itself per-key-merges DEFAULT_GLOBAL_CONFIG.misc in the reducer.
+            // UpdateCheckService treats missing as ON, so the checkbox must show
+            // checked. Same pattern + #7891 residual as isUseCustomWindowTitleBar.
+            defaultValue: true,
+            templateOptions: {
+              label: T.GCF.MISC.IS_CHECK_FOR_UPDATES,
+              description: T.GCF.MISC.IS_CHECK_FOR_UPDATES_HINT,
             },
           },
         ]

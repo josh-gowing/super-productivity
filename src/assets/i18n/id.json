@@ -11,12 +11,20 @@
       "MSG": "Kamu sudah menggunakan Super Productivity beberapa waktu. Siapkan sinkronisasi untuk mencadangkan datamu dan menjaganya tetap aman di semua perangkat.",
       "SETUP": "Siapkan sinkronisasi"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Unduh",
+      "MSG": "Versi baru Super Productivity tersedia ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_BACKGROUND": "Ubah Latar Belakang",
       "CHANGE_PROJECT_SETTINGS": "Ubah pengaturan proyek",
       "CHANGE_TAG_SETTINGS": "Ubah pengaturan tag"
     },
     "SKIP_SYNC_WAIT": "Lewati menunggu sinkronisasi",
+    "UPDATE_CHECK": {
+      "ERROR": "Tidak dapat memeriksa pembaruan. Silakan coba lagi nanti.",
+      "UP_TO_DATE": "Kamu sudah menggunakan versi terbaru ({{version}})."
+    },
     "UPDATE_WEB_APP": "Versi baru tersedia. Muat Versi Terbaru?"
   },
   "BL": {
@@ -213,11 +221,13 @@
     },
     "D_RATE": {
       "A_HOW": "Cara menilai",
+      "BANNER_ACTION": "Tentu!",
       "BTN_DONT_BOTHER": "Jangan tanya lagi",
       "BTN_FEEDBACK": "Beri masukan",
       "BTN_LATER": "Mungkin nanti",
       "BTN_RATE_APP_STORE": "Nilai di App Store",
       "BTN_RATE_PLAY_STORE": "Nilai di Play Store",
+      "BTN_STAR_GITHUB": "Beri kami bintang di GitHub",
       "FEEDBACK_BACK": "Kembali",
       "FEEDBACK_CONTRIBUTE": "Berkontribusi ke proyek",
       "FEEDBACK_CONTRIBUTE_DESC": "Kode, desain, terjemahan, dan lainnya",
@@ -2299,6 +2309,8 @@
       "DEFAULT_START_PAGE": "Halaman mulai default",
       "FIRST_DAY_OF_WEEK": "Hari pertama dalam seminggu",
       "HELP": "<p><strong>Tidak melihat Pemberitahuan Desktop?</strong> Untuk windows, Anda mungkin ingin memeriksa Sistem > Pemberitahuan & tindakan dan memeriksa apakah pemberitahuan yang diperlukan telah diaktifkan.</p>",
+      "IS_CHECK_FOR_UPDATES": "Otomatis memeriksa versi baru (hanya desktop)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Memeriksa rilis terbaru di GitHub sekali sehari dan menampilkan pemberitahuan saat versi yang lebih baru tersedia. Hanya permintaan web standar yang dikirim — tidak ada data pribadi yang dikirim.",
       "IS_CONFIRM_BEFORE_EXIT": "Konfirmasi sebelum keluar dari aplikasi",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Konfirmasi sebelum keluar dari aplikasi tanpa menyelesaikan hari terlebih dahulu",
       "IS_DARK_MODE": "Mode Gelap",
@@ -2505,6 +2517,7 @@
       "KEYBOARD": "Howto: Papan Ketik Tingkat Lanjut",
       "REDDIT_COMMUNITY": "Komunitas Reddit",
       "REPORT_A_PROBLEM": "Laporkan masalah",
+      "SEND_FEEDBACK": "Kirim masukan",
       "START_WELCOME": "Mulai Tur Selamat Datang",
       "SYNC": "Howto: Mengonfigurasi Sinkronisasi"
     },
@@ -2718,6 +2731,7 @@
     "ALL_TASKS_TITLE": "Metrik (semua tugas)"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Periksa pembaruan",
     "GLOBAL_SETTINGS": "Pengaturan global",
     "NO_PLUGINS_INSTALLED": "Tidak ada plugin yang terpasang saat ini",
     "PLUGINS": "Plugin",

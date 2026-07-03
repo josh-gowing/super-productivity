@@ -11,12 +11,20 @@
       "MSG": "Usi Super Productivity da un po'. Configura la sincronizzazione per eseguire il backup dei tuoi dati e tenerli al sicuro su tutti i dispositivi.",
       "SETUP": "Configura sincronizzazione"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Scarica",
+      "MSG": "È disponibile una nuova versione di Super Productivity ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_BACKGROUND": "Cambia sfondo",
       "CHANGE_PROJECT_SETTINGS": "Modifica impostazioni progetto",
       "CHANGE_TAG_SETTINGS": "Modifica impostazioni etichetta"
     },
     "SKIP_SYNC_WAIT": "Salta l'attesa per la sincronizzazione",
+    "UPDATE_CHECK": {
+      "ERROR": "Impossibile verificare la presenza di aggiornamenti. Riprova più tardi.",
+      "UP_TO_DATE": "Stai usando l'ultima versione ({{version}})."
+    },
     "UPDATE_WEB_APP": "Una nuova versione è disponibile. Vuoi caricare la nuova versione?"
   },
   "BL": {
@@ -213,11 +221,13 @@
     },
     "D_RATE": {
       "A_HOW": "Come valutare",
+      "BANNER_ACTION": "Certo!",
       "BTN_DONT_BOTHER": "Non chiedere più",
       "BTN_FEEDBACK": "Lascia un feedback",
       "BTN_LATER": "Forse più tardi",
       "BTN_RATE_APP_STORE": "Valuta su App Store",
       "BTN_RATE_PLAY_STORE": "Valuta su Play Store",
+      "BTN_STAR_GITHUB": "Lasciaci una stella su GitHub",
       "FEEDBACK_BACK": "Indietro",
       "FEEDBACK_CONTRIBUTE": "Contribuisci al progetto",
       "FEEDBACK_CONTRIBUTE_DESC": "Codice, design, traduzioni e altro",
@@ -2299,6 +2309,8 @@
       "DEFAULT_START_PAGE": "Pagina iniziale predefinita",
       "FIRST_DAY_OF_WEEK": "Primo giorno della settimana",
       "HELP": "<p><strong>Non vedi le notifiche desktop?</strong>Per Windows controlla Sistema > Notifiche & azioni e controlla se le notifiche richieste sono abilitate.</p>",
+      "IS_CHECK_FOR_UPDATES": "Controlla automaticamente le nuove versioni (solo desktop)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Controlla una volta al giorno l'ultima release su GitHub e mostra un avviso quando è disponibile una versione più recente. Viene effettuata solo una normale richiesta web — nessun dato personale viene inviato.",
       "IS_CONFIRM_BEFORE_EXIT": "Conferma prima di uscire dall'applicazione",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Conferma prima di uscire dall'app senza prima terminare il giorno",
       "IS_DARK_MODE": "Tema scuro",
@@ -2506,6 +2518,7 @@
       "KEYBOARD": "Come fare: Tastiera Avanzata",
       "REDDIT_COMMUNITY": "Comunità di Reddit",
       "REPORT_A_PROBLEM": "Segnala un problema",
+      "SEND_FEEDBACK": "Invia feedback",
       "START_WELCOME": "Avvia Tour di Benvenuto",
       "SYNC": "Howto: Configura Sincronizzazione"
     },
@@ -2718,6 +2731,7 @@
     "ALL_TASKS_TITLE": "Metriche (tutte le attività)"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Controlla aggiornamenti",
     "GLOBAL_SETTINGS": "Impostazioni globali",
     "NO_PLUGINS_INSTALLED": "Nessun plugin attualmente installato",
     "PLUGINS": "Plugin",

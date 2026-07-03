@@ -11,11 +11,19 @@
       "MSG": "Bạn đã sử dụng Super Productivity một thời gian. Hãy thiết lập đồng bộ hóa để sao lưu dữ liệu của bạn và giữ an toàn trên mọi thiết bị.",
       "SETUP": "Thiết lập đồng bộ hóa"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Tải xuống",
+      "MSG": "Đã có phiên bản mới của Super Productivity ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_PROJECT_SETTINGS": "Thay đổi cài đặt dự án",
       "CHANGE_TAG_SETTINGS": "Thay đổi cài đặt nhãn"
     },
     "SKIP_SYNC_WAIT": "Bỏ qua chờ đồng bộ",
+    "UPDATE_CHECK": {
+      "ERROR": "Không thể kiểm tra cập nhật. Vui lòng thử lại sau.",
+      "UP_TO_DATE": "Bạn đang dùng phiên bản mới nhất ({{version}})."
+    },
     "UPDATE_WEB_APP": "Có phiên bản mới. Tải phiên bản mới?"
   },
   "BL": {
@@ -230,11 +238,13 @@
     },
     "D_RATE": {
       "A_HOW": "Cách và nơi đánh giá",
+      "BANNER_ACTION": "Chắc chắn!",
       "BTN_DONT_BOTHER": "Đừng làm phiền tôi nữa",
       "BTN_FEEDBACK": "Gửi phản hồi",
       "BTN_LATER": "Để sau",
       "BTN_RATE_APP_STORE": "Đánh giá trên App Store",
       "BTN_RATE_PLAY_STORE": "Đánh giá trên Play Store",
+      "BTN_STAR_GITHUB": "Gắn sao cho chúng tôi trên GitHub",
       "FEEDBACK_BACK": "Quay lại",
       "FEEDBACK_CONTRIBUTE": "Đóng góp cho dự án",
       "FEEDBACK_CONTRIBUTE_DESC": "Mã nguồn, thiết kế, bản dịch và hơn thế nữa",
@@ -2322,6 +2332,8 @@
       "DEFAULT_START_PAGE": "Trang bắt đầu mặc định",
       "FIRST_DAY_OF_WEEK": "Ngày đầu tuần",
       "HELP": "<p><strong>Không thấy thông báo trên máy tính?</strong> Đối với Windows, bạn có thể muốn kiểm tra 'Hệ thống' > 'Thông báo & hành động' và xác minh các thông báo cần thiết đã được bật.</p>",
+      "IS_CHECK_FOR_UPDATES": "Tự động kiểm tra phiên bản mới (chỉ máy tính)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Kiểm tra bản phát hành mới nhất trên GitHub mỗi ngày một lần và hiển thị thông báo khi có phiên bản mới hơn. Chỉ gửi một yêu cầu web thông thường — không gửi bất kỳ dữ liệu cá nhân nào.",
       "IS_CONFIRM_BEFORE_EXIT": "Xác nhận trước khi thoát ứng dụng",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Xác nhận trước khi thoát ứng dụng mà không kết thúc ngày trước",
       "IS_DARK_MODE": "Chế độ tối",
@@ -2525,6 +2537,7 @@
       "KEYBOARD": "Cách: Bàn phím nâng cao",
       "REDDIT_COMMUNITY": "Cộng đồng Reddit",
       "REPORT_A_PROBLEM": "Báo cáo vấn đề",
+      "SEND_FEEDBACK": "Gửi phản hồi",
       "START_WELCOME": "Bắt đầu hướng dẫn chào mừng",
       "SYNC": "Cách: Cấu hình đồng bộ"
     },
@@ -2743,6 +2756,7 @@
     "DIALOG_TITLE": "Cập nhật hệ thống"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Kiểm tra cập nhật",
     "FAILED_TO_COPY_TO_CLIPBOARD": "Sao chép vào bảng tạm thất bại",
     "GLOBAL_SETTINGS": "Cài đặt chung",
     "NO_PLUGINS_INSTALLED": "Hiện chưa có plugin nào được cài đặt",

@@ -23,7 +23,7 @@ export class SyncPage extends BasePage {
     this.userNameInput = page.locator('.e2e-userName input');
     this.passwordInput = page.locator('.e2e-password input');
     this.syncFolderInput = page.locator('.e2e-syncFolderPath input');
-    this.saveBtn = page.locator('mat-dialog-actions button[mat-stroked-button]');
+    this.saveBtn = page.locator('mat-dialog-actions button[mat-flat-button]');
     this.syncSpinner = page.locator('.sync-btn mat-icon.spin');
     this.syncCheckIcon = page.locator('.sync-btn mat-icon.sync-state-ico');
     // Encryption-related locators
@@ -46,6 +46,12 @@ export class SyncPage extends BasePage {
     syncFolderPath: string;
     isEncryptionEnabled?: boolean;
     encryptionPassword?: string;
+    /**
+     * Set the encryption password in the setup-time "Encrypt before first
+     * upload?" dialog (instead of the post-setup Enable Encryption button), so
+     * the very first sync is encrypted. Requires `encryptionPassword`.
+     */
+    encryptAtSetup?: boolean;
   }): Promise<void> {
     // Try entire setup flow up to 2 times (dialog-level retry)
     for (let dialogAttempt = 0; dialogAttempt < 2; dialogAttempt++) {
@@ -197,11 +203,27 @@ export class SyncPage extends BasePage {
         // Save the configuration
         await this.saveBtn.click();
 
+        // A fresh file-based setup now opens the optional "Encrypt before first
+        // upload?" dialog (disableClose) before the config is persisted. Either
+        // set the password here (setup-time E2EE) or skip it so setup proceeds
+        // unencrypted.
+        if (config.encryptAtSetup && config.encryptionPassword) {
+          await this._fillSetupEncryptionDialog(config.encryptionPassword);
+        } else {
+          await this._skipSetupEncryptionDialogIfPresent();
+        }
+
         // Wait for dialog to close
         await dialog.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
         await this.page.waitForTimeout(500);
 
-        if (config.isEncryptionEnabled && config.encryptionPassword) {
+        // Legacy path: enable encryption via the post-setup Enable Encryption
+        // button (skipped when it was already set at setup above).
+        if (
+          config.isEncryptionEnabled &&
+          config.encryptionPassword &&
+          !config.encryptAtSetup
+        ) {
           await this.waitForSyncReady();
           await this.enableEncryption(config.encryptionPassword);
         }
@@ -223,6 +245,47 @@ export class SyncPage extends BasePage {
     throw new Error(
       '[setupWebdavSync] Failed to setup WebDAV sync after multiple dialog-level retries',
     );
+  }
+
+  /**
+   * Dismisses the optional "Encrypt before first upload?" setup dialog that
+   * opens on a fresh file-based setup (see DialogSyncCfgComponent.save()). Clicks
+   * Skip so setup stays unencrypted. No-op if the dialog did not appear.
+   */
+  private async _skipSetupEncryptionDialogIfPresent(): Promise<void> {
+    const skipBtn = this.page.locator('.e2e-setup-encrypt-skip');
+    if (await skipBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await skipBtn.click();
+    }
+  }
+
+  /**
+   * Fills the setup-time "Encrypt before first upload?" dialog with the given
+   * password and submits, so the config save persists the key and the first
+   * sync is encrypted. Mirrors the robust fill used by enableEncryption().
+   */
+  private async _fillSetupEncryptionDialog(password: string): Promise<void> {
+    const passwordInput = this.page.locator('.e2e-setup-encrypt-password');
+    const confirmInput = this.page.locator('.e2e-setup-encrypt-confirm-password');
+    const submitBtn = this.page.locator('.e2e-setup-encrypt-submit');
+
+    await passwordInput.waitFor({ state: 'visible', timeout: 5000 });
+    await passwordInput.click();
+    await passwordInput.fill(password);
+    await expect(passwordInput).toHaveValue(password);
+
+    // Insert into the focused confirm field — fill() has occasionally left the
+    // value on the first field in CI (see enableEncryption()).
+    await confirmInput.click();
+    await expect(confirmInput).toBeFocused();
+    await this.page.keyboard.press('ControlOrMeta+A');
+    await this.page.keyboard.insertText(password);
+    await expect(confirmInput).toHaveValue(password);
+    await expect(passwordInput).toHaveValue(password);
+
+    await expect(submitBtn).toBeEnabled({ timeout: 5000 });
+    await submitBtn.click();
+    await submitBtn.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
   }
 
   async triggerSync(): Promise<void> {

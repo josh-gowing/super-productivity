@@ -37,7 +37,9 @@ ng serve                       # web dev (or npm run startFrontend)
 npm run dist                   # production build (all platforms available locally)
 ```
 
-For SuperSync E2E (docker-compose) and the full E2E reference, see [`e2e/CLAUDE.md`](e2e/CLAUDE.md).
+**Run the full SuperSync and WebDAV E2E suites via GitHub Actions:** manually dispatch [`E2E Tests (Scheduled)`](.github/workflows/e2e-scheduled.yml) for your branch. This should be preferred over running the full suites locally; the workflow provides dedicated WebDAV and sharded SuperSync jobs. The optional `grep` input filters the SuperSync job only.
+
+For local SuperSync E2E (docker-compose) and the full E2E reference, see [`e2e/CLAUDE.md`](e2e/CLAUDE.md).
 
 ## Project rules
 

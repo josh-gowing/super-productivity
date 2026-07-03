@@ -37,6 +37,25 @@ class MockFocusModeTaskSelectorComponent {
   @Output() closed = new EventEmitter<void>();
 }
 
+// Fakes `matchMedia` so the inline-launch tests don't read the CI host's real
+// OS setting. macOS/Windows GitHub runners report `prefers-reduced-motion:
+// reduce`, which makes the component skip the rocket animation and broke the
+// release build (run 28593603470). Linux reports false, hiding the
+// non-hermetic dependency locally.
+const matchMediaFake =
+  (prefersReducedMotion: boolean) =>
+  (query: string): MediaQueryList =>
+    ({
+      matches: query.includes('prefers-reduced-motion') ? prefersReducedMotion : false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList;
+
 describe('FocusModeMainComponent', () => {
   let component: FocusModeMainComponent;
   let fixture: ComponentFixture<FocusModeMainComponent>;
@@ -440,12 +459,17 @@ describe('FocusModeMainComponent', () => {
   });
 
   describe('startSession', () => {
+    let matchMediaSpy: jasmine.Spy;
+
     beforeEach(() => {
       (mockStore.dispatch as jasmine.Spy).calls.reset();
       focusModeServiceSpy.mode.and.returnValue(FocusModeMode.Pomodoro);
       focusModeServiceSpy.focusModeConfig.and.returnValue({
         isSkipPreparation: false,
       });
+      // Motion allowed by default so the inline rocket path is exercised
+      // deterministically regardless of the host OS setting.
+      matchMediaSpy = spyOn(globalThis, 'matchMedia').and.callFake(matchMediaFake(false));
     });
 
     it('should dispatch startFocusPreparation when the prep screen is opted in', () => {
@@ -475,6 +499,22 @@ describe('FocusModeMainComponent', () => {
 
       tick(800);
 
+      expect(component.isLaunching()).toBe(false);
+      expect(mockStore.dispatch).toHaveBeenCalledWith(
+        actions.startFocusSession({ duration: 900000 }),
+      );
+    }));
+
+    it('should skip the inline rocket and dispatch immediately under reduced motion', fakeAsync(() => {
+      matchMediaSpy.and.callFake(matchMediaFake(true));
+      component.displayDuration.set(900000);
+      focusModeServiceSpy.focusModeConfig.and.returnValue({
+        isSkipPreparation: false,
+      });
+
+      component.startSession();
+
+      // No animation delay: the session starts synchronously.
       expect(component.isLaunching()).toBe(false);
       expect(mockStore.dispatch).toHaveBeenCalledWith(
         actions.startFocusSession({ duration: 900000 }),
@@ -1056,6 +1096,12 @@ describe('FocusModeMainComponent - sync with tracking (issue #6009)', () => {
   });
 
   describe('startSession', () => {
+    beforeEach(() => {
+      // Deterministic motion setting so the inline rocket path is exercised
+      // regardless of the host OS (macOS/Windows CI report reduced motion).
+      spyOn(globalThis, 'matchMedia').and.callFake(matchMediaFake(false));
+    });
+
     it('should open task selector when no task is selected', () => {
       focusModeConfigSignal.set({
         isSkipPreparation: false,

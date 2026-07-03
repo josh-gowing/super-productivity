@@ -12,6 +12,7 @@ import { MatIcon } from '@angular/material/icon';
 import {
   CONTRIBUTING_URL,
   DISCUSSIONS_URL,
+  MAINTAINER_EMAIL,
   RateDialogResult,
   buildFeedbackMailto,
   getPrimaryCta,
@@ -37,11 +38,18 @@ export class DialogPleaseRateComponent {
     inject<MatDialogRef<DialogPleaseRateComponent, RateDialogResult>>(MatDialogRef);
 
   protected readonly T = T;
+  // No sentiment gate: the store CTA is shown to everyone (store-policy safe),
+  // with a separate, decoupled path to feedback. On play-flavor Android the
+  // native review card is used instead and this dialog isn't shown at all.
   protected readonly view = signal<'main' | 'feedback'>('main');
   protected readonly cta = getPrimaryCta();
   protected readonly mailtoUrl = buildFeedbackMailto();
   protected readonly discussionsUrl = DISCUSSIONS_URL;
   protected readonly contributingUrl = CONTRIBUTING_URL;
+  // Shown as selectable text under the email option so the channel isn't a dead
+  // end when no mail client is registered (common on Linux/web) and the mailto:
+  // link silently does nothing.
+  protected readonly maintainerEmail = MAINTAINER_EMAIL;
 
   protected showFeedback(): void {
     this.view.set('feedback');

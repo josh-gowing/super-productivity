@@ -2,9 +2,4 @@ For all current downloads, package links, and platform-specific notes: [check th
 
 ### Fixes
 
-- Keep the task list anchored when scheduling from the context menu (#8533)
-- Hide lock-timeout notifications during automatic syncs (#7562, #8537)
-
-### Translations
-
-- Updated Turkish translations (#8539)
+- Fixed dangling tag references during sync archiving by scanning all tags (#8710).

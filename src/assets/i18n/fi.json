@@ -11,10 +11,18 @@
       "MSG": "Olet käyttänyt Super Productivitya jo jonkin aikaa. Määritä synkronointi varmuuskopioidaksesi tietosi ja pitääksesi ne turvassa kaikilla laitteilla.",
       "SETUP": "Määritä synkronointi"
     },
+    "B_UPDATE_AVAILABLE": {
+      "DOWNLOAD": "Lataa",
+      "MSG": "Uusi versio Super Productivitysta on saatavilla ({{version}})."
+    },
     "CONTEXT_MENU": {
       "CHANGE_BACKGROUND": "Vaihda taustakuva"
     },
     "SKIP_SYNC_WAIT": "Ohita synkronoinnin odotus",
+    "UPDATE_CHECK": {
+      "ERROR": "Päivitysten tarkistus epäonnistui. Yritä myöhemmin uudelleen.",
+      "UP_TO_DATE": "Käytössäsi on uusin versio ({{version}})."
+    },
     "UPDATE_WEB_APP": "Uusi versio saatavilla. Lataa uusi versio?"
   },
   "BL": {
@@ -182,11 +190,13 @@
     },
     "D_RATE": {
       "A_HOW": "Miten arvostella",
+      "BANNER_ACTION": "Toki!",
       "BTN_DONT_BOTHER": "Älä kysy uudelleen",
       "BTN_FEEDBACK": "Anna palautetta",
       "BTN_LATER": "Ehkä myöhemmin",
       "BTN_RATE_APP_STORE": "Arvostele App Storessa",
       "BTN_RATE_PLAY_STORE": "Arvostele Play Storessa",
+      "BTN_STAR_GITHUB": "Tähditä meidät GitHubissa",
       "FEEDBACK_BACK": "Takaisin",
       "FEEDBACK_CONTRIBUTE": "Osallistu projektiin",
       "FEEDBACK_CONTRIBUTE_DESC": "Koodi, suunnittelu, käännökset ja muuta",
@@ -2155,6 +2165,8 @@
       "DEFAULT_START_PAGE": "Oletus aloitussivu",
       "FIRST_DAY_OF_WEEK": "Viikon ensimmäinen päivä",
       "HELP": "<p><strong>Etkö näe työpöytäilmoituksia?</strong> Windowsissa saatat haluta tarkistaa Järjestelmä > Ilmoitukset ja toiminnot ja tarkistaa, onko tarvittavat ilmoitukset otettu käyttöön.</p>",
+      "IS_CHECK_FOR_UPDATES": "Tarkista uudet versiot automaattisesti (vain työpöytäsovellus)",
+      "IS_CHECK_FOR_UPDATES_HINT": "Tarkistaa uusimman julkaisun GitHubista kerran päivässä ja näyttää ilmoituksen, kun uudempi versio on saatavilla. Vain tavallinen verkkopyyntö tehdään — henkilötietoja ei lähetetä.",
       "IS_CONFIRM_BEFORE_EXIT": "Vahvista ennen sovelluksen poistumista",
       "IS_CONFIRM_BEFORE_EXIT_WITHOUT_FINISH_DAY": "Vahvista ennen sovelluksen poistumista tallentamatta päivää ensin",
       "IS_DARK_MODE": "Tumma tila",
@@ -2347,6 +2359,7 @@
       "KEYBOARD": "Ohje: Kehittynyt näppäimistö",
       "REDDIT_COMMUNITY": "Reddit-yhteisö",
       "REPORT_A_PROBLEM": "Ilmoita ongelmasta",
+      "SEND_FEEDBACK": "Lähetä palautetta",
       "START_WELCOME": "Aloita tervetuloa-kierros",
       "SYNC": "Ohje: Määritä synkronointi"
     },
@@ -2557,6 +2570,7 @@
     "ALL_TASKS_TITLE": "Mittarit (kaikki tehtävät)"
   },
   "PS": {
+    "CHECK_FOR_UPDATES": "Tarkista päivitykset",
     "GLOBAL_SETTINGS": "Globaalit asetukset",
     "NO_PLUGINS_INSTALLED": "Laajennuksia ei ole asennettuna tällä hetkellä",
     "PLUGINS": "Laajennukset",
