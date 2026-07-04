@@ -70,7 +70,13 @@ describe('findLwwContentConflicts', () => {
       payloadKeyFor,
     );
 
-    expect(result).toEqual([{ entityId: 'task-1', discardedFields: ['title'] }]);
+    expect(result).toEqual([
+      {
+        entityId: 'task-1',
+        discardedFields: ['title'],
+        discardedTitle: 'My local title',
+      },
+    ]);
   });
 
   it('classifies a discarded scheduling edit as routine (no content conflict)', () => {
@@ -216,7 +222,9 @@ describe('findLwwContentConflicts', () => {
       payloadKeyFor,
     );
 
-    expect(result).toEqual([{ entityId: 'task-1', discardedFields: ['title'] }]);
+    expect(result).toEqual([
+      { entityId: 'task-1', discardedFields: ['title'], discardedTitle: 'local' },
+    ]);
   });
 
   it('merges distinct discarded content fields for the same task', () => {
@@ -236,6 +244,80 @@ describe('findLwwContentConflicts', () => {
       payloadKeyFor,
     );
 
-    expect(result).toEqual([{ entityId: 'task-1', discardedFields: ['title', 'notes'] }]);
+    expect(result).toEqual([
+      {
+        entityId: 'task-1',
+        discardedFields: ['title', 'notes'],
+        discardedTitle: 'local',
+      },
+    ]);
+  });
+
+  it('omits discardedTitle when the discarded edit did not touch the title', () => {
+    const result = findLwwContentConflicts(
+      [
+        resolution(
+          'remote',
+          [wrappedUpdate({ notes: 'lost note' })],
+          [wrappedUpdate({ dueDay: null })],
+        ),
+      ],
+      payloadKeyFor,
+    );
+
+    expect(result).toEqual([{ entityId: 'task-1', discardedFields: ['notes'] }]);
+    expect('discardedTitle' in result[0]).toBe(false);
+  });
+
+  it('ignores empty/whitespace discarded titles, keeping the real one', () => {
+    // A concurrent discarded title-clear must not blank out a genuine discarded
+    // rename in the same batch.
+    const result = findLwwContentConflicts(
+      [
+        resolution(
+          'remote',
+          [wrappedUpdate({ title: '   ' })],
+          [wrappedUpdate({ dueDay: null })],
+        ),
+        resolution(
+          'remote',
+          [wrappedUpdate({ title: 'real discarded title' })],
+          [wrappedUpdate({ notes: 'x' })],
+        ),
+      ],
+      payloadKeyFor,
+    );
+
+    expect(result).toEqual([
+      {
+        entityId: 'task-1',
+        discardedFields: ['title'],
+        discardedTitle: 'real discarded title',
+      },
+    ]);
+  });
+
+  it('surfaces the LAST discarded title (final rename), not the first', () => {
+    // User renamed the task twice offline (A -> B), both discarded on a remote
+    // win. The final value B is what they will look for.
+    const result = findLwwContentConflicts(
+      [
+        resolution(
+          'remote',
+          [wrappedUpdate({ title: 'rename A' })],
+          [wrappedUpdate({ dueDay: null })],
+        ),
+        resolution(
+          'remote',
+          [wrappedUpdate({ title: 'rename B' })],
+          [wrappedUpdate({ notes: 'x' })],
+        ),
+      ],
+      payloadKeyFor,
+    );
+
+    expect(result).toEqual([
+      { entityId: 'task-1', discardedFields: ['title'], discardedTitle: 'rename B' },
+    ]);
   });
 });

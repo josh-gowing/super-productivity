@@ -102,7 +102,8 @@
     "ANDROID": {
       "FOREGROUND_SERVICE_START_FAILED_FOCUS": "Android blocked the persistent focus mode notification. The timer continues in the app, but background alerts may be unavailable. Check notification permission and battery/background restrictions.",
       "FOREGROUND_SERVICE_START_FAILED_TRACKING": "Android blocked the persistent time tracking notification. Time is still tracked in the app, but background recovery may be unavailable. Check notification permission and battery/background restrictions.",
-      "OPEN_NOTIFICATION_SETTINGS": "Open settings"
+      "OPEN_NOTIFICATION_SETTINGS": "Open settings",
+      "WIDGET_TASKS_UPDATED": "{{count}} task(s) updated from widget"
     },
     "ATTACHMENT": {
       "LOCAL_FILE_UNAVAILABLE": "This attachment is only available on the device where it was added.",
@@ -1204,6 +1205,7 @@
       },
       "B": {
         "CONTENT_CONFLICT_RESOLVED": "Conflicting edits to {{taskList}} were auto-resolved by keeping the most recent version. Older edits may have been discarded — please double-check.",
+        "CONTENT_CONFLICT_TITLE_CHANGE": "{{kept}} (discarded: {{discarded}})",
         "CONTENT_CONFLICT_UNTITLED": "Untitled task"
       },
       "BTN_RESTORE_FROM_HISTORY": "Restore from History",
@@ -1841,6 +1843,7 @@
         "SCHEDULED_FOR": "Scheduled for",
         "SNOOZE": "Snooze",
         "SNOOZE_FOR": "Snooze {{m}}m",
+        "SNOOZE_FOR_SHORT": "{{m}}m",
         "START": "Start",
         "TASK_REMINDERS": "Task Reminders",
         "UNSCHEDULE": "Unschedule",

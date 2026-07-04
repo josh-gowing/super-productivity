@@ -7,7 +7,10 @@ import { Store } from '@ngrx/store';
 
 import { PageTitleComponent } from './page-title.component';
 import { WorkContextService } from '../../../features/work-context/work-context.service';
-import { WorkContextType } from '../../../features/work-context/work-context.model';
+import {
+  WorkContext,
+  WorkContextType,
+} from '../../../features/work-context/work-context.model';
 import { TaskViewCustomizerService } from '../../../features/task-view-customizer/task-view-customizer.service';
 import { GlobalConfigService } from '../../../features/config/global-config.service';
 import { PlainspaceShareService } from '../../../features/issue/providers/plainspace/plainspace-share.service';
@@ -17,8 +20,13 @@ describe('PageTitleComponent', () => {
   let routerEvents$: Subject<NavigationEnd>;
   let routerStub: { events: Subject<NavigationEnd>; url: string };
   let typeAndId$: BehaviorSubject<{ activeId: string; activeType: WorkContextType }>;
+  let activeWorkContext$: BehaviorSubject<WorkContext>;
   let isShared$: BehaviorSubject<boolean>;
   let openSpy: jasmine.Spy;
+
+  // `color` is a Tag-only field not surfaced on WorkContext's type.
+  const wc = (o: Partial<WorkContext> & { color?: string | null }): WorkContext =>
+    o as WorkContext;
 
   const setupComponent = (initialUrl: string): PageTitleComponent => {
     routerStub.url = initialUrl;
@@ -32,6 +40,15 @@ describe('PageTitleComponent', () => {
       activeId: 'TODAY',
       activeType: WorkContextType.TAG,
     });
+    activeWorkContext$ = new BehaviorSubject<WorkContext>(
+      wc({
+        id: 'TODAY',
+        title: 'Today',
+        type: WorkContextType.TAG,
+        icon: 'wb_sunny',
+        theme: { primary: '#abcdef' } as WorkContext['theme'],
+      }),
+    );
     isShared$ = new BehaviorSubject(false);
     openSpy = jasmine
       .createSpy('openProjectOnPlainspace')
@@ -49,6 +66,7 @@ describe('PageTitleComponent', () => {
           useValue: {
             activeWorkContextTitle$: of('Today'),
             activeWorkContextTypeAndId$: typeAndId$,
+            activeWorkContext$,
           },
         },
         // Ignores the selector arg — the switchMap only calls select() for a
@@ -178,6 +196,73 @@ describe('PageTitleComponent', () => {
       isShared$.next(true);
       const c = setupComponent('/project/p1/tasks');
       expect(c.isSharedOnPlainspace()).toBe(true);
+    });
+  });
+
+  describe('context icon', () => {
+    it('uses the tag icon and tag color when set', () => {
+      activeWorkContext$.next(
+        wc({
+          id: 't1',
+          title: 'Tag',
+          type: WorkContextType.TAG,
+          icon: 'star',
+          color: '#ff0000',
+          theme: { primary: '#00ff00' } as WorkContext['theme'],
+        }),
+      );
+      const c = setupComponent('/tag/t1/tasks');
+      expect(c.contextIcon()).toBe('star');
+      // Tag color wins over theme primary.
+      expect(c.contextIconColor()).toBe('#ff0000');
+      expect(c.isContextEmojiIcon()).toBe(false);
+    });
+
+    it('falls back to the theme primary for a tag without its own color', () => {
+      activeWorkContext$.next(
+        wc({
+          id: 't2',
+          title: 'Tag',
+          type: WorkContextType.TAG,
+          icon: null,
+          color: null,
+          theme: { primary: '#00ff00' } as WorkContext['theme'],
+        }),
+      );
+      const c = setupComponent('/tag/t2/tasks');
+      // Default tag icon.
+      expect(c.contextIcon()).toBe('label');
+      expect(c.contextIconColor()).toBe('#00ff00');
+    });
+
+    it('uses the project default icon and theme primary', () => {
+      activeWorkContext$.next(
+        wc({
+          id: 'p1',
+          title: 'Project',
+          type: WorkContextType.PROJECT,
+          icon: null,
+          theme: { primary: '#123456' } as WorkContext['theme'],
+        }),
+      );
+      const c = setupComponent('/project/p1/tasks');
+      expect(c.contextIcon()).toBe('list_alt');
+      expect(c.contextIconColor()).toBe('#123456');
+    });
+
+    it('detects an emoji icon', () => {
+      activeWorkContext$.next(
+        wc({
+          id: 'p2',
+          title: 'Project',
+          type: WorkContextType.PROJECT,
+          icon: '🚀',
+          theme: { primary: '#123456' } as WorkContext['theme'],
+        }),
+      );
+      const c = setupComponent('/project/p2/tasks');
+      expect(c.contextIcon()).toBe('🚀');
+      expect(c.isContextEmojiIcon()).toBe(true);
     });
   });
 

@@ -15,6 +15,8 @@ import { filter, map, switchMap } from 'rxjs/operators';
 import { Store } from '@ngrx/store';
 import { WorkContextService } from '../../../features/work-context/work-context.service';
 import { WorkContextType } from '../../../features/work-context/work-context.model';
+import { DEFAULT_PROJECT_ICON } from '../../../features/project/project.const';
+import { isSingleEmoji } from '../../../util/extract-first-emoji';
 import { selectIsProjectSharedOnPlainspace } from '../../../features/issue/store/issue-provider.selectors';
 import { PlainspaceShareService } from '../../../features/issue/providers/plainspace/plainspace-share.service';
 import { TaskViewCustomizerService } from '../../../features/task-view-customizer/task-view-customizer.service';
@@ -46,7 +48,15 @@ import { KeyboardConfig } from '@sp/keyboard-config';
         mat-ripple
         routerLink="/active/tasks"
       >
-        {{ displayTitle() }}
+        @if (!isSpecialSection() && activeWorkContext()) {
+          <mat-icon
+            class="page-title-icon"
+            [class.page-title-icon--emoji]="isContextEmojiIcon()"
+            [style.color]="contextIconColor()"
+            >{{ contextIcon() }}</mat-icon
+          >
+        }
+        <span class="page-title-text">{{ displayTitle() }}</span>
       </div>
       @if (!isXxxs() && !isSpecialSection()) {
         <div class="page-title-actions">
@@ -57,7 +67,7 @@ import { KeyboardConfig } from '@sp/keyboard-config';
               [attr.aria-label]="T.PLAINSPACE.OPEN_IN_PLAINSPACE | translate"
               mat-icon-button
             >
-              <mat-icon>open_in_new</mat-icon>
+              <mat-icon svgIcon="plainspace"></mat-icon>
             </button>
           }
           <button
@@ -106,10 +116,11 @@ import { KeyboardConfig } from '@sp/keyboard-config';
       }
 
       .page-title {
+        display: flex;
+        align-items: center;
+        gap: var(--s-half);
         font-size: 18px;
         overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
         max-width: 100%;
         cursor: pointer;
         border-radius: var(--card-border-radius);
@@ -122,6 +133,38 @@ import { KeyboardConfig } from '@sp/keyboard-config';
 
         &:focus {
           outline: none;
+        }
+      }
+
+      .page-title-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+
+      /* Mirrors the side-nav work-context icon so the same project/tag reads
+         identically in the nav and the header (icon value, emoji handling and
+         theme/tag color). See nav-item.component. */
+      .page-title-icon {
+        flex: 0 0 auto;
+        font-size: 20px;
+        width: 20px;
+        height: 20px;
+        line-height: 20px;
+        overflow: visible;
+
+        &.page-title-icon--emoji {
+          font-family:
+            'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+          font-size: 18px;
+          font-feature-settings: normal;
+          font-variation-settings: normal;
+          text-transform: none;
+          letter-spacing: normal;
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+          text-rendering: optimizeLegibility;
         }
       }
 
@@ -201,6 +244,9 @@ export class PageTitleComponent {
   activeWorkContextTypeAndId = toSignal(
     this._workContextService.activeWorkContextTypeAndId$,
   );
+  // Full active context — drives the header icon (icon value, theme/tag color,
+  // emoji detection). Mirrors the side-nav treatment for visual consistency.
+  activeWorkContext = toSignal(this._workContextService.activeWorkContext$);
 
   // Whether the active project is shared on Plainspace — drives the visible
   // "Open in Plainspace" header button. Uses the same shared-detection selector
@@ -251,6 +297,36 @@ export class PageTitleComponent {
   displayTitle = computed(() => {
     const key = this._routeTitleKey();
     return key ? this._translateService.instant(key) : this.activeWorkContextTitle();
+  });
+
+  // Icon shown next to the title, defaulting the same way the nav does
+  // (`list_alt` for projects, `label` for tags) when none is set.
+  contextIcon = computed<string>(() => {
+    const wc = this.activeWorkContext();
+    if (!wc) {
+      return DEFAULT_PROJECT_ICON;
+    }
+    const defaultIcon = wc.type === WorkContextType.TAG ? 'label' : DEFAULT_PROJECT_ICON;
+    return wc.icon || defaultIcon;
+  });
+
+  isContextEmojiIcon = computed<boolean>(() => isSingleEmoji(this.contextIcon()));
+
+  // Same color rule as the side nav: tag color wins, else the theme primary;
+  // null (inherit) when neither is set. Emoji ignore the color anyway.
+  contextIconColor = computed<string | null>(() => {
+    const wc = this.activeWorkContext();
+    if (!wc) {
+      return null;
+    }
+    if (wc.type === WorkContextType.TAG) {
+      // `color` lives on Tag only; WorkContext doesn't surface it in its type.
+      const tagColor = (wc as { color?: string | null }).color;
+      if (tagColor) {
+        return tagColor;
+      }
+    }
+    return wc.theme?.primary || null;
   });
 
   private _isXxxs$ = this._breakpointObserver.observe('(max-width: 350px)');

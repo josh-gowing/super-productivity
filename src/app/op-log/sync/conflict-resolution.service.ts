@@ -575,12 +575,12 @@ export class ConflictResolutionService {
     contentConflicts: LwwContentConflict[],
   ): Promise<void> {
     const MAX_NAMED = 3;
-    const titles = await Promise.all(
+    const labels = await Promise.all(
       contentConflicts
         .slice(0, MAX_NAMED)
-        .map((conflict) => this._getContentConflictTitle(conflict.entityId)),
+        .map((conflict) => this._buildContentConflictLabel(conflict)),
     );
-    const named = titles.map((title) => `"${escapeHtml(title)}"`).join(', ');
+    const named = labels.join(', ');
     const taskList = contentConflicts.length > MAX_NAMED ? `${named} …` : named;
 
     this.bannerService.open({
@@ -589,6 +589,42 @@ export class ConflictResolutionService {
       msg: T.F.SYNC.B.CONTENT_CONFLICT_RESOLVED,
       translateParams: { taskList },
     });
+  }
+
+  /**
+   * Builds the display label for one conflicted task inside the banner's task
+   * list. Normally just the (escaped, quoted) current title. When the discarded
+   * edit changed the title, the current title is the *kept* value — useless for
+   * double-checking on its own — so we also name the discarded title: `"kept"
+   * (discarded: "dropped")`. Both values are escaped (rendered via `[innerHTML]`,
+   * see `_showContentConflictBanner`).
+   */
+  private async _buildContentConflictLabel(
+    conflict: LwwContentConflict,
+  ): Promise<string> {
+    const keptTitle = await this._getContentConflictTitle(conflict.entityId);
+    const kept = `"${escapeHtml(keptTitle)}"`;
+    const discardedTitle = conflict.discardedTitle?.trim();
+    // Skip the annotation when nothing meaningful to add: no title was
+    // discarded, or the discarded title equals the current one. The equality
+    // case covers two situations, both correctly silenced: (a) both devices set
+    // the same title; (b) a title edit lost to a concurrent *other-field* remote
+    // win — the winner didn't touch the title, so the current state still shows
+    // the (now-rejected) local title, which equals the discarded value. In both
+    // an annotation would read `"X" (discarded: "X")` — pure noise, no divergence
+    // to point at — so we render just the current title. (For the common
+    // title-vs-title case the current title IS the winning value and differs
+    // from the discarded one, so the annotation shows.)
+    if (!discardedTitle || discardedTitle === keptTitle.trim()) {
+      return kept;
+    }
+    const discarded = `"${escapeHtml(discardedTitle)}"`;
+    return (
+      this.translateService?.instant(T.F.SYNC.B.CONTENT_CONFLICT_TITLE_CHANGE, {
+        kept,
+        discarded,
+      }) ?? `${kept} (discarded: ${discarded})`
+    );
   }
 
   private async _getContentConflictTitle(entityId: string): Promise<string> {
