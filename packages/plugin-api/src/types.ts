@@ -4,6 +4,7 @@
 import {
   IssueProviderManifestConfig,
   IssueProviderPluginDefinition,
+  PluginHttpOptions,
 } from './issue-provider-types';
 
 export interface PluginMenuEntryCfg {
@@ -121,6 +122,28 @@ export interface PluginManifest {
   description?: string;
   hooks: Hooks[];
   permissions: string[];
+  /**
+   * Exact hostnames this plugin is allowed to reach via `PluginAPI.request`
+   * (e.g. `"api.example.com"`). Host-only, exact match — no wildcards, and the
+   * port is ignored. Enforced by the host: a `request` to any host not listed
+   * here is rejected. If omitted or empty, `PluginAPI.request` is disabled for
+   * this plugin (fail-closed). Surfaced to the user at install so the plugin's
+   * outbound network reach is reviewable. Does not affect issue-provider HTTP.
+   *
+   * Requires the `"http"` capability: `PluginAPI.request` only works if the
+   * plugin ALSO declares `"http"` in `permissions`. Network egress is an
+   * explicit, opt-in capability (like `nodeExecution`) — declaring hosts alone
+   * does not grant it.
+   *
+   * Redirects: on web/desktop, `PluginAPI.request` refuses to follow HTTP
+   * redirects (executes via `fetch` with `redirect: 'error'`), so a declared
+   * host cannot 3xx the request onward to a non-allowlisted or private/metadata
+   * host. On native (Capacitor), the platform HTTP layer still follows redirects
+   * — that hop is not re-checked; treat native redirect-following as a known
+   * limitation. DNS rebinding (hostname matched, not the resolved IP) also
+   * remains out of scope.
+   */
+  allowedHosts?: string[];
   iFrame?: boolean;
   isSkipMenuEntry?: boolean;
   type?: 'standard' | 'issueProvider';
@@ -489,6 +512,11 @@ export interface PluginAppState {
   readonly globalConfig: Readonly<Record<string, unknown>>;
 }
 
+export interface PluginRequestOptions extends PluginHttpOptions {
+  method?: string;
+  body?: unknown;
+}
+
 export interface PluginAPI {
   cfg: PluginBaseCfg;
   readonly Hooks: typeof PluginHooks;
@@ -708,6 +736,16 @@ export interface PluginAPI {
   getSecret(key: string): Promise<string | null>;
 
   deleteSecret(key: string): Promise<void>;
+
+  /**
+   * Issue a host-side HTTP request through Super Productivity's guarded HTTP bridge.
+   * Plugins must provide any Authorization headers themselves; the host only executes
+   * the request and applies existing URL/private-network protections.
+   *
+   * Requires both `"http"` in `permissions` (the capability) and the target host
+   * in `allowedHosts` (the scope). Missing either is rejected (fail-closed).
+   */
+  request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
 
   // download file
   downloadFile(filename: string, data: string): Promise<void>;

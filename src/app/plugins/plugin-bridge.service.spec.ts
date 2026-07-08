@@ -437,6 +437,140 @@ describe('PluginBridgeService - iframe task selection methods', () => {
   });
 });
 
+describe('PluginBridgeService - request()', () => {
+  let service: PluginBridgeService;
+  let pluginHttpService: jasmine.SpyObj<PluginHttpService>;
+  let requestSpy: jasmine.Spy;
+
+  beforeEach(() => {
+    requestSpy = jasmine.createSpy('request').and.resolveTo({ ok: true });
+    pluginHttpService = jasmine.createSpyObj<PluginHttpService>('PluginHttpService', [
+      'createHttpHelper',
+    ]);
+    pluginHttpService.createHttpHelper.and.returnValue({
+      request: requestSpy,
+    } as any);
+
+    TestBed.configureTestingModule({
+      providers: [
+        PluginBridgeService,
+        provideMockStore(),
+        { provide: SnackService, useValue: {} },
+        { provide: NotifyService, useValue: {} },
+        { provide: MatDialog, useValue: {} },
+        { provide: PluginHooksService, useValue: {} },
+        { provide: TaskService, useValue: {} },
+        { provide: WorkContextService, useValue: { activeWorkContext$: of(null) } },
+        { provide: ProjectService, useValue: {} },
+        { provide: TagService, useValue: {} },
+        { provide: PluginUserPersistenceService, useValue: {} },
+        { provide: PluginConfigService, useValue: {} },
+        { provide: TaskArchiveService, useValue: {} },
+        { provide: Router, useValue: {} },
+        { provide: TranslateService, useValue: {} },
+        { provide: SyncWrapperService, useValue: {} },
+        { provide: GlobalThemeService, useValue: {} },
+        { provide: PluginIssueProviderRegistryService, useValue: {} },
+        { provide: IssueSyncAdapterRegistryService, useValue: {} },
+        { provide: PluginHttpService, useValue: pluginHttpService },
+        { provide: DataInitService, useValue: {} },
+      ],
+    });
+
+    service = TestBed.inject(PluginBridgeService);
+  });
+
+  const boundFor = (
+    allowedHosts?: string[],
+    permissions: string[] = ['http'],
+  ): { request: <T>(url: string, options?: unknown) => Promise<T> } =>
+    service.createBoundMethods('test-plugin', {
+      allowedHosts,
+      permissions,
+    } as any) as any;
+
+  it('routes generic host HTTP requests through PluginHttpService without host auth injection', async () => {
+    const bound = boundFor(['example.test']);
+    const options = {
+      method: 'POST',
+      headers: { Authorization: 'Bearer plugin-token' },
+      body: { hours: '1.50' },
+      timeout: 15000,
+    };
+
+    const result = await bound.request<{ ok: boolean }>(
+      'https://example.test/timesheet/entries.json',
+      options,
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(pluginHttpService.createHttpHelper).toHaveBeenCalledTimes(1);
+    const getHeaders = pluginHttpService.createHttpHelper.calls.mostRecent().args[0] as
+      | (() => Record<string, string>)
+      | (() => Promise<Record<string, string>>);
+    await expectAsync(Promise.resolve(getHeaders())).toBeResolvedTo({});
+    expect(requestSpy).toHaveBeenCalledOnceWith(
+      'POST',
+      'https://example.test/timesheet/entries.json',
+      { hours: '1.50' },
+      {
+        params: undefined,
+        headers: { Authorization: 'Bearer plugin-token' },
+        timeout: 15000,
+        responseType: undefined,
+      },
+    );
+  });
+
+  it('is fail-closed: rejects when the plugin lacks the "http" permission', async () => {
+    // Host is declared, but the http capability is not granted -> blocked before
+    // the host check (network egress is an explicit, opt-in capability).
+    const bound = boundFor(['example.test'], []);
+    await expectAsync(bound.request('https://example.test/x')).toBeRejectedWithError(
+      /does not declare the "http" permission/,
+    );
+    expect(pluginHttpService.createHttpHelper).not.toHaveBeenCalled();
+  });
+
+  it('rejects a request to a host not in the manifest allowedHosts', async () => {
+    const bound = boundFor(['example.test']);
+    await expectAsync(bound.request('https://evil.test/steal')).toBeRejectedWithError(
+      /not in the plugin's declared allowedHosts/,
+    );
+    expect(pluginHttpService.createHttpHelper).not.toHaveBeenCalled();
+  });
+
+  it('is fail-closed: rejects when the plugin declares no allowedHosts', async () => {
+    const bound = boundFor(undefined);
+    await expectAsync(bound.request('https://example.test/x')).toBeRejectedWithError(
+      /declares no "allowedHosts"/,
+    );
+    expect(pluginHttpService.createHttpHelper).not.toHaveBeenCalled();
+  });
+
+  it('is fail-closed: rejects when allowedHosts is empty', async () => {
+    const bound = boundFor([]);
+    await expectAsync(bound.request('https://example.test/x')).toBeRejectedWithError(
+      /declares no "allowedHosts"/,
+    );
+    expect(pluginHttpService.createHttpHelper).not.toHaveBeenCalled();
+  });
+
+  it('matches hosts case-insensitively and tolerates a trailing dot', async () => {
+    const bound = boundFor(['Example.Test']);
+    await bound.request('https://example.test./x');
+    expect(requestSpy).toHaveBeenCalled();
+  });
+
+  it('resolves the real host from userinfo tricks (blocks https://allowed@evil)', async () => {
+    const bound = boundFor(['example.test']);
+    await expectAsync(
+      bound.request('https://example.test@evil.test/x'),
+    ).toBeRejectedWithError(/"evil\.test" is blocked/);
+    expect(pluginHttpService.createHttpHelper).not.toHaveBeenCalled();
+  });
+});
+
 describe('PluginBridgeService - openDialog', () => {
   let service: PluginBridgeService;
   let matDialog: jasmine.SpyObj<MatDialog>;

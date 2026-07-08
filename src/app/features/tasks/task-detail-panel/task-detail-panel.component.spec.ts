@@ -410,7 +410,9 @@ describe('TaskDetailPanelComponent notes target does not auto-edit', () => {
     const focusItemSpy = spyOn(component, 'focusItem');
 
     fixture.detectChanges(); // ngAfterViewInit subscribes; target emits after delay(50)
-    tick(50);
+    // Advance beyond the delay instead of relying on tasks scheduled for the
+    // exact same virtual timestamp.
+    tick(100);
 
     // The notes section is focused...
     expect(focusItemSpy).toHaveBeenCalledWith(noteItem);

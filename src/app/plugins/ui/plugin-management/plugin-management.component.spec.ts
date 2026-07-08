@@ -10,7 +10,7 @@ import { PluginBridgeService } from '../../plugin-bridge.service';
 import { PluginCacheService } from '../../plugin-cache.service';
 import { PluginConfigService } from '../../plugin-config.service';
 import { PluginMetaPersistenceService } from '../../plugin-meta-persistence.service';
-import { PluginManifest } from '../../plugin-api.model';
+import { PluginManifest, PluginHooks } from '../../plugin-api.model';
 import { PluginService } from '../../plugin.service';
 import { PluginManagementComponent } from './plugin-management.component';
 
@@ -158,6 +158,58 @@ describe('PluginManagementComponent', () => {
         isEnabled: true,
       }),
     ).toBe(false);
+  });
+
+  it('surfaces allowedHosts (with count) only when the "http" capability is declared', () => {
+    const plugin = {
+      manifest: {
+        ...baseManifest,
+        permissions: ['http'],
+        allowedHosts: ['api.example.com', 'auth.example.com'],
+        hooks: [PluginHooks.TASK_COMPLETE],
+      },
+      loaded: true,
+      isEnabled: true,
+    };
+
+    expect(component.getNetworkReachHosts(plugin)).toEqual([
+      'api.example.com',
+      'auth.example.com',
+    ]);
+    // instant() echoes the key here (no translations loaded); the allowedHosts part
+    // appears with its count, between permissions and hooks.
+    expect(component.getPermissionsHooksTitle(plugin)).toBe(
+      'PLUGINS.PERMISSIONS (1) / PLUGINS.ALLOWED_HOSTS (2) / PLUGINS.HOOKS (1)',
+    );
+  });
+
+  it('hides allowedHosts when the plugin lacks the "http" capability (bridge would reject request)', () => {
+    const plugin = {
+      manifest: {
+        ...baseManifest,
+        permissions: ['nodeExecution'],
+        allowedHosts: ['api.example.com', 'auth.example.com'],
+        hooks: [PluginHooks.TASK_COMPLETE],
+      },
+      loaded: true,
+      isEnabled: true,
+    };
+
+    expect(component.getNetworkReachHosts(plugin)).toEqual([]);
+    // No "ALLOWED_HOSTS" segment — network reach is not advertised without "http".
+    expect(component.getPermissionsHooksTitle(plugin)).toBe(
+      'PLUGINS.PERMISSIONS (1) / PLUGINS.HOOKS (1)',
+    );
+  });
+
+  it('omits allowedHosts from the title when none are declared', () => {
+    const title = component.getPermissionsHooksTitle({
+      manifest: { ...baseManifest, hooks: [PluginHooks.TASK_COMPLETE] },
+      loaded: true,
+      isEnabled: true,
+    });
+
+    expect(title).toBe('PLUGINS.HOOKS (1)');
   });
 
   it('navigates to the work view and opens the issue panel', async () => {

@@ -157,7 +157,24 @@ captured on the next tick.
   **off**. The factory must hand **both** services' adapters the **same**
   `SqliteDb` (one SQLite file, all tables) — mirroring how they share one IDB
   connection today. Needs B1 (the native `SqliteDb` wrapper) first.
-- **Size:** tiny token flip (init change done). **Risk:** gated by the flag.
+- ✅ **Shared-connection safety (prerequisite for the flip, landed).** With both
+  services on one `SqliteDb`, concurrent op-log operations (capture append vs.
+  archive write vs. compaction) would otherwise interleave `BEGIN`s on the one
+  connection — SQLite has no nested transactions, so a second `BEGIN` throws and
+  a bare statement issued mid-transaction joins (and rolls back with) the foreign
+  transaction. `SqliteOpLogAdapter` now funnels every entry point through a FIFO
+  queue keyed to the **shared connection** (`WeakMap<SqliteDb, …>`, not the
+  adapter instance) — so the op-log store's and archive store's separate adapters
+  over the one `SqliteDb` serialize against **each other**, and a transaction is
+  exclusive on the connection for its whole `BEGIN…COMMIT`. The port contract
+  documents the invariant; contract tests cover concurrent transactions on both
+  engines **and** the two-adapters-one-connection topology. (Closes the H-6/#8746
+  rollout blocker.) Residual: the re-entrancy precondition (a `transaction()`
+  callback must use its `tx` handle, never re-enter an adapter method, or it
+  deadlocks on the queue) is documented but unenforced — a lint rule is the right
+  future guard (a runtime flag can't tell a re-entrant call from a legal
+  concurrent one).
+- **Size:** tiny token flip (init + serialization done). **Risk:** gated by the flag.
 
 ---
 

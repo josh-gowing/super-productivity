@@ -36,6 +36,7 @@ import {
   PluginAppState,
   PluginManifest,
   PluginNote,
+  PluginRequestOptions,
   PluginSimpleCounterFull,
   PluginTaskRepeatCfg,
   SnackCfg,
@@ -275,6 +276,7 @@ export class PluginBridgeService implements OnDestroy {
     setSecret: (key: string, value: string) => Promise<void>;
     getSecret: (key: string) => Promise<string | null>;
     deleteSecret: (key: string) => Promise<void>;
+    request: <T = unknown>(url: string, options?: PluginRequestOptions) => Promise<T>;
     translate: (key: string, params?: Record<string, string | number>) => string;
     formatDate: (date: Date | string | number, format: PluginDateFormat) => string;
     getCurrentLanguage: () => string;
@@ -376,6 +378,8 @@ export class PluginBridgeService implements OnDestroy {
         this._pluginSecretService.getSecret(pluginId, key),
       deleteSecret: (key: string): Promise<void> =>
         this._pluginSecretService.deleteSecret(pluginId, key),
+      request: <T = unknown>(url: string, options?: PluginRequestOptions): Promise<T> =>
+        this.request<T>(url, options, manifest?.allowedHosts, manifest?.permissions),
 
       // i18n
       translate: (key: string, params?: Record<string, string | number>): string =>
@@ -499,6 +503,78 @@ export class PluginBridgeService implements OnDestroy {
 
   async clearOAuthTokens(pluginId: string): Promise<void> {
     return this._pluginOAuthBridge.clearOAuthTokens(pluginId);
+  }
+
+  async request<T = unknown>(
+    url: string,
+    options?: PluginRequestOptions,
+    allowedHosts?: string[],
+    permissions?: string[],
+  ): Promise<T> {
+    // Enforce the plugin's declared capability + host allowlist (both fail-closed)
+    // BEFORE the shared HTTP layer applies its URL/private-network (SSRF) guards.
+    this._assertRequestAllowed(url, allowedHosts, permissions);
+
+    const { method = 'GET', body } = options ?? {};
+    const requestOptions = options
+      ? {
+          params: options.params,
+          headers: options.headers,
+          timeout: options.timeout,
+          responseType: options.responseType,
+        }
+      : undefined;
+
+    return this._pluginHttpService
+      .createHttpHelper(() => ({}), { blockRedirects: true })
+      .request<T>(method, url, body, requestOptions);
+  }
+
+  /**
+   * Gate `PluginAPI.request`. Two fail-closed checks, both host-enforced (never
+   * in plugin code):
+   *   1. Capability — the plugin must declare `"permissions": ["http"]`. Network
+   *      egress is an opt-in capability, like `nodeExecution`; it is never an
+   *      implicit grant from merely listing hosts.
+   *   2. Host allowlist — the exact hostnames in `allowedHosts`. Host-only,
+   *      case-insensitive, trailing-dot tolerant, port-agnostic exact match.
+   * Either check failing (or an empty/undefined value) blocks the request.
+   */
+  private _assertRequestAllowed(
+    url: string,
+    allowedHosts?: string[],
+    permissions?: string[],
+  ): void {
+    if (!(permissions ?? []).includes('http')) {
+      throw new Error(
+        '[PluginHttp] PluginAPI.request is blocked: this plugin does not declare the "http" permission. Add "http" to the manifest "permissions".',
+      );
+    }
+    let hostname: string;
+    try {
+      // URL parsing resolves userinfo tricks (https://ok.com@evil.com -> evil.com).
+      // NOTE: unlike PluginHttpService._validateUrl we deliberately do NOT strip
+      // IPv6 brackets here. validatePluginManifest rejects any allowedHosts entry
+      // containing ':' (so no IPv6 literal can ever be declared), which means a
+      // bracketed IPv6 request hostname can never match an allowed entry and is
+      // always fail-closed. Keeping the normalizations distinct on purpose.
+      hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+    } catch {
+      throw new Error(`[PluginHttp] Invalid URL for PluginAPI.request: ${url}`);
+    }
+    const allowed = (allowedHosts ?? [])
+      .map((h) => h.trim().toLowerCase().replace(/\.$/, ''))
+      .filter((h) => h.length > 0);
+    if (allowed.length === 0) {
+      throw new Error(
+        '[PluginHttp] PluginAPI.request is blocked: this plugin declares no "allowedHosts" in its manifest. Declare the exact host(s) it needs.',
+      );
+    }
+    if (!allowed.includes(hostname)) {
+      throw new Error(
+        `[PluginHttp] PluginAPI.request to "${hostname}" is blocked: not in the plugin's declared allowedHosts (${allowed.join(', ')}).`,
+      );
+    }
   }
 
   async restoreAndCheckOAuthTokens(pluginId: string): Promise<boolean> {

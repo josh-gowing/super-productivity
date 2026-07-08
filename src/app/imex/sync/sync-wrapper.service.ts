@@ -1242,10 +1242,12 @@ export class SyncWrapperService {
           lastUpdateAction: `${error.unsyncedCount} local changes pending`,
           revMap: {},
           crossModelVersion: 1,
+          // Op-log (NoLastSync) conflicts do not carry a last-synced timestamp, so
+          // this is always null here; the dialog renders it as "Never"/"-".
           lastSyncedUpdate: null,
           metaRev: null,
           vectorClock: localClock,
-          lastSyncedVectorClock: null,
+          lastSyncedVectorClock: error.lastSyncedVectorClock ?? null,
         },
       };
 

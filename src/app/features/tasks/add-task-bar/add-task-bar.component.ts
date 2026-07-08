@@ -18,14 +18,13 @@ import { takeUntilDestroyed, toObservable, toSignal } from '@angular/core/rxjs-i
 import { FormsModule } from '@angular/forms';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { MentionModule } from '../../../ui/mentions';
-import { MatInput } from '@angular/material/input';
 import { MatIconButton } from '@angular/material/button';
 import { MatIcon } from '@angular/material/icon';
 import { MatTooltip } from '@angular/material/tooltip';
-import { AsyncPipe } from '@angular/common';
+import { AsyncPipe, NgTemplateOutlet } from '@angular/common';
 import { LS } from '../../../core/persistence/storage-keys.const';
 import { blendInOutAnimation } from 'src/app/ui/animations/blend-in-out.ani';
-import { fadeAnimation } from '../../../ui/animations/fade.ani';
+import { expandFadeAnimation } from '../../../ui/animations/expand.ani';
 import { TaskCopy, TaskReminderOptionId } from '../task.model';
 import { TaskService } from '../task.service';
 import { WorkContextService } from '../../work-context/work-context.service';
@@ -91,16 +90,16 @@ import { SelectOptionRowComponent } from '../../../ui/select-option-row/select-o
   templateUrl: './add-task-bar.component.html',
   styleUrls: ['./add-task-bar.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  animations: [blendInOutAnimation, fadeAnimation],
+  animations: [blendInOutAnimation, expandFadeAnimation],
   standalone: true,
   imports: [
     FormsModule,
     CdkTextareaAutosize,
-    MatInput,
     MatIconButton,
     MatIcon,
     MatTooltip,
     AsyncPipe,
+    NgTemplateOutlet,
     MentionModule,
     MatAutocomplete,
     MatAutocompleteTrigger,
@@ -183,16 +182,12 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
   currentProject = computed(() =>
     this.projects().find((p) => p.id === this.stateService.state().projectId),
   );
-  nrOfRightBtns = computed(() => {
-    let count = 2;
-    if (this.stateService.inputTxt().length > 0) {
-      count++;
-    }
-    if (this.currentProject()?.isEnableBacklog) {
-      count++;
-    }
-    return count;
-  });
+  // The submit (+) button is always in the layout so its space is reserved; it
+  // is only visually shown while composing a task (hidden via visibility, not
+  // display, so the input width never jumps).
+  isSubmitVisible = computed(
+    () => !this.isSearchMode() && this.stateService.inputTxt().length > 0,
+  );
 
   defaultProject$ = combineLatest([
     this.projects$,
@@ -270,7 +265,7 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
   mentionCfg$ = inject(MentionConfigService).mentionConfig$;
 
   // View children
-  inputEl = viewChild<ElementRef>('inputEl');
+  inputEl = viewChild<ElementRef<HTMLTextAreaElement>>('inputEl');
   noteEl = viewChild<ElementRef<HTMLTextAreaElement>>('noteEl');
   taskAutoCompleteEl = viewChild<MatAutocomplete>('taskAutoCompleteEl');
   actionsComponent = viewChild(AddTaskBarActionsComponent);
@@ -680,8 +675,14 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
 
   // UI event handlers
   onInputChange(event: Event): void {
-    const target = event.target as HTMLInputElement;
-    const value = target.value;
+    const target = event.target as HTMLTextAreaElement;
+    // The title is single-line even though the field is now an auto-growing
+    // textarea (so long titles wrap). Enter submits, but a paste can still carry
+    // newlines — collapse them to spaces before they reach the parsed state.
+    const value = target.value.replace(/[\r\n]+/g, ' ');
+    if (value !== target.value) {
+      target.value = value;
+    }
     this.stateService.updateInputTxt(value);
   }
 
@@ -737,6 +738,11 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
 
     // Handle Escape key
     if (event.key === 'Escape') {
+      // Progressive dismissal: if the task-suggestion panel is open, let Material
+      // close it first instead of tearing down the whole bar.
+      if (this.taskAutoCompleteEl()?.isOpen) {
+        return;
+      }
       event.preventDefault();
       this.closed.emit();
       return;
@@ -771,25 +777,34 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
   }
 
   private _handleCtrlShortcut(event: KeyboardEvent): void {
-    const shortcutMap: Record<string, () => void> = {
-      ['1']: () => this.toggleIsAddToBottom(),
-      ['2']: () => this.toggleSearchMode(),
-      ['3']: () => this._callActionMethod('openProjectMenu'),
-      ['4']: () => this._callActionMethod('openScheduleDialog'),
-      ['5']: () => this._callActionMethod('openTagsMenu'),
-      ['6']: () => this._callActionMethod('openEstimateMenu'),
-      ['7']: () => this._callActionMethod('openRepeatMenu'),
-      ['8']: () => this._callActionMethod('openDeadlineDialog'),
+    // Numbers 1-3 match the left-to-right order of the icon toggles below the
+    // input (search · note · add-to-top/bottom); these are local and harmless to
+    // let bubble.
+    const localToggles: Record<string, () => void> = {
+      ['1']: () => this.toggleSearchMode(),
+      ['2']: () => this.toggleNote(),
+      ['3']: () => this.toggleIsAddToBottom(),
+    };
+    // 4-9 open the action chips' menus/dialogs; stop propagation so the keystroke
+    // doesn't also reach a global handler.
+    const actionShortcuts: Record<string, () => void> = {
+      ['4']: () => this._callActionMethod('openProjectMenu'),
+      ['5']: () => this._callActionMethod('openScheduleDialog'),
+      ['6']: () => this._callActionMethod('openTagsMenu'),
+      ['7']: () => this._callActionMethod('openEstimateMenu'),
+      ['8']: () => this._callActionMethod('openRepeatMenu'),
+      ['9']: () => this._callActionMethod('openDeadlineDialog'),
     };
 
-    const action = shortcutMap[event.key];
-    if (action) {
+    const localToggle = localToggles[event.key];
+    const actionShortcut = actionShortcuts[event.key];
+    if (localToggle) {
       event.preventDefault();
-      // Add stopPropagation for action menu shortcuts (3-8)
-      if (['3', '4', '5', '6', '7', '8'].includes(event.key)) {
-        event.stopPropagation();
-      }
-      action();
+      localToggle();
+    } else if (actionShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      actionShortcut();
     }
   }
 
@@ -918,6 +933,11 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
   }
 
   toggleNote(): void {
+    // The note field only renders in create mode, so the toggle (incl. its
+    // Ctrl+2 shortcut) is a no-op while searching.
+    if (this.isSearchMode()) {
+      return;
+    }
     const willExpand = !this.stateService.isNoteExpanded();
     this.stateService.isNoteExpanded.set(willExpand);
     if (willExpand) {
@@ -928,6 +948,11 @@ export class AddTaskBarComponent implements AfterViewInit, OnInit, OnDestroy {
   }
 
   expandNote(): void {
+    // The note field only renders in create mode; guard like toggleNote() so
+    // Ctrl+Enter while searching cannot leave isNoteExpanded stuck on.
+    if (this.isSearchMode()) {
+      return;
+    }
     this.stateService.isNoteExpanded.set(true);
     this._focusNote();
   }

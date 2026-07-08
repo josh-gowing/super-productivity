@@ -74,6 +74,13 @@ export class LocalDataConflictError extends Error {
     public readonly unsyncedCount: number,
     public readonly remoteSnapshotState: Record<string, unknown>,
     public readonly remoteVectorClock?: Record<string, number>,
+    // The client's vector clock as of its last successful sync. Used by the
+    // conflict dialog as an APPROXIMATE baseline for the per-client
+    // changes-since-last-sync delta. Note: compaction can fold still-unsynced ops
+    // into this clock, so the delta can under-count actual local changes — it is a
+    // display heuristic, not an exact "unsynced" figure. `null` for genuinely-fresh
+    // clients that have never synced (SPAP-7).
+    public readonly lastSyncedVectorClock?: Record<string, number> | null,
   ) {
     super(`Local data conflict: ${unsyncedCount} unsynced changes would be lost`);
   }

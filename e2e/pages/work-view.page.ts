@@ -12,8 +12,10 @@ export class WorkViewPage extends BasePage {
   constructor(page: Page, testPrefix: string = '') {
     super(page, testPrefix);
 
-    this.addTaskGlobalInput = page.locator('add-task-bar.global input');
-    this.addBtn = page.locator('.switch-add-to-btn');
+    this.addTaskGlobalInput = page.locator('add-task-bar.global .main-input');
+    // The add-task submit button's stable e2e hook (`.switch-add-to-btn` now
+    // belongs to the add-to-backlog toggle, a different control).
+    this.addBtn = page.locator('.e2e-add-task-submit');
     this.taskList = page.locator('task-list').first();
     this.backdrop = page.locator('.backdrop');
     this.routerWrapper = page.locator('.route-wrapper, main, [role="main"]').first();
