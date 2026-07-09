@@ -181,7 +181,6 @@ describe('UpdateCheckService', () => {
     let banner: Banner;
 
     beforeEach(async () => {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
       await checkAndRespond({ tag_name: 'v99.0.0' });
       banner = bannerService.open.calls.mostRecent().args[0];
     });

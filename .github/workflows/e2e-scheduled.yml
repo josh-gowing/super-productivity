@@ -25,6 +25,7 @@ on:
       - 'e2e/tests/**'
       - 'docker-compose.yaml'
       - 'docker-compose.supersync.yaml'
+      - 'packages/sync-providers/**'
       - 'packages/sync-core/**'
       - 'packages/super-sync-server/**'
       - 'packages/shared-schema/**'
