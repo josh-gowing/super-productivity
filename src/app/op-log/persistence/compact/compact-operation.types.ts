@@ -65,6 +65,6 @@ export interface CompactOperationLogEntry {
   source: 'local' | 'remote';
   syncedAt?: number;
   rejectedAt?: number;
-  applicationStatus?: 'pending' | 'applied' | 'failed';
+  applicationStatus?: 'pending' | 'archive_pending' | 'applied' | 'failed';
   retryCount?: number;
 }

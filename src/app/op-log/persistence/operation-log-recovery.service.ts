@@ -8,7 +8,6 @@ import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { Operation, OpType, ActionType } from '../core/operation.types';
 import { SINGLETON_ENTITY_ID } from '../core/entity-registry';
 import { uuidv7 } from '../../util/uuid-v7';
-import { PENDING_OPERATION_EXPIRY_MS } from '../core/operation-log.const';
 import { OpLog } from '../../core/log';
 import { AppDataComplete } from '../model/model-config';
 import { ValidateStateService } from '../validation/validate-state.service';
@@ -136,52 +135,36 @@ export class OperationLogRecoveryService {
 
   /**
    * Recovers from pending remote ops that were stored but not applied (crash recovery).
-   * These ops are in the log and will be replayed during normal hydration, so we just
-   * need to mark them as applied to prevent them appearing as orphaned.
-   *
-   * Operations pending for longer than PENDING_OPERATION_EXPIRY_MS are considered
-   * superseded (likely due to data corruption or repeated failures) and are rejected
-   * instead of replayed.
+   * These ops are replayed through reducers during normal hydration, but a crash may
+   * have happened before their archive side effects completed. Move them to the
+   * 'archive_pending' checkpoint so hydration retries archive work without
+   * double-applying reducers; sync stays blocked until that recovery succeeds.
    */
   async recoverPendingRemoteOps(): Promise<void> {
+    const recoveredLegacyFailures =
+      await this.opLogStore.recoverLegacyTerminalRemoteFailures();
+    if (recoveredLegacyFailures > 0) {
+      OpLog.warn(
+        `OperationLogRecoveryService: Re-quarantined ${recoveredLegacyFailures} legacy terminal remote failure(s).`,
+      );
+    }
     const pendingOps = await this.opLogStore.getPendingRemoteOps();
 
     if (pendingOps.length === 0) {
       return;
     }
 
-    const now = Date.now();
-    const validOps = pendingOps.filter(
-      (e) => now - e.appliedAt < PENDING_OPERATION_EXPIRY_MS,
+    // Reducers are replayed status-blind during hydration; archive work is
+    // retried after. Age is irrelevant — every crash-interrupted op lands in
+    // the same quarantine, and retryCount stays untouched (no attempt was made).
+    const seqs = pendingOps.map((e) => e.seq);
+    await this.opLogStore.markReducersCommittedAndMergeClocks(
+      seqs,
+      pendingOps.map((entry) => entry.op),
     );
-    const expiredOps = pendingOps.filter(
-      (e) => now - e.appliedAt >= PENDING_OPERATION_EXPIRY_MS,
-    );
-
-    // Reject expired ops - they've been pending too long
-    if (expiredOps.length > 0) {
-      const expiredIds = expiredOps.map((e) => e.op.id);
-      await this.opLogStore.markRejected(expiredIds);
-      OpLog.warn(
-        `OperationLogRecoveryService: Rejected ${expiredOps.length} expired pending remote ops ` +
-          `(pending > ${PENDING_OPERATION_EXPIRY_MS / (60 * 60 * 1000)}h). ` +
-          `Oldest was ${Math.round((now - Math.min(...expiredOps.map((e) => e.appliedAt))) / (60 * 60 * 1000))}h old.`,
-      );
-    }
-
-    // Mark valid ops as applied - they'll be replayed during normal hydration
-    if (validOps.length > 0) {
-      const seqs = validOps.map((e) => e.seq);
-      await this.opLogStore.markApplied(seqs);
-      OpLog.warn(
-        `OperationLogRecoveryService: Found ${validOps.length} pending remote ops from previous crash. ` +
-          `Marking as applied (they will be replayed during hydration).`,
-      );
-    }
-
-    OpLog.normal(
-      `OperationLogRecoveryService: Recovered ${validOps.length} pending remote ops, ` +
-        `rejected ${expiredOps.length} expired ops.`,
+    OpLog.warn(
+      `OperationLogRecoveryService: Found ${pendingOps.length} pending remote ops from previous crash. ` +
+        'Quarantined their archive work (reducers will replay during hydration).',
     );
   }
 

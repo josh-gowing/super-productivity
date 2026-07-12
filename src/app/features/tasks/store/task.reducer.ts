@@ -52,6 +52,7 @@ import {
 } from '../../time-tracking/store/time-tracking.actions';
 import { TaskLog } from '../../../core/log';
 import { devError } from '../../../util/dev-error';
+import { moveValidIdsToFront } from '../util/move-valid-ids-to-front';
 
 export { taskAdapter };
 
@@ -141,6 +142,7 @@ const reorderSubTask = (
     TaskLog.err(`Parent task ${parentId} not found`);
     return state;
   }
+
   const parentSubTaskIds = parentTask.subTaskIds;
 
   // Check if the subtask is actually in the parent's subtask list
@@ -699,25 +701,31 @@ export const taskReducer = createReducer<TaskState>(
   }),
 
   on(TaskSharedActions.removeTasksFromTodayTag, (state, { taskIds }) => {
-    const validTaskIds = taskIds.filter((id) => !!state.entities[id]);
-    if (validTaskIds.length !== taskIds.length) {
-      devError(
-        `removeTasksFromTodayTag: ${taskIds.length - validTaskIds.length} orphan ID(s) filtered`,
-      );
+    // we do this to maintain the order of tasks when they are moved to overdue
+    const { ids, invalidCount } = moveValidIdsToFront(
+      state.ids as string[],
+      taskIds,
+      (id) => !!state.entities[id],
+    );
+    if (invalidCount > 0) {
+      devError(`removeTasksFromTodayTag: ${invalidCount} orphan ID(s) filtered`);
     }
     return {
       ...state,
-      // we do this to maintain the order of tasks when they are moved to overdue
-      ids: [...validTaskIds, ...state.ids.filter((id) => !taskIds.includes(id))],
+      ids,
     };
   }),
 
   // Same reordering for the non-persistent variant (#6992)
   on(TaskSharedActions.localRemoveOverdueFromToday, (state, { taskIds }) => {
-    const validTaskIds = taskIds.filter((id) => !!state.entities[id]);
+    const { ids } = moveValidIdsToFront(
+      state.ids as string[],
+      taskIds,
+      (id) => !!state.entities[id],
+    );
     return {
       ...state,
-      ids: [...validTaskIds, ...state.ids.filter((id) => !taskIds.includes(id))],
+      ids,
     };
   }),
 );

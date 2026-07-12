@@ -6,7 +6,13 @@ import { Logger } from '../logger';
 import { getAuthUser } from '../middleware';
 import { getSyncService } from './sync.service';
 import { getWsConnectionService } from './services/websocket-connection.service';
-import { SYNC_ERROR_CODES, UploadResult } from './sync.types';
+import {
+  DUPLICATE_OP_SELECT,
+  Operation,
+  SYNC_ERROR_CODES,
+  UploadResult,
+} from './sync.types';
+import { isSameIncomingOperation } from './conflict';
 import {
   isSingleTokenGzipEncoding,
   parseCompressedJsonBody,
@@ -29,6 +35,7 @@ import {
   sendQuotaExceededReply,
   sendSyncImportExistsReply,
 } from './sync.routes.quota';
+import { createSnapshotRequestFingerprint } from './services/request-deduplication.service';
 
 export const uploadSnapshotHandler = async (
   req: FastifyRequest<{ Body: unknown }>,
@@ -99,15 +106,47 @@ export const uploadSnapshotHandler = async (
       requestId,
     } = snapshotRequest;
     const syncService = getSyncService();
+    // Lazy + memoized: fingerprinting stable-stringifies + SHA-256-hashes the
+    // full (possibly multi-MB plaintext) snapshot state. It must not run
+    // before the pre-quota gate below, and first-time requests never need it —
+    // the dedup check only invokes it when an entry for this requestId exists
+    // (a genuine retry).
+    let memoizedFingerprint: string | undefined;
+    const getRequestFingerprint = (): string =>
+      (memoizedFingerprint ??= createSnapshotRequestFingerprint({
+        state,
+        clientId,
+        reason,
+        vectorClock,
+        schemaVersion,
+        isPayloadEncrypted,
+        syncImportReason,
+        opId,
+        isCleanSlate,
+        snapshotOpType,
+      }));
 
     if (requestId) {
-      const cachedResponse = syncService.checkSnapshotRequestDedup(userId, requestId);
+      const cachedResponse = syncService.checkSnapshotRequestDedup(
+        userId,
+        requestId,
+        getRequestFingerprint,
+      );
       if (cachedResponse) {
         Logger.info(
           `[user:${userId}] Returning cached snapshot result for request ${requestId}`,
         );
         return reply.send(cachedResponse);
       }
+    }
+
+    // Defense in depth: the contract superRefine already requires opId for
+    // clean-slate uploads, but the destructive wipe below must never depend on
+    // a schema in another package staying strict. Keep the invariant local.
+    if (isCleanSlate && !opId) {
+      return reply.code(400).send({
+        error: 'opId is required for clean-slate snapshot idempotency',
+      });
     }
 
     // Cheap pre-quota gate BEFORE prepareSnapshotCache so quota-exhausted
@@ -135,6 +174,13 @@ export const uploadSnapshotHandler = async (
           });
         }
       }
+    }
+
+    // Pin the fingerprint BEFORE processing mutates anything, but AFTER the
+    // pre-quota gate above so quota-exhausted clients cannot burn CPU on the
+    // full-state hash.
+    if (requestId) {
+      getRequestFingerprint();
     }
 
     // Reject duplicate SYNC_IMPORT before we acquire the per-user lock — a
@@ -191,6 +237,57 @@ export const uploadSnapshotHandler = async (
     const result = await syncService.runWithStorageUsageLock<UploadResult | null>(
       userId,
       async () => {
+        // Clean-slate uploads are destructive, so request-cache deduplication is
+        // not sufficient: it is process-local and expires. The client-supplied
+        // opId is the durable idempotency key. Check it inside the per-user lock
+        // before quota work or uploadOps can delete any existing data.
+        if (isCleanSlate && opId) {
+          const existingCleanSlateOp = await prisma.operation.findUnique({
+            where: { id: opId },
+            select: { ...DUPLICATE_OP_SELECT, serverSeq: true },
+          });
+          if (existingCleanSlateOp) {
+            const existingOperation: Operation = {
+              id: existingCleanSlateOp.id,
+              clientId: existingCleanSlateOp.clientId,
+              actionType: existingCleanSlateOp.actionType,
+              opType: existingCleanSlateOp.opType as Operation['opType'],
+              entityType: existingCleanSlateOp.entityType,
+              entityId: existingCleanSlateOp.entityId ?? undefined,
+              entityIds: existingCleanSlateOp.entityIds,
+              payload: existingCleanSlateOp.payload,
+              vectorClock: existingCleanSlateOp.vectorClock as Operation['vectorClock'],
+              timestamp: op.timestamp,
+              schemaVersion: existingCleanSlateOp.schemaVersion,
+              isPayloadEncrypted: existingCleanSlateOp.isPayloadEncrypted,
+              syncImportReason: existingCleanSlateOp.syncImportReason ?? undefined,
+            };
+            const isExactRetry =
+              existingCleanSlateOp.userId === userId &&
+              (existingCleanSlateOp.opType === 'SYNC_IMPORT' ||
+                existingCleanSlateOp.opType === 'BACKUP_IMPORT' ||
+                existingCleanSlateOp.opType === 'REPAIR') &&
+              isSameIncomingOperation(existingOperation, op, 0, 0);
+            if (isExactRetry) {
+              Logger.info(
+                `[user:${userId}] Idempotent clean-slate retry from client ${clientId} ` +
+                  `for existing op seq=${existingCleanSlateOp.serverSeq}`,
+              );
+              return {
+                opId,
+                accepted: true,
+                serverSeq: existingCleanSlateOp.serverSeq,
+              };
+            }
+            return {
+              opId,
+              accepted: false,
+              error: 'Operation ID already belongs to a different operation',
+              errorCode: SYNC_ERROR_CODES.INVALID_OP_ID,
+            };
+          }
+        }
+
         if (reason === 'initial' && !isCleanSlate) {
           const existingImport = await findExistingSyncImport(userId, opId);
 
@@ -340,7 +437,12 @@ export const uploadSnapshotHandler = async (
       finalResult.errorCode !== SYNC_ERROR_CODES.DUPLICATE_OPERATION &&
       finalResult.errorCode !== SYNC_ERROR_CODES.INTERNAL_ERROR
     ) {
-      syncService.cacheSnapshotRequestResult(userId, requestId, responseBody);
+      syncService.cacheSnapshotRequestResult(
+        userId,
+        requestId,
+        responseBody,
+        getRequestFingerprint(),
+      );
     }
 
     return reply.send(responseBody);

@@ -7,6 +7,11 @@ import type { Operation } from '../operation.types';
 export interface ApplyOperationsResult {
   /** Operations that were successfully applied. */
   appliedOps: Operation[];
+  /**
+   * First op whose archive side effect threw. Its reducer effect (and that of
+   * every op after it) DID commit — the bulk dispatch is all-or-nothing and
+   * precedes archive handling — so retry paths must pass `skipReducerDispatch`.
+   */
   failedOp?: {
     op: Operation;
     error: Error;
@@ -27,4 +32,20 @@ export interface ApplyOperationsOptions {
    * their vector clocks.
    */
   skipDeferredLocalActions?: boolean;
+
+  /**
+   * When true, skip the bulk reducer dispatch and run only the archive side
+   * effects. Used to retry ops marked `failed`, whose reducer effects already
+   * committed (see `ApplyOperationsResult.failedOp`): re-dispatching would
+   * double-apply additive reducers such as syncTimeSpent or
+   * increaseSimpleCounterCounterToday.
+   */
+  skipReducerDispatch?: boolean;
+
+  /**
+   * Called after the bulk reducer dispatch commits and before archive side effects.
+   * Remote apply uses this to persist its reducer/archive checkpoint and merge the
+   * causal frontier before deferred local actions can be written.
+   */
+  onReducersCommitted?: (ops: Operation[]) => Promise<void>;
 }

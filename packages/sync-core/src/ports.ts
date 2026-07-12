@@ -20,7 +20,28 @@ export interface SyncActionLike {
 export interface OperationApplyPort<TOperation extends Operation<string> = Operation> {
   applyOperations(
     ops: TOperation[],
-    options?: ApplyOperationsOptions,
+    options?: ApplyOperationsOptions & {
+      /** Persist reducer-commit bookkeeping before post-dispatch side effects start. */
+      onReducersCommitted?: (ops: TOperation[]) => Promise<void>;
+    },
+  ): Promise<ApplyOperationsResult<TOperation>>;
+}
+
+/**
+ * Operation applier contract for crash-safe remote application.
+ *
+ * Unlike the general-purpose {@link OperationApplyPort}, remote application
+ * requires the reducer-commit callback: the coordinator must durably checkpoint
+ * the whole reducer batch before archive side effects can begin.
+ */
+export interface ReducerCommitAwareOperationApplyPort<
+  TOperation extends Operation<string> = Operation,
+> {
+  applyOperations(
+    ops: TOperation[],
+    options: ApplyOperationsOptions & {
+      onReducersCommitted: (ops: TOperation[]) => Promise<void>;
+    },
   ): Promise<ApplyOperationsResult<TOperation>>;
 }
 

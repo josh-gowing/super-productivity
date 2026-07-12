@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => {
     getCachedSnapshotBytes: vi.fn(),
     markStorageNeedsReconcile: vi.fn(),
     getMaxClockDriftMs: vi.fn(),
+    filterValidOpsForQuota: vi.fn(),
+    getPrevalidatedPayloadBytes: vi.fn(),
   };
   const prisma = {
     operation: {
@@ -68,7 +70,7 @@ vi.mock('../src/db', () => ({
 import { syncRoutes } from '../src/sync/sync.routes';
 import { SYNC_ERROR_CODES } from '../src/sync/sync.types';
 import { computeOpStorageBytes } from '../src/sync/sync.const';
-import { SUPER_SYNC_MAX_OPS_PER_UPLOAD } from '@sp/shared-schema';
+import { CURRENT_SCHEMA_VERSION, SUPER_SYNC_MAX_OPS_PER_UPLOAD } from '@sp/shared-schema';
 
 const gzipAsync = promisify(zlib.gzip);
 
@@ -93,6 +95,7 @@ const createStoredDuplicateOp = (op: ReturnType<typeof createOp>) => ({
   opType: op.opType,
   entityType: op.entityType,
   entityId: op.entityId,
+  entityIds: [],
   payload: op.payload,
   vectorClock: op.vectorClock,
   schemaVersion: op.schemaVersion,
@@ -114,6 +117,7 @@ describe('Sync compressed body routes', () => {
     mocks.syncService.checkOpsRequestDedup.mockReturnValue(null);
     mocks.syncService.checkSnapshotRequestDedup.mockReturnValue(null);
     mocks.syncService.getMaxClockDriftMs.mockReturnValue(60_000);
+    mocks.syncService.filterValidOpsForQuota.mockImplementation((ops: unknown[]) => ops);
     mocks.syncService.checkStorageQuota.mockResolvedValue({
       allowed: true,
       currentUsage: 0,
@@ -166,6 +170,7 @@ describe('Sync compressed body routes', () => {
     });
     mocks.syncService.getCachedSnapshotBytes.mockResolvedValue(0);
     mocks.prisma.operation.findFirst.mockResolvedValue(null);
+    mocks.prisma.operation.findUnique.mockReset().mockResolvedValue(null);
     mocks.prisma.operation.findMany.mockResolvedValue([]);
 
     app = Fastify();
@@ -209,6 +214,117 @@ describe('Sync compressed body routes', () => {
     expect(typeof quotaCall[1]).toBe('number');
     expect(quotaCall[1]).toBeGreaterThan(0);
     expect(quotaCall[1]).toBeLessThan(payloadSize);
+  });
+
+  it('should pass mixed schema versions to per-operation validation', async () => {
+    const clientId = 'mixed-schema-client';
+    const validOp = createOp(clientId);
+    const invalidOp = {
+      ...createOp(clientId),
+      id: 'invalid-schema-op',
+      schemaVersion: 101,
+    };
+    mocks.syncService.uploadOps.mockResolvedValueOnce([
+      { opId: validOp.id, accepted: true, serverSeq: 1 },
+      {
+        opId: invalidOp.id,
+        accepted: false,
+        error: 'Invalid schema version: 101',
+        errorCode: SYNC_ERROR_CODES.INVALID_SCHEMA_VERSION,
+      },
+    ]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sync/ops',
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        'content-type': 'application/json',
+      },
+      payload: { ops: [validOp, invalidOp], clientId },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().results).toEqual([
+      expect.objectContaining({ opId: validOp.id, accepted: true }),
+      expect.objectContaining({
+        opId: invalidOp.id,
+        accepted: false,
+        errorCode: SYNC_ERROR_CODES.INVALID_SCHEMA_VERSION,
+      }),
+    ]);
+    expect(mocks.syncService.uploadOps).toHaveBeenCalledWith(
+      1,
+      clientId,
+      [validOp, invalidOp],
+      undefined,
+      new Set(),
+    );
+  });
+
+  it('should not let an invalid large sibling poison a near-quota upload', async () => {
+    const clientId = 'invalid-sibling-quota-client';
+    const validOp = {
+      ...createOp(clientId),
+      id: 'valid-near-quota-op',
+      payload: { title: 'Valid task' },
+    };
+    const invalidLargeOp = {
+      ...createOp(clientId),
+      id: 'invalid-large-op',
+      opType: 'UNKNOWN',
+      payload: { data: 'x'.repeat(10_000) },
+    };
+    const validBytes = computeOpStorageBytes(validOp).bytes;
+    mocks.syncService.filterValidOpsForQuota.mockReturnValueOnce([validOp]);
+    mocks.syncService.checkStorageQuota.mockImplementation(
+      async (_userId: number, additionalBytes: number) => ({
+        allowed: additionalBytes <= validBytes,
+        currentUsage: 1_000_000 - validBytes,
+        quota: 1_000_000,
+      }),
+    );
+    mocks.syncService.uploadOps.mockResolvedValueOnce([
+      { opId: validOp.id, accepted: true, serverSeq: 1 },
+      {
+        opId: invalidLargeOp.id,
+        accepted: false,
+        error: 'Invalid opType',
+        errorCode: SYNC_ERROR_CODES.INVALID_OP_TYPE,
+      },
+    ]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sync/ops',
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        'content-type': 'application/json',
+      },
+      payload: { ops: [validOp, invalidLargeOp], clientId },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().results).toEqual([
+      expect.objectContaining({ opId: validOp.id, accepted: true }),
+      expect.objectContaining({
+        opId: invalidLargeOp.id,
+        accepted: false,
+        errorCode: SYNC_ERROR_CODES.INVALID_OP_TYPE,
+      }),
+    ]);
+    expect(mocks.syncService.filterValidOpsForQuota).toHaveBeenCalledWith(
+      [validOp, invalidLargeOp],
+      clientId,
+    );
+    expect(mocks.syncService.checkStorageQuota).toHaveBeenCalledWith(1, validBytes);
+    expect(mocks.syncService.uploadOps).toHaveBeenCalledWith(
+      1,
+      clientId,
+      [validOp, invalidLargeOp],
+      undefined,
+      new Set(),
+    );
   });
 
   it('should subtract exact already-stored duplicate ops from the ops quota gate', async () => {
@@ -257,13 +373,16 @@ describe('Sync compressed body routes', () => {
       1,
       computeOpStorageBytes(newOp).bytes,
     );
-    expect(mocks.syncService.uploadOps).toHaveBeenCalledWith(1, clientId, [
-      duplicateOp,
-      newOp,
-    ]);
+    expect(mocks.syncService.uploadOps).toHaveBeenCalledWith(
+      1,
+      clientId,
+      [duplicateOp, newOp],
+      undefined,
+      new Set([duplicateOp.id]),
+    );
   });
 
-  it('should keep same-id different-content ops charged in the ops quota gate', async () => {
+  it('should not charge same-id different-content ops in the quota gate', async () => {
     const clientId = 'id-collision-quota-client';
     const incomingOp = {
       ...createOp(clientId),
@@ -299,9 +418,48 @@ describe('Sync compressed body routes', () => {
     });
 
     expect(response.statusCode).toBe(200);
+    expect(mocks.syncService.checkStorageQuota).toHaveBeenCalledWith(1, 0);
+    expect(mocks.prisma.operation.findMany).toHaveBeenCalledWith({
+      where: { id: { in: [incomingOp.id] } },
+      select: { id: true },
+    });
+    expect(mocks.syncService.uploadOps).toHaveBeenCalledWith(
+      1,
+      clientId,
+      [incomingOp],
+      undefined,
+      new Set([incomingOp.id]),
+    );
+  });
+
+  it('should charge only the first occurrence of a repeated new ID', async () => {
+    const clientId = 'intra-batch-duplicate-quota-client';
+    const firstOp = {
+      ...createOp(clientId),
+      id: 'repeated-new-id',
+      entityId: 'task-first',
+      payload: { title: 'First content' },
+    };
+    const repeatedOp = {
+      ...firstOp,
+      entityId: 'task-second',
+      payload: { title: 'Different repeated content' },
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sync/ops',
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        'content-type': 'application/json',
+      },
+      payload: { ops: [firstOp, repeatedOp], clientId },
+    });
+
+    expect(response.statusCode).toBe(200);
     expect(mocks.syncService.checkStorageQuota).toHaveBeenCalledWith(
       1,
-      computeOpStorageBytes(incomingOp).bytes,
+      computeOpStorageBytes(firstOp).bytes,
     );
   });
 
@@ -748,6 +906,7 @@ describe('Sync compressed body routes', () => {
         clientId,
         reason: 'initial',
         vectorClock: {},
+        opId: '018f2f0b-1c2d-7a1b-8c3d-123456789abc',
         isCleanSlate: true,
       },
     });
@@ -755,6 +914,98 @@ describe('Sync compressed body routes', () => {
     expect(response.statusCode).toBe(413);
     expect(response.json().errorCode).toBe('STORAGE_QUOTA_EXCEEDED');
     expect(mocks.syncService.uploadOps).not.toHaveBeenCalled();
+  });
+
+  it('should return persistent success for a clean-slate retry before deleting data', async () => {
+    const opId = '018f2f0b-1c2d-7a1b-8c3d-123456789abc';
+    const clientId = 'clean-slate-retry-client';
+    const state = { TASK: { 'task-1': { id: 'task-1' } } };
+    const vectorClock = { [clientId]: 1 };
+    mocks.prisma.operation.findUnique.mockResolvedValueOnce({
+      id: opId,
+      userId: 1,
+      clientId,
+      actionType: '[SP_ALL] Load(import) all data',
+      opType: 'SYNC_IMPORT',
+      entityType: 'ALL',
+      entityId: null,
+      entityIds: [],
+      payload: state,
+      vectorClock,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      clientTimestamp: BigInt(1),
+      receivedAt: BigInt(1),
+      isPayloadEncrypted: false,
+      syncImportReason: null,
+      serverSeq: 77,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sync/snapshot',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        state,
+        clientId,
+        reason: 'recovery',
+        vectorClock,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        opId,
+        isCleanSlate: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ accepted: true, serverSeq: 77 });
+    expect(mocks.syncService.uploadOps).not.toHaveBeenCalled();
+    expect(mocks.syncService.checkStorageQuota).not.toHaveBeenCalled();
+  });
+
+  it('should reject a clean-slate retry whose opId belongs to different content', async () => {
+    const opId = '018f2f0b-1c2d-7a1b-8c3d-123456789abc';
+    const clientId = 'clean-slate-collision-client';
+    const vectorClock = { [clientId]: 1 };
+    mocks.prisma.operation.findUnique.mockResolvedValueOnce({
+      id: opId,
+      userId: 1,
+      clientId,
+      actionType: '[SP_ALL] Load(import) all data',
+      opType: 'SYNC_IMPORT',
+      entityType: 'ALL',
+      entityId: null,
+      entityIds: [],
+      payload: { TASK: { existing: { id: 'existing' } } },
+      vectorClock,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      clientTimestamp: BigInt(1),
+      receivedAt: BigInt(1),
+      isPayloadEncrypted: false,
+      syncImportReason: null,
+      serverSeq: 77,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sync/snapshot',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        state: { TASK: { replacement: { id: 'replacement' } } },
+        clientId,
+        reason: 'recovery',
+        vectorClock,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        opId,
+        isCleanSlate: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      accepted: false,
+      error: 'Operation ID already belongs to a different operation',
+    });
+    expect(mocks.syncService.uploadOps).not.toHaveBeenCalled();
+    expect(mocks.syncService.checkStorageQuota).not.toHaveBeenCalled();
   });
 
   it('should repeat initial snapshot duplicate detection inside the user lock', async () => {
@@ -809,6 +1060,7 @@ describe('Sync compressed body routes', () => {
     expect(mocks.syncService.checkSnapshotRequestDedup).toHaveBeenCalledWith(
       1,
       'snapshot-v1-retry',
+      expect.any(Function),
     );
     expect(mocks.syncService.checkOpsRequestDedup).not.toHaveBeenCalled();
     expect(mocks.prisma.operation.findFirst).not.toHaveBeenCalled();
@@ -878,6 +1130,7 @@ describe('Sync compressed body routes', () => {
       1,
       'snapshot-v1-dup-test',
       { accepted: true, serverSeq: 77 },
+      expect.any(String),
     );
   });
 

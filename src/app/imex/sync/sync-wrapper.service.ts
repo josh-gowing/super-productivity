@@ -21,6 +21,7 @@ import {
   EmptyRemoteBodySPError,
   JsonParseError,
   LegacySyncFormatDetectedError,
+  IncompleteRemoteOperationsError,
   SyncDataCorruptedError,
   UploadRevToMatchMismatchAPIError,
 } from '../../op-log/core/errors/sync-errors';
@@ -507,6 +508,13 @@ export class SyncWrapperService {
         this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
         return 'HANDLED_ERROR';
       }
+      if (downloadResult.kind === 'blocked_incompatible') {
+        SyncLog.warn(
+          'SyncWrapperService: Download blocked by an incompatible operation.',
+        );
+        this._providerManager.setSyncStatus('ERROR');
+        return 'HANDLED_ERROR';
+      }
 
       // Track the successfully synced provider for switch detection on next sync
       this._providerManager.setLastSyncedProviderId(providerId);
@@ -516,6 +524,13 @@ export class SyncWrapperService {
         syncCapableProvider,
         { isNeverSynced: isNeverSyncedAtSyncStart },
       );
+      if (uploadResult.kind === 'blocked_incompatible') {
+        SyncLog.warn(
+          'SyncWrapperService: Upload piggyback blocked by an incompatible operation.',
+        );
+        this._providerManager.setSyncStatus('ERROR');
+        return 'HANDLED_ERROR';
+      }
       const completedUploadResults: CompletedUploadOutcome[] =
         uploadResult.kind === 'completed' ? [uploadResult] : [];
       if (uploadResult.kind === 'completed') {
@@ -581,6 +596,13 @@ export class SyncWrapperService {
             'SyncWrapperService: LWW re-upload cancelled by user. Skipping remaining sync work.',
           );
           this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
+          return 'HANDLED_ERROR';
+        }
+        if (reuploadResult.kind === 'blocked_incompatible') {
+          SyncLog.warn(
+            'SyncWrapperService: LWW re-upload blocked by an incompatible operation.',
+          );
+          this._providerManager.setSyncStatus('ERROR');
           return 'HANDLED_ERROR';
         }
         if (reuploadResult.kind === 'completed') {
@@ -686,6 +708,16 @@ export class SyncWrapperService {
           // a bit longer since it is a long message
           config: { duration: 12000 },
         });
+        return 'HANDLED_ERROR';
+      } else if (error instanceof IncompleteRemoteOperationsError) {
+        this._providerManager.setSyncStatus('ERROR');
+        if (!this._snackService.hasPendingPersistentAction()) {
+          this._snackService.open({
+            msg: T.F.SYNC.S.INCOMPLETE_REMOTE_OPERATIONS,
+            type: 'ERROR',
+            config: { duration: 0 },
+          });
+        }
         return 'HANDLED_ERROR';
       } else if (
         error instanceof AuthFailSPError ||
@@ -931,14 +963,20 @@ export class SyncWrapperService {
       } else {
         this._providerManager.setSyncStatus('ERROR');
         const errStr = getSyncErrorStr(error);
-        this._snackService.open({
-          // msg: T.F.SYNC.S.UNKNOWN_ERROR,
-          msg: errStr,
-          type: 'ERROR',
-          translateParams: {
-            err: errStr,
-          },
-        });
+        // A lower-level recovery path may already have shown a sticky action
+        // (for example Undo after an interrupted remote-state rebuild). Snack
+        // rendering is debounced, so opening the generic error here would win
+        // the race and silently remove the only recovery action.
+        if (!this._snackService.hasPendingPersistentAction()) {
+          this._snackService.open({
+            // msg: T.F.SYNC.S.UNKNOWN_ERROR,
+            msg: errStr,
+            type: 'ERROR',
+            translateParams: {
+              err: errStr,
+            },
+          });
+        }
         return 'HANDLED_ERROR';
       }
     }

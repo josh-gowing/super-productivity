@@ -27,13 +27,11 @@ import {
 import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { bulkApplyHydrationOperations } from '../apply/bulk-hydration.action';
 import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider';
-import {
-  MAX_CONFLICT_RETRY_ATTEMPTS,
-  MAX_VECTOR_CLOCK_SIZE,
-} from '../core/operation-log.const';
+import { MAX_VECTOR_CLOCK_SIZE } from '../core/operation-log.const';
 import { IndexedDBOpenError } from '../core/errors/indexed-db-open.error';
 import { IDB_OPEN_ERROR_RELOAD_KEY } from './operation-log-hydrator.service';
 import { SyncProviderId } from '../sync-providers/provider.const';
+import { OperationLogEffects } from '../capture/operation-log.effects';
 
 describe('OperationLogHydratorService', () => {
   let service: OperationLogHydratorService;
@@ -47,6 +45,7 @@ describe('OperationLogHydratorService', () => {
   let mockRepairOperationService: jasmine.SpyObj<RepairOperationService>;
   let mockVectorClockService: jasmine.SpyObj<VectorClockService>;
   let mockOperationApplierService: jasmine.SpyObj<OperationApplierService>;
+  let mockOperationLogEffects: jasmine.SpyObj<OperationLogEffects>;
   let mockHydrationStateService: jasmine.SpyObj<HydrationStateService>;
   let mockSnapshotService: jasmine.SpyObj<OperationLogSnapshotService>;
   let mockRecoveryService: jasmine.SpyObj<OperationLogRecoveryService>;
@@ -142,6 +141,10 @@ describe('OperationLogHydratorService', () => {
     mockOperationApplierService = jasmine.createSpyObj('OperationApplierService', [
       'applyOperations',
     ]);
+    mockOperationLogEffects = jasmine.createSpyObj('OperationLogEffects', [
+      'processDeferredActions',
+    ]);
+    mockOperationLogEffects.processDeferredActions.and.resolveTo();
     mockHydrationStateService = jasmine.createSpyObj('HydrationStateService', [
       'startApplyingRemoteOps',
       'endApplyingRemoteOps',
@@ -219,6 +222,7 @@ describe('OperationLogHydratorService', () => {
         { provide: RepairOperationService, useValue: mockRepairOperationService },
         { provide: VectorClockService, useValue: mockVectorClockService },
         { provide: OperationApplierService, useValue: mockOperationApplierService },
+        { provide: OperationLogEffects, useValue: mockOperationLogEffects },
         { provide: HydrationStateService, useValue: mockHydrationStateService },
         { provide: OperationLogSnapshotService, useValue: mockSnapshotService },
         { provide: OperationLogRecoveryService, useValue: mockRecoveryService },
@@ -408,6 +412,84 @@ describe('OperationLogHydratorService', () => {
         // Hydration state is managed around the dispatch
         expect(mockHydrationStateService.startApplyingRemoteOps).toHaveBeenCalled();
         expect(mockHydrationStateService.endApplyingRemoteOps).toHaveBeenCalled();
+      });
+
+      it('should replay a tail op with a malformed stored schemaVersion verbatim instead of failing into recovery', async () => {
+        // Strict schemaVersion parsing guards the receive/upload paths; on the
+        // local hydration path one legacy/corrupt entry must not turn every
+        // boot into attemptRecovery() (which can lose tail data).
+        const snapshot = createMockSnapshot({ lastAppliedOpSeq: 5 });
+        const malformedOp = createMockOperation('op-6', OpType.Update, {
+          schemaVersion: '2' as unknown as number,
+        });
+        const tailOps = [
+          createMockEntry(6, malformedOp),
+          createMockEntry(7, createMockOperation('op-7')),
+        ];
+        mockOpLogStore.loadStateCache.and.returnValue(Promise.resolve(snapshot));
+        mockOpLogStore.getOpsAfterSeq.and.returnValue(Promise.resolve(tailOps));
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).not.toHaveBeenCalled();
+        // Both ops replay in order; the malformed one is passed through with a
+        // sanitized version stamp (payload untouched).
+        expect(mockStore.dispatch).toHaveBeenCalledWith(
+          bulkApplyHydrationOperations({
+            operations: [
+              { ...malformedOp, schemaVersion: CURRENT_SCHEMA_VERSION },
+              tailOps[1].op,
+            ],
+            localClientId: 'test-client',
+          }),
+        );
+      });
+
+      it('should apply a failed tail op exactly once across hydration replay + retry (one boot)', async () => {
+        // Regression: a remote op marked 'failed' (archive side effect threw
+        // after its reducer committed) with seq > lastAppliedOpSeq used to get
+        // its reducer applied TWICE per boot — once by the status-blind tail
+        // replay and once more by retryFailedRemoteOps re-dispatching. The
+        // retry must complete it with archive side effects only.
+        const snapshot = createMockSnapshot({ lastAppliedOpSeq: 5 });
+        const failedOp = createMockOperation('op-failed');
+        const failedTailEntry: OperationLogEntry = {
+          seq: 6,
+          op: failedOp,
+          appliedAt: Date.now(),
+          source: 'remote',
+          applicationStatus: 'failed',
+          retryCount: 1,
+        };
+        mockOpLogStore.loadStateCache.and.returnValue(Promise.resolve(snapshot));
+        mockOpLogStore.getOpsAfterSeq.and.returnValue(Promise.resolve([failedTailEntry]));
+        mockOpLogStore.getFailedRemoteOps.and.returnValue(
+          Promise.resolve([failedTailEntry]),
+        );
+        mockOperationApplierService.applyOperations.and.callFake((ops: Operation[]) =>
+          Promise.resolve({ appliedOps: ops }),
+        );
+
+        await service.hydrateStore();
+
+        // Reducer application happens exactly once: the tail replay bulk dispatch.
+        const bulkDispatches = mockStore.dispatch.calls
+          .allArgs()
+          .map((args) => args[0] as unknown as { type: string; operations?: Operation[] })
+          .filter((action) => action.type === bulkApplyHydrationOperations.type);
+        expect(bulkDispatches.length).toBe(1);
+        expect(bulkDispatches[0].operations!.map((o) => o.id)).toEqual(['op-failed']);
+
+        // The retry completes the op WITHOUT re-dispatching its reducer.
+        expect(mockOperationApplierService.applyOperations).toHaveBeenCalledTimes(1);
+        const [retriedOps, retryOptions] =
+          mockOperationApplierService.applyOperations.calls.argsFor(0);
+        expect(retriedOps.map((o: Operation) => o.id)).toEqual(['op-failed']);
+        expect(retryOptions).toEqual({
+          skipReducerDispatch: true,
+          skipDeferredLocalActions: true,
+        });
+        expect(mockOpLogStore.markApplied).toHaveBeenCalledWith([6]);
       });
 
       it('should request ops after snapshot sequence', async () => {
@@ -949,10 +1031,12 @@ describe('OperationLogHydratorService', () => {
           lastAppliedOpSeq: 5,
         });
 
+        // schemaVersion 1 = a legitimately old version (the floor); 0 would be
+        // malformed and is sanitized by the lenient hydration boundary instead.
         const tailOps = [
           createMockEntry(
             6,
-            createMockOperation('op-6', OpType.Update, { schemaVersion: 0 }), // Old
+            createMockOperation('op-6', OpType.Update, { schemaVersion: 1 }), // Old
           ),
           createMockEntry(
             7,
@@ -962,7 +1046,7 @@ describe('OperationLogHydratorService', () => {
           ),
           createMockEntry(
             8,
-            createMockOperation('op-8', OpType.Update, { schemaVersion: 0 }), // Old
+            createMockOperation('op-8', OpType.Update, { schemaVersion: 1 }), // Old
           ),
         ];
 
@@ -971,7 +1055,7 @@ describe('OperationLogHydratorService', () => {
         mockSchemaMigrationService.needsMigration.and.returnValue(false);
         // At least one operation needs migration
         mockSchemaMigrationService.operationNeedsMigration.and.callFake(
-          (op: Operation) => op.schemaVersion === 0,
+          (op: Operation) => op.schemaVersion === 1,
         );
 
         await service.hydrateStore();
@@ -1364,6 +1448,29 @@ describe('OperationLogHydratorService', () => {
       expect(passedOps.map((o: Operation) => o.id)).toEqual(['op-a', 'op-b', 'op-c']);
       expect(mockOpLogStore.markApplied).toHaveBeenCalledWith([40, 41, 42]);
       expect(mockOpLogStore.markFailed).not.toHaveBeenCalled();
+      // Applied-op clocks are merged on completion (parity with the primary
+      // remote-apply path, which only merges the clocks of ops it marked applied).
+      expect(mockOpLogStore.mergeRemoteOpClocks).toHaveBeenCalledWith(passedOps);
+    });
+
+    it('should retry archive side effects only — never re-dispatch reducers', async () => {
+      // Failed ops had their reducers committed by the bulk dispatch of the
+      // batch that marked them failed; re-dispatching on retry double-applies
+      // additive reducers (syncTimeSpent, increaseSimpleCounterCounterToday).
+      mockOpLogStore.getFailedRemoteOps.and.returnValue(
+        Promise.resolve([failedEntry(40, 'op-a')]),
+      );
+      mockOperationApplierService.applyOperations.and.callFake((ops: Operation[]) =>
+        Promise.resolve({ appliedOps: ops }),
+      );
+
+      await service.retryFailedRemoteOps();
+
+      const options = mockOperationApplierService.applyOperations.calls.argsFor(0)[1];
+      expect(options).toEqual({
+        skipReducerDispatch: true,
+        skipDeferredLocalActions: true,
+      });
     });
 
     it('should apply failed ops in ascending seq order regardless of store order', async () => {
@@ -1386,7 +1493,7 @@ describe('OperationLogHydratorService', () => {
       expect(mockOpLogStore.markApplied).toHaveBeenCalledWith([40, 41, 42]);
     });
 
-    it('should mark the failed op and every op after it (in seq order) as still-failing', async () => {
+    it('should charge retry budget only to the attempted archive failure', async () => {
       const entries = [
         failedEntry(40, 'op-a'),
         failedEntry(41, 'op-b'),
@@ -1405,12 +1512,39 @@ describe('OperationLogHydratorService', () => {
       await service.retryFailedRemoteOps();
 
       expect(mockOpLogStore.markApplied).toHaveBeenCalledWith([40]);
-      // op-b (failed) and op-c (after it) are both marked failed, with the
-      // retry-cap so a permanently-failing op is eventually rejected.
-      expect(mockOpLogStore.markFailed).toHaveBeenCalledWith(
-        ['op-b', 'op-c'],
-        MAX_CONFLICT_RETRY_ATTEMPTS,
+      // op-c remains archive-pending and has not consumed a retry attempt.
+      expect(mockOpLogStore.markFailed).toHaveBeenCalledOnceWith(['op-b']);
+    });
+
+    it('should merge clocks before marking archive retries applied', async () => {
+      mockOpLogStore.getFailedRemoteOps.and.resolveTo([failedEntry(40, 'op-a')]);
+      mockOperationApplierService.applyOperations.and.resolveTo({
+        appliedOps: [failedEntry(40, 'op-a').op],
+      });
+      mockOpLogStore.mergeRemoteOpClocks.and.rejectWith(new Error('clock write failed'));
+
+      await expectAsync(service.retryFailedRemoteOps()).toBeRejected();
+
+      expect(mockOpLogStore.markApplied).not.toHaveBeenCalled();
+    });
+
+    it('should not escalate a deferred-drain failure into hydration recovery', async () => {
+      // A drain throw here used to propagate out of hydrateStore() into
+      // attemptRecovery(), which can import stale legacy data over a correctly
+      // hydrated store. The failure is logged; buffered actions stay queued
+      // for the next drain point (e.g. the pre-sync flush).
+      mockOperationLogEffects.processDeferredActions.and.rejectWith(
+        new Error('drain failed'),
       );
+      mockOpLogStore.getFailedRemoteOps.and.resolveTo([failedEntry(40, 'op-a')]);
+      mockOperationApplierService.applyOperations.and.callFake((ops: Operation[]) =>
+        Promise.resolve({ appliedOps: ops }),
+      );
+
+      await expectAsync(service.retryFailedRemoteOps()).toBeResolved();
+
+      // Bookkeeping completed despite the failed drain.
+      expect(mockOpLogStore.markApplied).toHaveBeenCalledWith([40]);
     });
 
     it('should do nothing when there are no failed ops', async () => {

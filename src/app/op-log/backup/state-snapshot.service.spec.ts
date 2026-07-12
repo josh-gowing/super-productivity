@@ -20,6 +20,7 @@ import { selectPluginMetadataFeatureState } from '../../plugins/store/plugin-met
 import { selectReminderFeatureState } from '../../features/reminder/store/reminder.reducer';
 import { ArchiveModel } from '../../features/time-tracking/time-tracking.model';
 import { initialTimeTrackingState } from '../../features/time-tracking/store/time-tracking.reducer';
+import { TaskState } from '../../features/tasks/task.model';
 
 describe('StateSnapshotService', () => {
   let service: StateSnapshotService;
@@ -224,6 +225,32 @@ describe('StateSnapshotService', () => {
 
       expect(archiveDbAdapterSpy.loadArchiveYoung).toHaveBeenCalledTimes(1);
       expect(archiveDbAdapterSpy.loadArchiveOld).toHaveBeenCalledTimes(1);
+    });
+
+    it('should capture NgRx state before awaiting archive I/O', async () => {
+      let releaseArchives!: () => void;
+      const archiveGate = new Promise<void>((resolve) => {
+        releaseArchives = resolve;
+      });
+      archiveDbAdapterSpy.loadArchiveYoung.and.callFake(async () => {
+        await archiveGate;
+        return mockArchiveYoung;
+      });
+      archiveDbAdapterSpy.loadArchiveOld.and.callFake(async () => {
+        await archiveGate;
+        return mockArchiveOld;
+      });
+
+      const snapshotPromise = service.getStateSnapshotAsync();
+      store.overrideSelector(selectTaskFeatureState, {
+        ...mockTaskState,
+        ids: ['later-task'],
+      } as unknown as TaskState);
+      store.refreshState();
+      releaseArchives();
+
+      const snapshot = await snapshotPromise;
+      expect((snapshot.task as TaskState).ids).toEqual(['task1']);
     });
   });
 

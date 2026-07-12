@@ -170,6 +170,7 @@ interface OperationLogEntry {
   source: 'local' | 'remote';
   syncedAt?: number; // For server sync (Part C)
   rejectedAt?: number; // When rejected during conflict resolution
+  applicationStatus?: 'pending' | 'archive_pending' | 'failed' | 'applied';
 }
 
 // state_cache table - periodic snapshots
@@ -204,6 +205,19 @@ interface StateCache {
 ```
 
 **Key insight:** All application data is persisted in the `SUP_OPS` database via the operation log system.
+
+### Remote Apply Checkpoints
+
+Downloaded operations use a durable status transition so reducer state, archive IndexedDB side effects, vector clocks, and the server cursor cannot disagree after a crash:
+
+1. `pending` — the remote op is stored, but no reducer-commit checkpoint exists yet.
+2. `archive_pending` — reducers committed and the op's vector clock was merged atomically; archive side effects have not yet completed.
+3. `failed` — an archive side-effect attempt failed. `retryCount` is charged only to the attempted row, so later rows in the same batch do not consume retry budget.
+4. `applied` — reducer and archive work both completed.
+
+Startup hydration replays persisted state history, quarantines surviving `pending` rows, and retries `archive_pending`/`failed` rows with reducer dispatch disabled. Ordinary sync refuses to download, upload, or advance its cursor while any incomplete rows remain. Database version 8 is a downgrade barrier: released readers that do not understand the distinct reducer checkpoint cannot open the newer store and silently overlook outstanding archive work.
+
+Local actions buffered during a remote-apply window stay ordered until each operation is durable. Transient persistence failures keep the failed suffix queued and block the current sync so a later sync can retry. A deterministically invalid buffered action also remains queued, but requires reload: its reducer already changed live state, so discarding it would let live state diverge from the durable operation log.
 
 ## A.2 Write Path
 
@@ -428,7 +442,7 @@ async compact(): Promise<void> {
 | Max download ops in memory      | 50,000  | Bounds memory during API download              |
 | Remote file retention           | 14 days | Server-side operation file retention           |
 | Max remote files to keep        | 100     | Minimum recent files on server                 |
-| Max conflict retry attempts     | 5       | Retries before rejecting failed ops            |
+| Remote archive retries          | ∞       | Stay quarantined until side effects complete   |
 | Max rejected ops before warning | 10      | Threshold for user notification                |
 | Lock timeout                    | 30 sec  | localStorage fallback lock timeout             |
 | Lock acquire timeout            | 60 sec  | Max wait to acquire a lock                     |
@@ -2310,7 +2324,7 @@ When adding new entities or relationships:
 > - **Archive validation**: archiveOld tasks now validated for project/tag references, null-safety added
 > - **Lock service robustness**: Handle NaN timestamps and invalid lock formats in fallback lock
 > - **Array payload rejection**: Explicit check to reject arrays (which bypass `typeof === 'object'`)
-> - **Pending operation expiry**: Operations pending >24h are rejected instead of replayed (PENDING_OPERATION_EXPIRY_MS)
+> - **Remote apply checkpoints**: reducer commit and vector-clock merge are atomic; `archive_pending` distinguishes unattempted archive work from attempted `failed` rows, while hydration and the sync gate keep incomplete work visible.
 
 ---
 
@@ -2365,7 +2379,7 @@ src/app/op-log/
 │       ├── test-client.helper.ts             # Test client utilities
 │       └── operation-factory.helper.ts       # Test operation builders
 └── benchmarks/
-    └── operation-log-stress.spec.ts          # Performance stress tests
+    └── operation-log-stress.benchmark.ts     # Manual perf harness (not auto-run in CI)
 
 src/app/features/work-context/store/
 ├── work-context-meta.actions.ts          # Move actions (moveTaskInTodayList, etc.)

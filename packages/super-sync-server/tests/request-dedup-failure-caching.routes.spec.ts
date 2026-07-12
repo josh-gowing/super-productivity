@@ -37,6 +37,8 @@ const mocks = vi.hoisted(() => {
     getStorageInfo: vi.fn(),
     getCachedSnapshotBytes: vi.fn(),
     getMaxClockDriftMs: vi.fn(),
+    filterValidOpsForQuota: vi.fn(),
+    getPrevalidatedPayloadBytes: vi.fn(),
   };
   const prisma = {
     operation: {
@@ -119,6 +121,7 @@ describe('Request dedup — transaction-failure results are not cached (#8332)',
     });
     mocks.syncService.getCachedSnapshotBytes.mockResolvedValue(0);
     mocks.syncService.getMaxClockDriftMs.mockReturnValue(60_000);
+    mocks.syncService.filterValidOpsForQuota.mockImplementation((ops: unknown[]) => ops);
     mocks.syncService.cacheSnapshotIfReplayable.mockResolvedValue({ deltaBytes: 0 });
     mocks.syncService.prepareSnapshotCache.mockResolvedValue({
       stateBytes: 0,
@@ -196,6 +199,7 @@ describe('Request dedup — transaction-failure results are not cached (#8332)',
         userId,
         'ops-v1-success',
         results,
+        expect.any(String),
       );
     });
 
@@ -218,6 +222,7 @@ describe('Request dedup — transaction-failure results are not cached (#8332)',
         userId,
         'ops-v1-conflict',
         results,
+        expect.any(String),
       );
     });
   });
@@ -245,6 +250,7 @@ describe('Request dedup — transaction-failure results are not cached (#8332)',
         userId,
         'snapshot-v1-success',
         { accepted: true, serverSeq: 5, error: undefined },
+        expect.any(String),
       );
     });
   });
@@ -282,6 +288,7 @@ describe('Request dedup round-trip with the real cache (#8332)', () => {
     mocks.syncService.getLatestSeq.mockResolvedValue(1);
     mocks.syncService.getOpsSinceWithSeq.mockResolvedValue({ ops: [], latestSeq: 1 });
     mocks.syncService.getMaxClockDriftMs.mockReturnValue(60_000);
+    mocks.syncService.filterValidOpsForQuota.mockImplementation((ops: unknown[]) => ops);
     mocks.prisma.operation.findMany.mockResolvedValue([]);
 
     app = Fastify();

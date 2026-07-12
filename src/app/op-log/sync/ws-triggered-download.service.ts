@@ -11,6 +11,9 @@ import { SyncWrapperService } from '../../imex/sync/sync-wrapper.service';
 import { lazyInject } from '../../util/lazy-inject';
 import { SyncLog } from '../../core/log';
 import { AuthFailSPError, MissingCredentialsSPError } from '../sync-exports';
+import { IncompleteRemoteOperationsError } from '../core/errors/sync-errors';
+import { SnackService } from '../../core/snack/snack.service';
+import { T } from '../../t.const';
 
 const WS_DOWNLOAD_DEBOUNCE_MS = 500;
 
@@ -32,6 +35,7 @@ export class WsTriggeredDownloadService implements OnDestroy {
   private _wrappedProvider = inject(WrappedProviderService);
   private _sessionValidation = inject(SyncSessionValidationService);
   private _syncCycleGuard = inject(SyncCycleGuardService);
+  private _snackService = inject(SnackService);
   private _injector = inject(Injector);
 
   // Resolved lazily to break the DI cycle: SyncWrapperService injects this
@@ -151,6 +155,14 @@ export class WsTriggeredDownloadService implements OnDestroy {
 
         SyncLog.log(`WsTriggeredDownloadService: Download complete. kind=${result.kind}`);
 
+        if (result.kind === 'blocked_incompatible') {
+          SyncLog.warn(
+            'WsTriggeredDownloadService: Download blocked by an incompatible operation',
+          );
+          this._providerManager.setSyncStatus('ERROR');
+          return;
+        }
+
         if (this._sessionValidation.hasFailed()) {
           SyncLog.err(
             'WsTriggeredDownloadService: Post-sync validation failed during WS download — reporting ERROR',
@@ -158,6 +170,21 @@ export class WsTriggeredDownloadService implements OnDestroy {
           this._providerManager.setSyncStatus('ERROR');
         }
       } catch (err) {
+        if (err instanceof IncompleteRemoteOperationsError) {
+          SyncLog.err(
+            'WsTriggeredDownloadService: Remote operation application is incomplete',
+            err,
+          );
+          this._providerManager.setSyncStatus('ERROR');
+          if (!this._snackService.hasPendingPersistentAction()) {
+            this._snackService.open({
+              msg: T.F.SYNC.S.INCOMPLETE_REMOTE_OPERATIONS,
+              type: 'ERROR',
+              config: { duration: 0 },
+            });
+          }
+          return;
+        }
         if (err instanceof AuthFailSPError || err instanceof MissingCredentialsSPError) {
           SyncLog.warn('WsTriggeredDownloadService: Auth failure during download', err);
           this.stop();

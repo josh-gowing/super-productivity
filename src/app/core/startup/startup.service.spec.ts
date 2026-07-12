@@ -222,6 +222,59 @@ describe('StartupService', () => {
     });
   });
 
+  describe('raw rebuild recovery', () => {
+    const callRecoveryCheck = async (): Promise<void> => {
+      await (
+        service as unknown as {
+          _offerInterruptedRebuildRecoveryIfNeeded: () => Promise<void>;
+        }
+      )._offerInterruptedRebuildRecoveryIfNeeded();
+    };
+
+    it('should re-offer Undo after reload when a completed recovery token exists', async () => {
+      const opLogStore = jasmine.createSpyObj('OperationLogStoreService', [
+        'isRawRebuildIncomplete',
+        'loadRawRebuildRecovery',
+      ]);
+      opLogStore.isRawRebuildIncomplete.and.resolveTo(false);
+      opLogStore.loadRawRebuildRecovery.and.resolveTo({
+        backupId: 'backup-4242',
+        backupSavedAt: 4242,
+        completedAt: 5000,
+      });
+      const syncService = jasmine.createSpyObj('OperationLogSyncService', [
+        'offerInterruptedRebuildRecovery',
+      ]);
+      syncService.offerInterruptedRebuildRecovery.and.resolveTo();
+      Object.assign(service as object, {
+        _opLogStore: opLogStore,
+        _injector: { get: () => syncService },
+      });
+
+      await callRecoveryCheck();
+
+      expect(syncService.offerInterruptedRebuildRecovery).toHaveBeenCalled();
+    });
+
+    it('should not instantiate sync recovery when no marker exists', async () => {
+      const opLogStore = jasmine.createSpyObj('OperationLogStoreService', [
+        'isRawRebuildIncomplete',
+        'loadRawRebuildRecovery',
+      ]);
+      opLogStore.isRawRebuildIncomplete.and.resolveTo(false);
+      opLogStore.loadRawRebuildRecovery.and.resolveTo(null);
+      const get = jasmine.createSpy('get');
+      Object.assign(service as object, {
+        _opLogStore: opLogStore,
+        _injector: { get },
+      });
+
+      await callRecoveryCheck();
+
+      expect(get).not.toHaveBeenCalled();
+    });
+  });
+
   describe('_isTourLikelyToBeShown (private)', () => {
     it('should return false if IS_SKIP_TOUR is set', () => {
       (localStorage.getItem as jasmine.Spy).and.callFake((key: string) => {

@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { CURRENT_SCHEMA_VERSION } from '@sp/shared-schema';
 import { Logger } from '../logger';
 import {
   BatchUploadCandidate,
@@ -34,11 +35,7 @@ export const detectConflict = async (
 
   // Build list of entity IDs to check for conflicts.
   // Operations may have either entityId (singular) or entityIds (batch operations).
-  const rawEntityIdsToCheck = op.entityIds?.length
-    ? op.entityIds
-    : op.entityId
-      ? [op.entityId]
-      : [];
+  const rawEntityIdsToCheck = getConflictEntityIds(op);
 
   // Skip if no entity IDs (can't have entity-level conflicts)
   if (rawEntityIdsToCheck.length === 0) {
@@ -47,6 +44,18 @@ export const detectConflict = async (
 
   if (rawEntityIdsToCheck.length === 1) {
     return detectConflictForEntity(userId, op, rawEntityIdsToCheck[0], tx);
+  }
+
+  // v1 GLOBAL_CONFIG:misc contains fields that became GLOBAL_CONFIG:tasks in
+  // v2. This compatibility path is intentionally per-key: it is rare, keeps
+  // the normal multi-entity SQL unchanged, and works for encrypted legacy
+  // payloads whose contents the server cannot inspect.
+  if (isLegacyMiscConfigOperation(op)) {
+    for (const entityId of rawEntityIdsToCheck) {
+      const result = await detectConflictForEntity(userId, op, entityId, tx);
+      if (result.hasConflict) return result;
+    }
+    return { hasConflict: false };
   }
 
   const entityIdsToCheck = Array.from(new Set(rawEntityIdsToCheck));
@@ -210,16 +219,45 @@ export const detectConflictForEntity = async (
       entityType: op.entityType,
       OR: [{ entityId }, { entityIds: { has: entityId } }],
     },
-    select: { clientId: true, vectorClock: true },
+    select: { clientId: true, vectorClock: true, serverSeq: true },
     orderBy: { serverSeq: 'desc' },
   });
 
+  // Histories written before schema v2 persist migrated task settings under
+  // the raw `GLOBAL_CONFIG:misc` key. Consult that key as an alias when the
+  // incoming write targets `tasks`; no backfill (and no payload decryption) is
+  // required. Pick the newer of the canonical and legacy rows.
+  //
+  // NOTE: the alias exists only on this per-entity path. A v2 MULTI-entity op
+  // whose entityIds include 'tasks' goes through detectConflictForEntities and
+  // skips the legacy lookup — acceptable today because GLOBAL_CONFIG writes are
+  // single-entity; revisit if a batch path ever carries config entities.
+  const legacyMiscOp =
+    op.entityType === 'GLOBAL_CONFIG' && entityId === 'tasks'
+      ? await tx.operation.findFirst({
+          where: {
+            userId,
+            entityType: 'GLOBAL_CONFIG',
+            entityId: 'misc',
+            schemaVersion: { lt: CURRENT_SCHEMA_VERSION },
+          },
+          select: { clientId: true, vectorClock: true, serverSeq: true },
+          orderBy: { serverSeq: 'desc' },
+        })
+      : null;
+
+  const latestExistingOp =
+    legacyMiscOp &&
+    (!existingOp || (legacyMiscOp.serverSeq ?? -1) > (existingOp.serverSeq ?? -1))
+      ? legacyMiscOp
+      : existingOp;
+
   // No existing operation = no conflict
-  if (!existingOp) {
+  if (!latestExistingOp) {
     return { hasConflict: false };
   }
 
-  return resolveConflictForExistingOp(op, entityId, existingOp);
+  return resolveConflictForExistingOp(op, entityId, latestExistingOp);
 };
 
 export const isSameDuplicateOperation = (
@@ -246,6 +284,10 @@ export const isSameDuplicateOperation = (
     existingOp.opType === op.opType &&
     existingOp.entityType === op.entityType &&
     existingOp.entityId === (op.entityId ?? null) &&
+    // Compare against the same normalization the row was persisted with
+    // (getStoredEntityIds: single-entity sets collapse to []), so a genuine
+    // retry matches while a batch op differing only in entityIds does not.
+    areJsonValuesEqual(existingOp.entityIds, getStoredEntityIds(op)) &&
     payloadsMatch &&
     areJsonValuesEqual(existingOp.vectorClock, storedVectorClock) &&
     existingOp.schemaVersion === op.schemaVersion &&
@@ -258,6 +300,34 @@ export const isSameDuplicateOperation = (
     ) &&
     existingOp.isPayloadEncrypted === incomingEncrypted &&
     existingOp.syncImportReason === (op.syncImportReason ?? null)
+  );
+};
+
+/** Complete identity comparison for two validated operations in one request. */
+export const isSameIncomingOperation = (
+  first: Operation,
+  second: Operation,
+  firstOriginalTimestamp: number = first.timestamp,
+  secondOriginalTimestamp: number = second.timestamp,
+): boolean => {
+  const bothEncrypted =
+    (first.isPayloadEncrypted ?? false) && (second.isPayloadEncrypted ?? false);
+  return (
+    first.clientId === second.clientId &&
+    first.actionType === second.actionType &&
+    first.opType === second.opType &&
+    first.entityType === second.entityType &&
+    first.entityId === second.entityId &&
+    areJsonValuesEqual(getStoredEntityIds(first), getStoredEntityIds(second)) &&
+    (bothEncrypted || areJsonValuesEqual(first.payload, second.payload)) &&
+    areJsonValuesEqual(
+      limitVectorClockSize(first.vectorClock, [first.clientId]),
+      limitVectorClockSize(second.vectorClock, [second.clientId]),
+    ) &&
+    first.schemaVersion === second.schemaVersion &&
+    firstOriginalTimestamp === secondOriginalTimestamp &&
+    (first.isPayloadEncrypted ?? false) === (second.isPayloadEncrypted ?? false) &&
+    (first.syncImportReason ?? null) === (second.syncImportReason ?? null)
   );
 };
 
@@ -318,13 +388,20 @@ export const toStableJsonValue = (value: unknown): unknown => {
  * `entity_ids` column, which uses {@link getStoredEntityIds} (multi-entity only).
  */
 export const getConflictEntityIds = (op: Operation): string[] => {
-  const rawEntityIds = op.entityIds?.length
-    ? op.entityIds
-    : op.entityId
-      ? [op.entityId]
-      : [];
+  const rawEntityIds = [
+    ...(op.entityId ? [op.entityId] : []),
+    ...(op.entityIds?.length ? op.entityIds : []),
+  ];
+  if (isLegacyMiscConfigOperation(op)) {
+    rawEntityIds.push('tasks');
+  }
   return Array.from(new Set(rawEntityIds));
 };
+
+const isLegacyMiscConfigOperation = (op: Operation): boolean =>
+  op.schemaVersion < CURRENT_SCHEMA_VERSION &&
+  op.entityType === 'GLOBAL_CONFIG' &&
+  op.entityId === 'misc';
 
 /**
  * The entity_ids array to persist with an op. Ops whose touched-entity set is
@@ -339,7 +416,12 @@ export const getConflictEntityIds = (op: Operation): string[] => {
  * would be invisible to conflict lookups (#8334).
  */
 export const getStoredEntityIds = (op: Operation): string[] => {
-  const ids = getConflictEntityIds(op);
+  // Preserve the historical storage normalization: the scalar is persisted in
+  // entity_id and only the declared multi-entity set belongs in entity_ids.
+  // Conflict detection unions both fields via getConflictEntityIds above.
+  const ids = Array.from(
+    new Set(op.entityIds?.length ? op.entityIds : op.entityId ? [op.entityId] : []),
+  );
   if (ids.length <= 1 && ids[0] === op.entityId) {
     return [];
   }
@@ -404,7 +486,8 @@ export const prefetchLatestEntityOpsForBatch = async (
         o.entity_type AS "entityType",
         eid AS "entityId",
         o.client_id AS "clientId",
-        o.vector_clock AS "vectorClock"
+        o.vector_clock AS "vectorClock",
+        o.server_seq AS "serverSeq"
       FROM operations o
       CROSS JOIN LATERAL unnest(
         o.entity_ids || CASE WHEN o.entity_id IS NULL THEN '{}'::text[] ELSE ARRAY[o.entity_id] END
@@ -422,6 +505,37 @@ export const prefetchLatestEntityOpsForBatch = async (
         getEntityConflictKey(latestOp.entityType, latestOp.entityId),
         latestOp,
       );
+    }
+  }
+
+  if (
+    entityPairs.some(
+      ({ entityType, entityId }) =>
+        entityType === 'GLOBAL_CONFIG' && entityId === 'tasks',
+    )
+  ) {
+    const legacyMiscOp = await tx.operation.findFirst({
+      where: {
+        userId,
+        entityType: 'GLOBAL_CONFIG',
+        entityId: 'misc',
+        schemaVersion: { lt: CURRENT_SCHEMA_VERSION },
+      },
+      select: { clientId: true, vectorClock: true, serverSeq: true },
+      orderBy: { serverSeq: 'desc' },
+    });
+    const tasksKey = getEntityConflictKey('GLOBAL_CONFIG', 'tasks');
+    const currentTasksOp = latestByEntity.get(tasksKey);
+    if (
+      legacyMiscOp &&
+      (!currentTasksOp ||
+        (legacyMiscOp.serverSeq ?? -1) > (currentTasksOp.serverSeq ?? -1))
+    ) {
+      latestByEntity.set(tasksKey, {
+        entityType: 'GLOBAL_CONFIG',
+        entityId: 'tasks',
+        ...legacyMiscOp,
+      });
     }
   }
 

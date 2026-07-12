@@ -12,6 +12,9 @@ import { SyncSessionValidationService } from './sync-session-validation.service'
 import { SyncCycleGuardService } from './sync-cycle-guard.service';
 import { SyncWrapperService } from '../../imex/sync/sync-wrapper.service';
 import { AuthFailSPError, MissingCredentialsSPError } from '../sync-exports';
+import { IncompleteRemoteOperationsError } from '../core/errors/sync-errors';
+import { SnackService } from '../../core/snack/snack.service';
+import { T } from '../../t.const';
 
 describe('WsTriggeredDownloadService', () => {
   let service: WsTriggeredDownloadService;
@@ -21,6 +24,7 @@ describe('WsTriggeredDownloadService', () => {
   let mockProviderManager: jasmine.SpyObj<SyncProviderManager>;
   let mockWrappedProvider: jasmine.SpyObj<WrappedProviderService>;
   let mockSyncWrapper: { isEncryptionOperationInProgress: boolean };
+  let mockSnackService: jasmine.SpyObj<SnackService>;
   let syncCapableProvider: any;
 
   beforeEach(() => {
@@ -39,7 +43,7 @@ describe('WsTriggeredDownloadService', () => {
 
     mockProviderManager = jasmine.createSpyObj(
       'SyncProviderManager',
-      ['getActiveProvider'],
+      ['getActiveProvider', 'setSyncStatus'],
       {
         isSyncInProgress: false,
       },
@@ -57,6 +61,11 @@ describe('WsTriggeredDownloadService', () => {
     // off it lazily (via Injector, to avoid a DI cycle). Provide a minimal mock so
     // the real (heavily-dependent) service is never constructed in the unit test.
     mockSyncWrapper = { isEncryptionOperationInProgress: false };
+    mockSnackService = jasmine.createSpyObj('SnackService', [
+      'open',
+      'hasPendingPersistentAction',
+    ]);
+    mockSnackService.hasPendingPersistentAction.and.returnValue(false);
 
     TestBed.configureTestingModule({
       providers: [
@@ -66,6 +75,7 @@ describe('WsTriggeredDownloadService', () => {
         { provide: SyncProviderManager, useValue: mockProviderManager },
         { provide: WrappedProviderService, useValue: mockWrappedProvider },
         { provide: SyncWrapperService, useValue: mockSyncWrapper },
+        { provide: SnackService, useValue: mockSnackService },
       ],
     });
 
@@ -227,6 +237,39 @@ describe('WsTriggeredDownloadService', () => {
     expect(mockSyncService.downloadRemoteOps).toHaveBeenCalledTimes(2);
   }));
 
+  it('should report incomplete remote application as a sticky translated error', fakeAsync(() => {
+    mockSyncService.downloadRemoteOps.and.rejectWith(
+      new IncompleteRemoteOperationsError(new Error('archive failed')),
+    );
+
+    service.start();
+    notification$.next({ latestSeq: 1 });
+    tick(500);
+    flushMicrotasks();
+
+    expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
+    expect(mockSnackService.open).toHaveBeenCalledWith({
+      msg: T.F.SYNC.S.INCOMPLETE_REMOTE_OPERATIONS,
+      type: 'ERROR',
+      config: { duration: 0 },
+    });
+  }));
+
+  it('should preserve an existing persistent recovery action for incomplete remote work', fakeAsync(() => {
+    mockSnackService.hasPendingPersistentAction.and.returnValue(true);
+    mockSyncService.downloadRemoteOps.and.rejectWith(
+      new IncompleteRemoteOperationsError(new Error('archive failed')),
+    );
+
+    service.start();
+    notification$.next({ latestSeq: 1 });
+    tick(500);
+    flushMicrotasks();
+
+    expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
+    expect(mockSnackService.open).not.toHaveBeenCalled();
+  }));
+
   it('should be idempotent when start is called twice', fakeAsync(() => {
     service.start();
     service.start();
@@ -244,9 +287,6 @@ describe('WsTriggeredDownloadService', () => {
   // reset clears them) or leak into the next session. The service must
   // be its own session boundary.
   it('sets sync status ERROR when the download flips the validation latch', fakeAsync(() => {
-    if (mockProviderManager.setSyncStatus === undefined) {
-      mockProviderManager.setSyncStatus = jasmine.createSpy('setSyncStatus');
-    }
     const latch = TestBed.inject(SyncSessionValidationService);
     mockSyncService.downloadRemoteOps.and.callFake(async () => {
       latch.setFailed();
@@ -262,9 +302,6 @@ describe('WsTriggeredDownloadService', () => {
   }));
 
   it('does not flag ERROR when the download leaves the latch reset', fakeAsync(() => {
-    if (mockProviderManager.setSyncStatus === undefined) {
-      mockProviderManager.setSyncStatus = jasmine.createSpy('setSyncStatus');
-    }
     const latch = TestBed.inject(SyncSessionValidationService);
     latch._resetForTest();
 
@@ -274,6 +311,19 @@ describe('WsTriggeredDownloadService', () => {
     flushMicrotasks();
 
     expect(mockProviderManager.setSyncStatus).not.toHaveBeenCalledWith('ERROR');
+  }));
+
+  it('sets sync status ERROR when processing is blocked by an incompatible op', fakeAsync(() => {
+    mockSyncService.downloadRemoteOps.and.resolveTo({
+      kind: 'blocked_incompatible',
+    });
+
+    service.start();
+    notification$.next({ latestSeq: 1 });
+    tick(500);
+    flushMicrotasks();
+
+    expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
   }));
 
   // Defense against stale latch from a prior path: the WS service opens its

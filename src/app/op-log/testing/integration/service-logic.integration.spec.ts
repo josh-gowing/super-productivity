@@ -316,7 +316,10 @@ describe('Service Logic Integration', () => {
       },
     );
     applierSpy = jasmine.createSpyObj('OperationApplierService', ['applyOperations']);
-    applierSpy.applyOperations.and.returnValue(Promise.resolve({ appliedOps: [] }));
+    applierSpy.applyOperations.and.callFake(async (ops, options) => {
+      await options?.onReducersCommitted?.(ops);
+      return { appliedOps: ops };
+    });
 
     // Create spy properly before using in TestBed
     const waitServiceSpy = jasmine.createSpyObj('UserInputWaitStateService', [

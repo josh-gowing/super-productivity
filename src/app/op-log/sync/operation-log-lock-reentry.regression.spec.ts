@@ -218,14 +218,16 @@ describe('regression #7700: operation-log lock reentry', () => {
     // Hold the lock comfortably longer than the full retry budget:
     // 3 attempts × ~1000ms timeout + 100ms + 200ms backoffs ≈ 3300ms.
     // 10000ms is generous.
-    await lockService.request(
-      LOCK_NAMES.OPERATION_LOG,
-      async () => {
-        // Caller forgot the flag — same as a buggy refactor.
-        await effects.processDeferredActions();
-      },
-      10000,
-    );
+    await expectAsync(
+      lockService.request(
+        LOCK_NAMES.OPERATION_LOG,
+        async () => {
+          // Caller forgot the flag — same as a buggy refactor.
+          await effects.processDeferredActions();
+        },
+        10000,
+      ),
+    ).toBeRejected();
 
     // Action was NOT written — no silent persistence.
     expect(opLogStoreSpy.appendWithVectorClockUpdate).not.toHaveBeenCalled();

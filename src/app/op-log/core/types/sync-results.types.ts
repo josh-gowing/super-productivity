@@ -1,4 +1,4 @@
-import { Operation, VectorClock } from '../operation.types';
+import { Operation, OperationLogEntry, VectorClock } from '../operation.types';
 import { OperationSyncProviderMode } from '../../sync-providers/provider.interface';
 
 /**
@@ -106,6 +106,13 @@ export interface UploadResult {
   piggybackedOps: Operation[];
   rejectedCount: number;
   rejectedOps: RejectedOpInfo[];
+  /** Exact in-lock pending set considered by this upload round. */
+  selectedPendingOps?: OperationLogEntry[];
+  /**
+   * Accepted/local-only operation sequences whose acknowledgement was deliberately
+   * deferred until the caller has resolved and applied piggybacked operations.
+   */
+  pendingAcknowledgementSeqs?: number[];
   /**
    * Number of local-win update ops created during LWW conflict resolution.
    * These ops need to be uploaded to propagate local state to other clients.
@@ -170,6 +177,13 @@ export interface UploadOptions {
    * Use this for operations that must be atomic with the upload, such as server migration checks.
    */
   preUploadCallback?: () => Promise<void>;
+
+  /**
+   * Return accepted sequence numbers to the caller instead of marking them synced
+   * immediately. Required when piggybacked full-state operations may need user
+   * resolution before the upload round is considered committed locally.
+   */
+  deferAcknowledgement?: boolean;
 
   /**
    * If true, instructs server to delete all existing user data before accepting uploaded operations.
@@ -254,6 +268,10 @@ export type DownloadOutcome =
   | {
       /** User cancelled a SYNC_IMPORT conflict dialog. */
       kind: 'cancelled';
+    }
+  | {
+      /** Processing stopped at an op this app version cannot interpret safely. */
+      kind: 'blocked_incompatible';
     };
 
 /**
@@ -284,4 +302,8 @@ export type UploadOutcome =
   | {
       /** User cancelled a piggybacked SYNC_IMPORT conflict dialog. */
       kind: 'cancelled';
+    }
+  | {
+      /** Piggyback processing stopped at an incompatible operation. */
+      kind: 'blocked_incompatible';
     };

@@ -193,15 +193,14 @@ export class MyEffects {
 
 See `operation-log.const.ts` for all configurable values:
 
-| Constant                            | Value    | Description                               |
-| ----------------------------------- | -------- | ----------------------------------------- |
-| `COMPACTION_TRIGGER`                | 500 ops  | Operations before automatic compaction    |
-| `COMPACTION_RETENTION_MS`           | 7 days   | Synced ops older than this may be deleted |
-| `EMERGENCY_COMPACTION_RETENTION_MS` | 1 day    | Shorter retention for quota exceeded      |
-| `MAX_COMPACTION_FAILURES`           | 3        | Failures before user notification         |
-| `MAX_DOWNLOAD_OPS_IN_MEMORY`        | 50,000   | Bounds memory during API download         |
-| `REMOTE_OP_FILE_RETENTION_MS`       | 14 days  | Server-side operation file retention      |
-| `PENDING_OPERATION_EXPIRY_MS`       | 24 hours | Pending ops older than this are rejected  |
+| Constant                            | Value   | Description                               |
+| ----------------------------------- | ------- | ----------------------------------------- |
+| `COMPACTION_TRIGGER`                | 500 ops | Operations before automatic compaction    |
+| `COMPACTION_RETENTION_MS`           | 7 days  | Synced ops older than this may be deleted |
+| `EMERGENCY_COMPACTION_RETENTION_MS` | 1 day   | Shorter retention for quota exceeded      |
+| `MAX_COMPACTION_FAILURES`           | 3       | Failures before user notification         |
+| `MAX_DOWNLOAD_OPS_IN_MEMORY`        | 50,000  | Bounds memory during API download         |
+| `REMOTE_OP_FILE_RETENTION_MS`       | 14 days | Server-side operation file retention      |
 
 ## 7. Quick Reference Checklist
 

@@ -87,6 +87,24 @@ export class OperationLogUploadService {
     let uploadedCount = 0;
     let rejectedCount = 0;
     let hasMorePiggyback = false;
+    let selectedPendingOps: OperationLogEntry[] = [];
+    const pendingAcknowledgementSeqs: number[] = [];
+    const pendingAcknowledgementSeqSet = new Set<number>();
+    const acknowledge = async (seqs: number[]): Promise<void> => {
+      if (seqs.length === 0) {
+        return;
+      }
+      if (!options?.deferAcknowledgement) {
+        await this.opLogStore.markSynced(seqs);
+        return;
+      }
+      for (const seq of seqs) {
+        if (!pendingAcknowledgementSeqSet.has(seq)) {
+          pendingAcknowledgementSeqSet.add(seq);
+          pendingAcknowledgementSeqs.push(seq);
+        }
+      }
+    };
     // Track encryption state of piggybacked operations for detecting encryption config mismatch.
     // When another client disables encryption, all piggybacked ops will be unencrypted.
     // We track this BEFORE decryption to detect the server's actual encryption state.
@@ -108,6 +126,7 @@ export class OperationLogUploadService {
       }
 
       const pendingOps = await this.opLogStore.getUnsynced();
+      selectedPendingOps = pendingOps;
 
       if (pendingOps.length === 0) {
         OpLog.normal('OperationLogUploadService: No pending operations to upload.');
@@ -183,7 +202,10 @@ export class OperationLogUploadService {
 
       // Upload full-state operations via snapshot endpoint
       let fullStateOpUploaded = false;
-      let lastUploadedFullStateOpId: string | undefined;
+      // Local append order (seq), not op id: UUIDv7 ids follow the wall clock and
+      // can order a post-snapshot op BEFORE the full-state op after a clock
+      // rollback, which would mark it synced without ever uploading it.
+      let lastUploadedFullStateOpSeq: number | undefined;
       for (const entry of fullStateOps) {
         // BackupImport/Repair: always wipe server (recovery operations replace all state)
         // SyncImport: only wipe when explicitly requested (preserves SYNC_IMPORT_EXISTS check)
@@ -196,16 +218,17 @@ export class OperationLogUploadService {
           isCleanSlateForOp,
         );
         if (result.accepted) {
-          await this.opLogStore.markSynced([entry.seq]);
+          await acknowledge([entry.seq]);
           uploadedCount++;
           if (result.serverSeq !== undefined) {
             await syncProvider.setLastServerSeq(result.serverSeq);
             lastKnownServerSeq = result.serverSeq;
             highestReceivedSeq = Math.max(highestReceivedSeq, result.serverSeq);
           }
-          // Track that a full-state op was uploaded - regular ops before it are already included
+          // Track that a full-state op was uploaded - regular ops appended before it
+          // are already included in its frozen snapshot payload
           fullStateOpUploaded = true;
-          lastUploadedFullStateOpId = entry.op.id;
+          lastUploadedFullStateOpSeq = entry.seq;
         } else {
           // Special handling for SYNC_IMPORT_EXISTS: another client already uploaded
           // a SYNC_IMPORT. We should delete our local SYNC_IMPORT and let the normal
@@ -246,16 +269,16 @@ export class OperationLogUploadService {
         return;
       }
 
-      if (fullStateOpUploaded && lastUploadedFullStateOpId) {
+      if (fullStateOpUploaded && lastUploadedFullStateOpSeq !== undefined) {
         const { opsIncludedInSnapshot, opsAfterSnapshot } =
           planRegularOpsAfterFullStateUpload({
             regularOps,
-            lastUploadedFullStateOpId,
+            lastUploadedFullStateOpSeq,
           });
 
         if (opsIncludedInSnapshot.length > 0) {
           const seqs = opsIncludedInSnapshot.map((entry) => entry.seq);
-          await this.opLogStore.markSynced(seqs);
+          await acknowledge(seqs);
           uploadedCount += seqs.length;
           OpLog.normal(
             `OperationLogUploadService: Marked ${seqs.length} regular ops as synced ` +
@@ -290,7 +313,7 @@ export class OperationLogUploadService {
         }
       }
       if (localOnlySeqs.length > 0) {
-        await this.opLogStore.markSynced(localOnlySeqs);
+        await acknowledge(localOnlySeqs);
         uploadedCount += localOnlySeqs.length;
         OpLog.normal(
           `OperationLogUploadService: Marked ${localOnlySeqs.length} local-only op(s) as synced without upload`,
@@ -336,7 +359,7 @@ export class OperationLogUploadService {
           .filter((seq): seq is number => seq !== undefined);
 
         if (acceptedSeqs.length > 0) {
-          await this.opLogStore.markSynced(acceptedSeqs);
+          await acknowledge(acceptedSeqs);
           uploadedCount += acceptedSeqs.length;
         }
 
@@ -474,6 +497,9 @@ export class OperationLogUploadService {
       ...(piggybackHasOnlyUnencryptedData ? { piggybackHasOnlyUnencryptedData } : {}),
       ...(lastServerSeqToPersist !== undefined ? { lastServerSeqToPersist } : {}),
       ...(encryptionRequiredKeyMissing ? { encryptionRequiredKeyMissing: true } : {}),
+      ...(options?.deferAcknowledgement
+        ? { selectedPendingOps, pendingAcknowledgementSeqs }
+        : {}),
     };
   }
 

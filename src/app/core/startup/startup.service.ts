@@ -14,6 +14,7 @@ import { IS_ELECTRON } from '../../app.constants';
 import { Log } from '../log';
 import { T } from '../../t.const';
 import { OperationLogStoreService } from '../../op-log/persistence/operation-log-store.service';
+import { OperationLogSyncService } from '../../op-log/sync/operation-log-sync.service';
 import { LegacyPfDbService } from '../persistence/legacy-pf-db.service';
 import { BannerId } from '../banner/banner.model';
 import { isOnline$ } from '../../util/is-online';
@@ -169,6 +170,9 @@ export class StartupService {
 
       this._ratePromptService.init();
       await this._initPlugins();
+      // Last in the deferred body: the snack it may open is persistent and the
+      // single snack slot must not be reclaimed by the productivity tip above.
+      await this._offerInterruptedRebuildRecoveryIfNeeded();
     }, DEFERRED_INIT_DELAY_MS);
 
     if (IS_ELECTRON) {
@@ -255,6 +259,32 @@ export class StartupService {
       }
       // trigger backup init after
       this._localBackupService.init();
+    }
+  }
+
+  /**
+   * An interrupted USE_REMOTE rebuild leaves the user booting into the rebuild
+   * baseline instead of their data. Sync (when it runs) resumes the rebuild by
+   * itself — but when it cannot (offline, or the user disabled sync after
+   * finding the app "emptied" by the crash), the pre-replace backup would have
+   * no visible entry point. Surfaces the persistent restore snack in that case.
+   */
+  private async _offerInterruptedRebuildRecoveryIfNeeded(): Promise<void> {
+    try {
+      const [isIncomplete, completedRecovery] = await Promise.all([
+        this._opLogStore.isRawRebuildIncomplete(),
+        this._opLogStore.loadRawRebuildRecovery(),
+      ]);
+      if (isIncomplete || completedRecovery) {
+        await this._injector
+          .get(OperationLogSyncService)
+          .offerInterruptedRebuildRecovery();
+      }
+    } catch (err) {
+      Log.err({
+        stage: 'interrupted-rebuild-recovery-check',
+        error: (err as Error)?.message,
+      });
     }
   }
 

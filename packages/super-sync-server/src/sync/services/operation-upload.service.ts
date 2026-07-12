@@ -1,6 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { Logger } from '../../logger';
-import { computeOpStorageBytes } from '../sync.const';
+import {
+  CLIENT_ID_REGEX,
+  computeOpStorageBytes,
+  MAX_CLIENT_ID_LENGTH,
+} from '../sync.const';
 import {
   AcceptedBatchOperation,
   BatchUploadCandidate,
@@ -11,6 +15,7 @@ import {
   isFullStateOpType,
   limitVectorClockSize,
   Operation,
+  OP_TYPES,
   ProcessOperationResult,
   SyncConfig,
   SYNC_ERROR_CODES,
@@ -24,17 +29,63 @@ import {
   getStoredEntityIds,
   getEntityConflictKey,
   isSameDuplicateOperation,
+  isSameIncomingOperation,
   prefetchLatestEntityOpsForBatch,
   pruneVectorClockForStorage,
   resolveConflictForExistingOp,
 } from '../conflict';
-import { ValidationService } from './validation.service';
+import {
+  ALLOWED_ENTITY_TYPES,
+  ValidationService,
+  type ValidationResult,
+} from './validation.service';
 
 // Observability threshold: log a warning when the full-state op aggregate scan
 // exceeds this duration. Mirrors the threshold used by the legacy snapshot
 // vector-clock aggregate in OperationDownloadService so production logs use a
 // consistent slow-aggregate signal.
 const SLOW_FULL_STATE_AGGREGATE_MS = 5_000;
+const INVALID_AUDIT_FIELD = '[invalid]';
+const SAFE_AUDIT_ID_REGEX = /^[A-Za-z0-9_-]+$/;
+
+const isSafeAuditIdentifier = (value: unknown, maxLength: number): value is string =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  value.length <= maxLength &&
+  SAFE_AUDIT_ID_REGEX.test(value);
+
+const getSafeAuditOperationMetadata = (
+  op: Operation,
+): { opId: string; entityType: string; entityId?: string; opType: string } => {
+  const rawOp = op as unknown as Record<string, unknown>;
+  const rawOpId = rawOp['id'];
+  const rawEntityType = rawOp['entityType'];
+  const rawEntityId = rawOp['entityId'];
+  const rawOpType = rawOp['opType'];
+
+  return {
+    opId: isSafeAuditIdentifier(rawOpId, 255) ? rawOpId : INVALID_AUDIT_FIELD,
+    entityType:
+      typeof rawEntityType === 'string' && ALLOWED_ENTITY_TYPES.has(rawEntityType)
+        ? rawEntityType
+        : INVALID_AUDIT_FIELD,
+    entityId:
+      rawEntityId === undefined || rawEntityId === null
+        ? undefined
+        : isSafeAuditIdentifier(rawEntityId, 255)
+          ? rawEntityId
+          : INVALID_AUDIT_FIELD,
+    opType:
+      typeof rawOpType === 'string' && OP_TYPES.includes(rawOpType as Operation['opType'])
+        ? rawOpType
+        : INVALID_AUDIT_FIELD,
+  };
+};
+
+const getSafeAuditClientId = (clientId: string): string =>
+  clientId.length <= MAX_CLIENT_ID_LENGTH && CLIENT_ID_REGEX.test(clientId)
+    ? clientId
+    : INVALID_AUDIT_FIELD;
 
 const toSafeServerSeq = (value: number | bigint | undefined, userId: number): number => {
   if (typeof value === 'bigint') {
@@ -74,9 +125,8 @@ export class OperationUploadService {
       Logger.audit({
         event: 'TIMESTAMP_CLAMPED',
         userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
+        clientId: getSafeAuditClientId(clientId),
+        ...getSafeAuditOperationMetadata(op),
         originalTimestamp,
         clampedTo: maxAllowedTimestamp,
         driftMs: originalTimestamp - now,
@@ -96,13 +146,10 @@ export class OperationUploadService {
     Logger.audit({
       event: 'OP_REJECTED',
       userId,
-      clientId,
-      opId: op.id,
-      entityType: op.entityType,
-      entityId: op.entityId,
+      clientId: getSafeAuditClientId(clientId),
+      ...getSafeAuditOperationMetadata(op),
       errorCode,
-      reason: error,
-      opType: op.opType,
+      reason: errorCode ?? 'OP_REJECTED',
     });
 
     return {
@@ -188,6 +235,8 @@ export class OperationUploadService {
     ops: Operation[],
     now: number,
     tx: Prisma.TransactionClient,
+    prevalidatedResults?: ReadonlyMap<Operation, ValidationResult>,
+    requestStartOccupiedIds?: ReadonlySet<string>,
   ): Promise<{
     results: UploadResult[];
     acceptedDeltaBytes: number;
@@ -208,14 +257,13 @@ export class OperationUploadService {
       ops,
       now,
       results,
+      prevalidatedResults,
     );
 
-    const uniqueCandidates = this.rejectIntraBatchDuplicates(
-      userId,
-      clientId,
-      validatedCandidates,
-      results,
-    );
+    // Intra-batch duplicate ids were already terminally rejected in stage 1:
+    // validateAndClampBatch reserves each id on first occurrence (including
+    // invalid first siblings), so validatedCandidates is unique by op id.
+    const uniqueCandidates = validatedCandidates;
 
     if (uniqueCandidates.length === 0) {
       return {
@@ -232,6 +280,7 @@ export class OperationUploadService {
       uniqueCandidates,
       tx,
       results,
+      requestStartOccupiedIds,
     );
     dbRoundtrips += classified.dbRoundtrips;
     const duplicateFreeCandidates = classified.duplicateFreeCandidates;
@@ -276,8 +325,9 @@ export class OperationUploadService {
   }
 
   /**
-   * Stage 1: clamp future timestamps and validate every op in memory (no DB).
-   * Invalid ops get a terminal rejection written into `results` by index.
+   * Stage 1: reserve each transport-level operation ID, clamp timestamps, and
+   * validate every first occurrence in memory (no DB). Invalid first ops and
+   * every later same-ID sibling get terminal results by index.
    */
   private validateAndClampBatch(
     userId: number,
@@ -285,12 +335,41 @@ export class OperationUploadService {
     ops: Operation[],
     now: number,
     results: UploadResult[],
+    prevalidatedResults?: ReadonlyMap<Operation, ValidationResult>,
   ): BatchUploadCandidate[] {
     const validatedCandidates: BatchUploadCandidate[] = [];
+    const firstOperationById = new Map<
+      string,
+      { op: Operation; originalTimestamp: number }
+    >();
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i];
       const originalTimestamp = this.clampFutureTimestamp(userId, clientId, op, now);
-      const validation = this.validationService.validateOp(op, clientId);
+      const firstOperation = firstOperationById.get(op.id);
+      if (firstOperation) {
+        const isExactRetry = isSameIncomingOperation(
+          firstOperation.op,
+          op,
+          firstOperation.originalTimestamp,
+          originalTimestamp,
+        );
+        results[i] = this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          isExactRetry
+            ? 'Duplicate operation ID'
+            : 'Operation ID already belongs to a different operation',
+          isExactRetry
+            ? SYNC_ERROR_CODES.DUPLICATE_OPERATION
+            : SYNC_ERROR_CODES.INVALID_OP_ID,
+        );
+        continue;
+      }
+      firstOperationById.set(op.id, { op, originalTimestamp });
+
+      const validation =
+        prevalidatedResults?.get(op) ?? this.validationService.validateOp(op, clientId);
 
       if (!validation.valid) {
         results[i] = this.rejectedUploadResult(
@@ -317,41 +396,12 @@ export class OperationUploadService {
   }
 
   /**
-   * Stage 2: within a single batch, accept the first op for an id and reject
-   * every later op sharing that id as DUPLICATE_OPERATION (by id, not content
-   * — see plan §1a step 2 / the C4 divergence note). Must run before sequence
-   * reservation so a duplicate never consumes a server_seq.
-   */
-  private rejectIntraBatchDuplicates(
-    userId: number,
-    clientId: string,
-    validatedCandidates: BatchUploadCandidate[],
-    results: UploadResult[],
-  ): BatchUploadCandidate[] {
-    const seenOpIds = new Set<string>();
-    const uniqueCandidates: BatchUploadCandidate[] = [];
-    for (const candidate of validatedCandidates) {
-      if (seenOpIds.has(candidate.op.id)) {
-        results[candidate.resultIndex] = this.rejectedUploadResult(
-          userId,
-          clientId,
-          candidate.op,
-          'Duplicate operation ID',
-          SYNC_ERROR_CODES.DUPLICATE_OPERATION,
-        );
-        continue;
-      }
-      seenOpIds.add(candidate.op.id);
-      uniqueCandidates.push(candidate);
-    }
-    return uniqueCandidates;
-  }
-
-  /**
-   * Stage 3: prefetch any already-persisted ops sharing an incoming id (one
+   * Stage 3: prefetch any currently persisted ops sharing an incoming id (one
    * query) and classify each as an idempotent retry (DUPLICATE_OPERATION) or
-   * an id collision with different content (INVALID_OP_ID). Survivors are
-   * returned for conflict detection.
+   * an id collision with different content (INVALID_OP_ID). If quota cleanup
+   * removed a row after the route's occupancy check, the request-start set
+   * still rejects that ID rather than letting it consume unestimated storage.
+   * Survivors are returned for conflict detection.
    */
   private async classifyExistingDuplicates(
     userId: number,
@@ -359,6 +409,7 @@ export class OperationUploadService {
     uniqueCandidates: BatchUploadCandidate[],
     tx: Prisma.TransactionClient,
     results: UploadResult[],
+    requestStartOccupiedIds?: ReadonlySet<string>,
   ): Promise<{
     duplicateFreeCandidates: BatchUploadCandidate[];
     dbRoundtrips: number;
@@ -375,6 +426,16 @@ export class OperationUploadService {
     for (const candidate of uniqueCandidates) {
       const existingOp = existingOpById.get(candidate.op.id);
       if (!existingOp) {
+        if (requestStartOccupiedIds?.has(candidate.op.id)) {
+          results[candidate.resultIndex] = this.rejectedUploadResult(
+            userId,
+            clientId,
+            candidate.op,
+            'Operation ID was already occupied before quota enforcement',
+            SYNC_ERROR_CODES.INVALID_OP_ID,
+          );
+          continue;
+        }
         duplicateFreeCandidates.push(candidate);
         continue;
       }
@@ -602,6 +663,9 @@ export class OperationUploadService {
     op: Operation,
     now: number,
     tx: Prisma.TransactionClient,
+    prevalidatedResult?: ValidationResult,
+    wasOccupiedAtRequestStart?: boolean,
+    firstRequestOperation?: { op: Operation; originalTimestamp: number },
   ): Promise<ProcessOperationResult> {
     // Rejected ops have no storage cost; the caller only reads storageBytes when
     // result.accepted is true.
@@ -616,26 +680,42 @@ export class OperationUploadService {
     const originalTimestamp = this.clampFutureTimestamp(userId, clientId, op, now);
 
     // Validate operation (including clientId match)
-    const validation = this.validationService.validateOp(op, clientId);
-    if (!validation.valid) {
-      Logger.audit({
-        event: 'OP_REJECTED',
-        userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
-        entityId: op.entityId,
-        errorCode: validation.errorCode,
-        reason: validation.error,
-        opType: op.opType,
-      });
-      return reject({
-        opId: op.id,
-        accepted: false,
-        error: validation.error,
-        errorCode: validation.errorCode,
-      });
+    const validation =
+      prevalidatedResult ?? this.validationService.validateOp(op, clientId);
+    if (firstRequestOperation) {
+      const isExactRetry = isSameIncomingOperation(
+        firstRequestOperation.op,
+        op,
+        firstRequestOperation.originalTimestamp,
+        originalTimestamp,
+      );
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          isExactRetry
+            ? 'Duplicate operation ID'
+            : 'Operation ID already belongs to a different operation',
+          isExactRetry
+            ? SYNC_ERROR_CODES.DUPLICATE_OPERATION
+            : SYNC_ERROR_CODES.INVALID_OP_ID,
+        ),
+      );
     }
+
+    if (!validation.valid) {
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          validation.error,
+          validation.errorCode,
+        ),
+      );
+    }
+
     // Capture the *unpruned* vector clock for full-state ops. The op row stores
     // the pruned clock (see `limitVectorClockSize` call below); persisting the
     // unpruned copy on `user_sync_state` lets the download path re-prune at
@@ -663,42 +743,38 @@ export class OperationUploadService {
           originalTimestamp,
         )
       ) {
-        Logger.audit({
-          event: 'OP_REJECTED',
-          userId,
-          clientId,
-          opId: op.id,
-          entityType: op.entityType,
-          entityId: op.entityId,
-          errorCode: SYNC_ERROR_CODES.INVALID_OP_ID,
-          reason: 'Operation ID already belongs to a different operation',
-          opType: op.opType,
-        });
-        return reject({
-          opId: op.id,
-          accepted: false,
-          error: 'Operation ID already belongs to a different operation',
-          errorCode: SYNC_ERROR_CODES.INVALID_OP_ID,
-        });
+        return reject(
+          this.rejectedUploadResult(
+            userId,
+            clientId,
+            op,
+            'Operation ID already belongs to a different operation',
+            SYNC_ERROR_CODES.INVALID_OP_ID,
+          ),
+        );
       }
 
-      Logger.audit({
-        event: 'OP_REJECTED',
-        userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
-        entityId: op.entityId,
-        errorCode: SYNC_ERROR_CODES.DUPLICATE_OPERATION,
-        reason: 'Duplicate operation ID (pre-check)',
-        opType: op.opType,
-      });
-      return reject({
-        opId: op.id,
-        accepted: false,
-        error: 'Duplicate operation ID',
-        errorCode: SYNC_ERROR_CODES.DUPLICATE_OPERATION,
-      });
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          'Duplicate operation ID',
+          SYNC_ERROR_CODES.DUPLICATE_OPERATION,
+        ),
+      );
+    }
+
+    if (wasOccupiedAtRequestStart) {
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          'Operation ID was already occupied before quota enforcement',
+          SYNC_ERROR_CODES.INVALID_OP_ID,
+        ),
+      );
     }
 
     // Check for conflicts with existing operations
@@ -709,24 +785,16 @@ export class OperationUploadService {
         conflict.conflictType === 'equal_different_client'
           ? SYNC_ERROR_CODES.CONFLICT_CONCURRENT
           : SYNC_ERROR_CODES.CONFLICT_SUPERSEDED;
-      Logger.audit({
-        event: 'OP_REJECTED',
-        userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
-        entityId: op.entityId,
-        errorCode,
-        reason: conflict.reason,
-        opType: op.opType,
-      });
-      return reject({
-        opId: op.id,
-        accepted: false,
-        error: conflict.reason,
-        errorCode,
-        existingClock: conflict.existingClock,
-      });
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          conflict.reason,
+          errorCode,
+          conflict.existingClock,
+        ),
+      );
     }
 
     // Get next sequence number
@@ -752,24 +820,16 @@ export class OperationUploadService {
         finalConflict.conflictType === 'equal_different_client'
           ? SYNC_ERROR_CODES.CONFLICT_CONCURRENT
           : SYNC_ERROR_CODES.CONFLICT_SUPERSEDED;
-      Logger.audit({
-        event: 'OP_REJECTED',
-        userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
-        entityId: op.entityId,
-        errorCode,
-        reason: `[RACE] ${finalConflict.reason}`,
-        opType: op.opType,
-      });
-      return reject({
-        opId: op.id,
-        accepted: false,
-        error: finalConflict.reason,
-        errorCode,
-        existingClock: finalConflict.existingClock,
-      });
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          finalConflict.reason,
+          errorCode,
+          finalConflict.existingClock,
+        ),
+      );
     }
 
     // Prune vector clock AFTER conflict detection but BEFORE storage.
@@ -851,42 +911,26 @@ export class OperationUploadService {
           originalTimestamp,
         )
       ) {
-        Logger.audit({
-          event: 'OP_REJECTED',
-          userId,
-          clientId,
-          opId: op.id,
-          entityType: op.entityType,
-          entityId: op.entityId,
-          errorCode: SYNC_ERROR_CODES.INVALID_OP_ID,
-          reason: 'Operation ID already belongs to a different operation',
-          opType: op.opType,
-        });
-        return reject({
-          opId: op.id,
-          accepted: false,
-          error: 'Operation ID already belongs to a different operation',
-          errorCode: SYNC_ERROR_CODES.INVALID_OP_ID,
-        });
+        return reject(
+          this.rejectedUploadResult(
+            userId,
+            clientId,
+            op,
+            'Operation ID already belongs to a different operation',
+            SYNC_ERROR_CODES.INVALID_OP_ID,
+          ),
+        );
       }
 
-      Logger.audit({
-        event: 'OP_REJECTED',
-        userId,
-        clientId,
-        opId: op.id,
-        entityType: op.entityType,
-        entityId: op.entityId,
-        errorCode: SYNC_ERROR_CODES.DUPLICATE_OPERATION,
-        reason: 'Duplicate operation ID (insert race)',
-        opType: op.opType,
-      });
-      return reject({
-        opId: op.id,
-        accepted: false,
-        error: 'Duplicate operation ID',
-        errorCode: SYNC_ERROR_CODES.DUPLICATE_OPERATION,
-      });
+      return reject(
+        this.rejectedUploadResult(
+          userId,
+          clientId,
+          op,
+          'Duplicate operation ID',
+          SYNC_ERROR_CODES.DUPLICATE_OPERATION,
+        ),
+      );
     }
 
     if (fullStateVectorClock) {

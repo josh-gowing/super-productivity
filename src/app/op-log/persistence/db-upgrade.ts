@@ -146,4 +146,8 @@ export const runDbUpgrade = (
     db.createObjectStore(STORE_NAMES.META);
     populateFullStateOpsMetaDuringUpgrade(transaction);
   }
+
+  // Version 8: no shape change. The version itself is a downgrade barrier for
+  // `archive_pending`; v7 readers must fail closed instead of silently skipping
+  // reducer-committed operations whose archive work is still outstanding.
 };

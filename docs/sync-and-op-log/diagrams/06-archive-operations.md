@@ -86,10 +86,13 @@ flowchart TD
     end
 
     subgraph RemoteOp["REMOTE Operation (Sync)"]
-        R1[Download operation<br/>from sync] --> R2[OperationApplierService<br/>dispatches action]
-        R2 --> R3[Meta-reducers update NgRx state]
-        R3 --> R4["ArchiveOperationHandler<br/>.handleOperation"]
-        R4 --> R5["Write to IndexedDB<br/>(archiveYoung/archiveOld)"]
+        R1[Download operation<br/>from sync] --> R2["Append remote row<br/>status: pending"]
+        R2 --> R3["Bulk reducer dispatch<br/>meta.isRemote=true"]
+        R3 --> R4["Atomic reducer checkpoint:<br/>archive_pending + vector clocks"]
+        R4 --> R5["ArchiveOperationHandler<br/>.handleOperation"]
+        R5 --> R6{"Archive side effect<br/>succeeded?"}
+        R6 -->|Yes| R7["Mark applied"]
+        R6 -->|No| R8["Bump attempted row retryCount;<br/>successors stay quarantined"]
 
         NoEffect["❌ Regular effects DON'T run<br/>(action has meta.isRemote=true)"]
     end
@@ -113,14 +116,15 @@ flowchart TD
 
 ## ArchiveOperationHandler Integration
 
-The `OperationApplierService` applies operations in the order they arrive from the sync server, which preserves causal ordering (each client uploads its ops in causal order, and the server assigns sequence numbers in upload order). It converts each op to an action, applies the batch via a single bulk dispatch, then runs archive side effects. If an operation fails to apply, the applier returns it as a `failedOp`; the caller surfaces a partial-apply failure and re-validates state, and the op is retried on the next hydration.
+The `OperationApplierService` applies operations in the order they arrive from the sync server, which preserves causal ordering (each client uploads its ops in causal order, and the server assigns sequence numbers in upload order). Incoming rows are first stored as `pending`. Immediately after the single bulk reducer dispatch, one transaction changes the whole reducer-committed batch to `archive_pending` and merges its vector clocks; only then do archive side effects run. Successful rows become `applied`. If an archive side effect throws, only the attempted row becomes `failed` and consumes `retryCount`; unattempted successors remain `archive_pending`. On startup, hydration restores reducer state and retries `archive_pending`/`failed` rows with reducer dispatch disabled, so additive reducers are never applied twice.
 
 ```mermaid
 flowchart TD
     subgraph OperationApplierService["OperationApplierService (Bulk Dispatch)"]
-        OA1[Receive operations] --> OA3[convertOpToAction]
-        OA3 --> OA4["store.dispatch(action)<br/>with meta.isRemote=true"]
-        OA4 --> OA5["archiveOperationHandler<br/>.handleOperation(action)"]
+        OA1["Receive rows already stored<br/>as pending"] --> OA3[convertOpToAction]
+        OA3 --> OA4["Single bulk dispatch<br/>with meta.isRemote=true"]
+        OA4 --> OA4b["Atomic reducer checkpoint:<br/>archive_pending + vector clocks"]
+        OA4b --> OA5["archiveOperationHandler<br/>.handleOperation(action)"]
     end
 
     subgraph Handler["ArchiveOperationHandler"]

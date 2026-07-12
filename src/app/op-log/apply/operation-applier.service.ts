@@ -106,7 +106,10 @@ export class OperationApplierService implements OperationApplyPort<Operation> {
 
     const result = await replayOperationBatch({
       ops,
-      applyOptions: { isLocalHydration },
+      applyOptions: {
+        isLocalHydration,
+        skipReducerDispatch: options.skipReducerDispatch,
+      },
       dispatcher: this.store,
       createBulkApplyAction: (operations) =>
         bulkApplyOperations({ operations, localClientId }),
@@ -126,6 +129,7 @@ export class OperationApplierService implements OperationApplyPort<Operation> {
         // this action is now disabled to prevent UI freezes during bulk archive sync.
         this.store.dispatch(remoteArchiveDataApplied());
       },
+      onReducersCommitted: options.onReducersCommitted,
       onArchiveSideEffectError: ({ op, processedCount, error }) => {
         OpLog.err(
           `OperationApplierService: Failed archive handling for operation ${op.id}. ` +

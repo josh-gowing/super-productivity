@@ -797,6 +797,51 @@ describe('OperationLogDownloadService', () => {
         expect(mockApiProvider.downloadOps).toHaveBeenCalledTimes(2);
       });
 
+      it('should reject an empty page that claims more data', async () => {
+        mockApiProvider.downloadOps.and.resolveTo({
+          ops: [],
+          hasMore: true,
+          latestSeq: 10,
+        });
+
+        const result = await service.downloadRemoteOps(mockApiProvider);
+
+        expect(result.success).toBeFalse();
+        expect(result.newOps).toEqual([]);
+        expect(mockSuperSyncStatusService.markRemoteChecked).not.toHaveBeenCalled();
+      });
+
+      it('should reject a page that does not advance its cursor while claiming more data', async () => {
+        mockApiProvider.getLastServerSeq.and.resolveTo(5);
+        mockApiProvider.downloadOps.and.resolveTo({
+          ops: [
+            {
+              serverSeq: 5,
+              receivedAt: Date.now(),
+              op: {
+                id: 'op-stuck',
+                clientId: 'c1',
+                actionType: '[Task] Update' as ActionType,
+                opType: OpType.Update,
+                entityType: 'TASK',
+                payload: {},
+                vectorClock: {},
+                timestamp: Date.now(),
+                schemaVersion: 1,
+              },
+            },
+          ],
+          hasMore: true,
+          latestSeq: 10,
+        });
+
+        const result = await service.downloadRemoteOps(mockApiProvider);
+
+        expect(result.success).toBeFalse();
+        expect(result.newOps).toEqual([]);
+        expect(mockApiProvider.downloadOps).toHaveBeenCalledTimes(1);
+      });
+
       it('should filter already applied operations', async () => {
         mockOpLogStore.getAppliedOpIds.and.returnValue(
           Promise.resolve(new Set(['op-1'])),

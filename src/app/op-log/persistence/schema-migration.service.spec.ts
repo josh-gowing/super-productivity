@@ -147,6 +147,13 @@ describe('SchemaMigrationService', () => {
       // Should return the operation (with undefined treated as version 1)
       expect(result).not.toBeNull();
     });
+
+    it('should reject a present non-integer schema version at the migration boundary', () => {
+      const op = createMockOperation('malformed-op');
+      op.schemaVersion = '2' as unknown as number;
+
+      expect(() => service.migrateOperation(op)).toThrowError(/schemaVersion/);
+    });
   });
 
   describe('migrateOperations', () => {
@@ -180,6 +187,33 @@ describe('SchemaMigrationService', () => {
       const result = service.migrateOperations(ops);
 
       expect(result.map((op) => op.id)).toEqual(['op-a', 'op-b', 'op-c']);
+    });
+
+    it('should preserve unique migrated identities when a v1 config operation splits', () => {
+      const op = createMockOperation('config-op', 1);
+      op.actionType = ActionType.GLOBAL_CONFIG_UPDATE_SECTION;
+      op.entityType = 'GLOBAL_CONFIG';
+      op.entityId = 'misc';
+      op.entityIds = ['misc'];
+      op.payload = {
+        actionPayload: {
+          sectionKey: 'misc',
+          sectionCfg: {
+            isConfirmBeforeTaskDelete: true,
+            unrelatedMiscSetting: 'keep-me',
+          },
+        },
+        entityChanges: [],
+      };
+
+      const result = service.migrateOperations([op]);
+
+      expect(result.map((migrated) => migrated.id)).toEqual([
+        'config-op_misc',
+        'config-op_tasks',
+      ]);
+      expect(result.map((migrated) => migrated.entityId)).toEqual(['misc', 'tasks']);
+      expect(result.map((migrated) => migrated.entityIds)).toEqual([['misc'], ['tasks']]);
     });
   });
 

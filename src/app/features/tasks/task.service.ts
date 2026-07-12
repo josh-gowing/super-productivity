@@ -123,6 +123,7 @@ export class TaskService {
   private readonly _taskFocusService = inject(TaskFocusService);
   private readonly _deletedTaskIssueSidecar = inject(DeletedTaskIssueSidecarService);
   private readonly _timeBlockDeleteSidecar = inject(TimeBlockDeleteSidecarService);
+  private readonly _archiveTaskPromisesById = new Map<string, Promise<void>>();
 
   currentTaskId$: Observable<string | null> = this._store.pipe(
     select(selectCurrentTaskId),
@@ -965,15 +966,60 @@ export class TaskService {
       }
     }
 
-    if (parentTasks.length) {
-      TaskLog.log('[TaskService] Dispatching moveToArchive action for parent tasks');
+    const parentTasksToArchive: TaskWithSubTasks[] = [];
+    const reservedTaskIds = new Set<string>();
+    const existingArchivePromises = new Set<Promise<void>>();
+    for (const task of parentTasks) {
+      if (task.id) {
+        const existingArchivePromise = this._archiveTaskPromisesById.get(task.id);
+        if (existingArchivePromise) {
+          TaskLog.log('[TaskService] Archive already in progress', { id: task.id });
+          existingArchivePromises.add(existingArchivePromise);
+          continue;
+        }
+        if (reservedTaskIds.has(task.id)) {
+          continue;
+        }
+        reservedTaskIds.add(task.id);
+      }
+      parentTasksToArchive.push(task);
+    }
+
+    if (parentTasksToArchive.length) {
       // Only move parent tasks to archive, never subtasks
       // Note: Full task payload required for sync - see docs/archive-operation-redesign.md
-      this._store.dispatch(TaskSharedActions.moveToArchive({ tasks: parentTasks }));
-      // Only archive parent tasks to prevent orphaned subtasks
-      TaskLog.log('[TaskService] Calling archive service to persist tasks');
-      await this._archiveService.moveTasksToArchiveAndFlushArchiveIfDue(parentTasks);
-      TaskLog.log('[TaskService] Archive operation completed successfully');
+      // Persist first: dispatch removes the tasks from NgRx and makes the captured
+      // operation eligible for a full-state snapshot. If archive persistence were
+      // still in flight, that snapshot could acknowledge the operation while
+      // omitting its archived task data.
+      const archivePromise = (async (): Promise<void> => {
+        TaskLog.log('[TaskService] Calling archive service to persist tasks');
+        await this._archiveService.moveTasksToArchiveAndFlushArchiveIfDue(
+          parentTasksToArchive,
+        );
+        TaskLog.log('[TaskService] Dispatching moveToArchive action for parent tasks');
+        this._store.dispatch(
+          TaskSharedActions.moveToArchive({ tasks: parentTasksToArchive }),
+        );
+        TaskLog.log('[TaskService] Archive operation completed successfully');
+      })();
+      for (const taskId of reservedTaskIds) {
+        this._archiveTaskPromisesById.set(taskId, archivePromise);
+      }
+
+      try {
+        await Promise.all([...existingArchivePromises, archivePromise]);
+      } finally {
+        for (const taskId of reservedTaskIds) {
+          if (this._archiveTaskPromisesById.get(taskId) === archivePromise) {
+            this._archiveTaskPromisesById.delete(taskId);
+          }
+        }
+      }
+    } else if (existingArchivePromises.size > 0) {
+      // A duplicate caller observes the same success/failure and does not return
+      // before the durable archive write plus NgRx removal have completed.
+      await Promise.all(existingArchivePromises);
     } else {
       TaskLog.log('[TaskService] No parent tasks to archive');
     }

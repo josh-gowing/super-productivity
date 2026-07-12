@@ -22,6 +22,8 @@ import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { ArchiveModel } from '../../features/archive/archive.model';
 import { ArchiveDbAdapter } from '../../core/persistence/archive-db-adapter.service';
 import { OpType } from '../core/operation.types';
+import { LockService } from '../sync/lock.service';
+import { LOCK_NAMES } from '../core/operation-log.const';
 import { confirmDialog } from '../../util/native-dialogs';
 
 /**
@@ -36,6 +38,15 @@ const createEmptyArchiveModel = (): ArchiveModel => ({
 
 /**
  * Action types that affect archive storage and require special handling.
+ *
+ * INVARIANT: every archive side effect for these actions must be idempotent
+ * even when it already fully succeeded once. Crash recovery marks interrupted
+ * remote ops `archive_pending` (OperationLogRecoveryService) and the hydrator
+ * retry re-runs their archive work with `skipReducerDispatch` — the crash
+ * window is between archive completion and `markApplied()`, so a re-run can hit
+ * an archive that is already up to date. Use id-keyed writes / overwrites, never
+ * additive merges (e.g. `archiveTT[...] = value`, not `+=`); an additive path
+ * here would silently double-count time-tracking / counter deltas on this path.
  */
 const ARCHIVE_AFFECTING_ACTION_TYPES: string[] = [
   TaskSharedActions.moveToArchive.type,
@@ -95,7 +106,7 @@ export const isArchiveAffectingAction = (action: Action): action is PersistentAc
  *
  * ## Important Notes
  *
- * - For remote operations, uses `isIgnoreDBLock: true` because sync processing has the DB locked
+ * - Remote archive mutations serialize behind the TASK_ARCHIVE mutex (separate from the OPERATION_LOG lock sync holds)
  * - All operations are idempotent - safe to run multiple times
  * - Use `isArchiveAffectingAction()` helper to check if an action needs archive handling
  */
@@ -119,6 +130,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
   // ═══════════════════════════════════════════════════════════════════════════
   private _injector = inject(Injector);
   private _archiveDbAdapter = inject(ArchiveDbAdapter);
+  private _lockService = inject(LockService);
   private _getArchiveService = lazyInject(this._injector, ArchiveService);
   private _getTaskArchiveService = lazyInject(this._injector, TaskArchiveService);
   private _getTimeTrackingService = lazyInject(this._injector, TimeTrackingService);
@@ -130,9 +142,10 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
   /**
    * Process an action and handle any archive-related side effects.
    *
-   * This method handles both local and remote operations. For remote operations
-   * (action.meta.isRemote === true), it uses isIgnoreDBLock: true because sync
-   * processing has the database locked.
+   * This method handles both local and remote operations. Remote operations
+   * run while sync holds the OPERATION_LOG lock; archive mutations additionally
+   * serialize behind the separate TASK_ARCHIVE mutex (the legacy
+   * isIgnoreDBLock option no longer bypasses it).
    *
    * @param action The action that was dispatched
    * @returns Promise that resolves when archive operations are complete
@@ -208,7 +221,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Removes a restored task from archive storage.
    *
    * @localBehavior Executes normally (acquires DB lock)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleRestoreTask(action: PersistentAction): Promise<void> {
     const task = (action as ReturnType<typeof TaskSharedActions.restoreTask>).task;
@@ -304,26 +317,32 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
 
     const timestamp = (action as ReturnType<typeof flushYoungToOld>).timestamp;
 
-    // Load current state using ArchiveDbAdapter
-    // Default to empty archives if they don't exist (first-time usage)
-    const currentArchiveYoung =
-      (await this._archiveDbAdapter.loadArchiveYoung()) ?? createEmptyArchiveModel();
-    const currentArchiveOld =
-      (await this._archiveDbAdapter.loadArchiveOld()) ?? createEmptyArchiveModel();
+    // Serialize against local archive mutations: this is a read-modify-write
+    // over BOTH archives, so an unlocked run could silently drop a concurrent
+    // locked local write. TASK_ARCHIVE is separate from OPERATION_LOG, so
+    // acquiring it while sync holds the op-log lock is safe.
+    await this._lockService.request(LOCK_NAMES.TASK_ARCHIVE, async () => {
+      // Load current state using ArchiveDbAdapter
+      // Default to empty archives if they don't exist (first-time usage)
+      const currentArchiveYoung =
+        (await this._archiveDbAdapter.loadArchiveYoung()) ?? createEmptyArchiveModel();
+      const currentArchiveOld =
+        (await this._archiveDbAdapter.loadArchiveOld()) ?? createEmptyArchiveModel();
 
-    const newSorted = sortTimeTrackingAndTasksFromArchiveYoungToOld({
-      archiveYoung: currentArchiveYoung,
-      archiveOld: currentArchiveOld,
-      threshold: ARCHIVE_TASK_YOUNG_TO_OLD_THRESHOLD,
-      now: timestamp,
+      const newSorted = sortTimeTrackingAndTasksFromArchiveYoungToOld({
+        archiveYoung: currentArchiveYoung,
+        archiveOld: currentArchiveOld,
+        threshold: ARCHIVE_TASK_YOUNG_TO_OLD_THRESHOLD,
+        now: timestamp,
+      });
+
+      // Atomic write: both archives written in a single IndexedDB transaction.
+      // If either write fails, the entire transaction is rolled back automatically.
+      await this._archiveDbAdapter.saveArchivesAtomic(
+        { ...newSorted.archiveYoung, lastTimeTrackingFlush: timestamp },
+        { ...newSorted.archiveOld, lastTimeTrackingFlush: timestamp },
+      );
     });
-
-    // Atomic write: both archives written in a single IndexedDB transaction.
-    // If either write fails, the entire transaction is rolled back automatically.
-    await this._archiveDbAdapter.saveArchivesAtomic(
-      { ...newSorted.archiveYoung, lastTimeTrackingFlush: timestamp },
-      { ...newSorted.archiveOld, lastTimeTrackingFlush: timestamp },
-    );
 
     OpLog.log(
       '______________________\nFLUSHED ALL FROM ARCHIVE YOUNG TO OLD (via remote op handler)\n_______________________',
@@ -354,7 +373,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Removes all archived tasks for a deleted project.
    *
    * @localBehavior Executes (cleans up archive for deleted project)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleDeleteProject(action: PersistentAction): Promise<void> {
     const projectId = (action as ReturnType<typeof TaskSharedActions.deleteProject>)
@@ -371,7 +390,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Removes tag references from archived tasks and deletes orphaned tasks.
    *
    * @localBehavior Executes (cleans up archive for deleted tags)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleDeleteTags(action: PersistentAction): Promise<void> {
     const tagIdsToRemove =
@@ -394,7 +413,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Removes repeatCfgId from archived tasks.
    *
    * @localBehavior Executes (cleans up archive for deleted repeat config)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleDeleteTaskRepeatCfg(action: PersistentAction): Promise<void> {
     const repeatCfgId = (
@@ -411,7 +430,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Unlinks issue data from archived tasks for a deleted issue provider.
    *
    * @localBehavior Executes (cleans up archive for deleted provider)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleDeleteIssueProvider(action: PersistentAction): Promise<void> {
     const issueProviderId = (
@@ -428,7 +447,7 @@ export class ArchiveOperationHandler implements ArchiveSideEffectPort<Persistent
    * Unlinks issue data from archived tasks for multiple deleted issue providers.
    *
    * @localBehavior Executes (cleans up archive for deleted providers)
-   * @remoteBehavior Executes with isIgnoreDBLock (sync has DB locked)
+   * @remoteBehavior Executes under the TASK_ARCHIVE mutex
    */
   private async _handleDeleteIssueProviders(action: PersistentAction): Promise<void> {
     const ids = (action as ReturnType<typeof TaskSharedActions.deleteIssueProviders>).ids;

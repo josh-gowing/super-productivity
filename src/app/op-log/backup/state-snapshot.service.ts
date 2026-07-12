@@ -1,6 +1,5 @@
 import { inject, Injectable } from '@angular/core';
 import { Selector, Store } from '@ngrx/store';
-import { combineLatest, firstValueFrom } from 'rxjs';
 import { first } from 'rxjs/operators';
 
 import { selectBoardsState } from '../../features/boards/store/boards.selectors';
@@ -135,24 +134,18 @@ export class StateSnapshotService {
    * ⚠️ Returns live store references — never mutate (clone first). See class doc.
    */
   async getStateSnapshotAsync(): Promise<AppStateSnapshot> {
+    // Capture NgRx synchronously before the first await. Callers that hold the
+    // operation-log barrier can now establish an exact reducer-state cutoff:
+    // actions dispatched while archive I/O is pending are not half-included in
+    // the snapshot and will be persisted after it.
+    const ngRxData = this._getNgRxDataSync();
     const [archiveYoung, archiveOld] = await Promise.all([
       this._loadArchive('archiveYoung'),
       this._loadArchive('archiveOld'),
     ]);
 
-    const ngRxValues = await firstValueFrom(
-      combineLatest(SNAPSHOT_SELECTORS.map((s) => this._store.select(s.selector))).pipe(
-        first(),
-      ),
-    );
-
-    const result: Partial<Record<NgRxModelKey, unknown>> = {};
-    for (let i = 0; i < SNAPSHOT_SELECTORS.length; i++) {
-      result[SNAPSHOT_SELECTORS[i].key] = ngRxValues[i];
-    }
-
     return {
-      ...this._normalizeNgRxData(result),
+      ...ngRxData,
       archiveYoung,
       archiveOld,
     };

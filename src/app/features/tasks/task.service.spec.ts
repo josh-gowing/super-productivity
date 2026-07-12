@@ -457,6 +457,72 @@ describe('TaskService', () => {
   });
 
   describe('moveToArchive', () => {
+    it('should persist parent tasks before dispatching the archive action', async () => {
+      const task = createMockTaskWithSubTasks(createMockTask('task-1'));
+      const callOrder: string[] = [];
+      archiveService.moveTasksToArchiveAndFlushArchiveIfDue.and.callFake(async () => {
+        callOrder.push('persist-archive');
+      });
+      store.dispatch = jasmine
+        .createSpy('dispatch')
+        .and.callFake(() => callOrder.push('dispatch'));
+
+      await service.moveToArchive(task);
+
+      expect(callOrder).toEqual(['persist-archive', 'dispatch']);
+    });
+
+    it('should coalesce concurrent archive requests for the same task', async () => {
+      const task = createMockTaskWithSubTasks(createMockTask('task-1'));
+      let finishPersistence: (() => void) | undefined;
+      archiveService.moveTasksToArchiveAndFlushArchiveIfDue.and.returnValue(
+        new Promise<void>((resolve) => {
+          finishPersistence = resolve;
+        }),
+      );
+
+      const first = service.moveToArchive(task);
+      const duplicate = service.moveToArchive(task);
+      let duplicateResolved = false;
+      void duplicate.then(() => {
+        duplicateResolved = true;
+      });
+
+      expect(archiveService.moveTasksToArchiveAndFlushArchiveIfDue).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(store.dispatch).not.toHaveBeenCalledWith(
+        jasmine.objectContaining({ type: TaskSharedActions.moveToArchive.type }),
+      );
+      await Promise.resolve();
+      expect(duplicateResolved).toBeFalse();
+
+      finishPersistence?.();
+      await Promise.all([first, duplicate]);
+
+      expect(duplicateResolved).toBeTrue();
+      expect(store.dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should release the in-flight archive guard after persistence fails', async () => {
+      const task = createMockTaskWithSubTasks(createMockTask('task-1'));
+      archiveService.moveTasksToArchiveAndFlushArchiveIfDue.and.rejectWith(
+        new Error('archive write failed'),
+      );
+
+      await expectAsync(service.moveToArchive(task)).toBeRejectedWithError(
+        'archive write failed',
+      );
+
+      archiveService.moveTasksToArchiveAndFlushArchiveIfDue.and.resolveTo();
+      await service.moveToArchive(task);
+
+      expect(archiveService.moveTasksToArchiveAndFlushArchiveIfDue).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(store.dispatch).toHaveBeenCalledTimes(1);
+    });
+
     it('should dispatch moveToArchive and call archive service for parent tasks', async () => {
       const task = createMockTaskWithSubTasks(
         createMockTask('task-1', { projectId: 'test-project' }),

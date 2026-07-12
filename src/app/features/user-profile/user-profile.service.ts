@@ -387,6 +387,11 @@ export class UserProfileService {
         );
       }
 
+      // NOTE: the device-local conflict journal is cleared by
+      // BackupService.importCompleteBackup (both branches above call it) — the
+      // shared "clear on full dataset replacement" chokepoint, so the new
+      // profile cannot see the previous profile's entity titles/values.
+
       // Reload the app to ensure all services and state are fully re-initialized
       // with the new profile's data. A reload is required because some parts of the
       // app (e.g. WorkContextService) only initialize once at startup via allDataWasLoaded,

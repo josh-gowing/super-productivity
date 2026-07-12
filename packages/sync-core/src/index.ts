@@ -109,6 +109,7 @@ export type {
   ConflictUiPort,
   DeferredLocalActionsPort,
   OperationApplyPort,
+  ReducerCommitAwareOperationApplyPort,
   RemoteApplyWindowPort,
   SyncActionLike,
 } from './ports';
@@ -126,6 +127,7 @@ export type {
   ConflictResolutionSuggestion,
   EntityConflictLike,
   LwwConflictResolutionPlan,
+  LwwConflictResolutionReason,
   LwwResolvedConflict,
 } from './conflict-resolution';
 

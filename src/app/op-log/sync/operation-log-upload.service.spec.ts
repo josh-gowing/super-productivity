@@ -320,6 +320,30 @@ describe('OperationLogUploadService', () => {
         expect(mockOpLogStore.markSynced).toHaveBeenCalledWith([1, 2]);
       });
 
+      it('should defer acknowledgements and return the exact selected batch for piggyback resolution', async () => {
+        const pendingOps = [
+          createMockEntry(1, 'op-1', 'client-1'),
+          createMockEntry(2, 'op-2', 'client-1'),
+        ];
+        mockOpLogStore.getUnsynced.and.resolveTo(pendingOps);
+        mockApiProvider.uploadOps.and.resolveTo({
+          results: [
+            { opId: 'op-1', accepted: true },
+            { opId: 'op-2', accepted: true },
+          ],
+          latestSeq: 10,
+          newOps: [],
+        });
+
+        const result = await service.uploadPendingOps(mockApiProvider, {
+          deferAcknowledgement: true,
+        });
+
+        expect(mockOpLogStore.markSynced).not.toHaveBeenCalled();
+        expect(result.selectedPendingOps).toEqual(pendingOps);
+        expect(result.pendingAcknowledgementSeqs).toEqual([1, 2]);
+      });
+
       it('should mark accepted seqs correctly when server results are out of order', async () => {
         const pendingOps = [
           createMockEntry(1, 'op-1', 'client-1'),
@@ -1016,7 +1040,7 @@ describe('OperationLogUploadService', () => {
       });
 
       it('should mark regular ops as synced when full-state op is uploaded (ops before snapshot)', async () => {
-        // Regular op id 'op-0' sorts BEFORE full-state op id 'op-1',
+        // Regular op seq 1 is BEFORE full-state op seq 2,
         // meaning the regular op was created before the snapshot and is included in it.
         const regularEntry = createMockEntry(1, 'op-0', 'client-1');
         const fullStateEntry = createFullStateEntry(
@@ -1042,7 +1066,7 @@ describe('OperationLogUploadService', () => {
       });
 
       it('should mark regular ops as synced when Repair op is uploaded (ops before snapshot)', async () => {
-        // Regular op id 'op-0' sorts BEFORE full-state op id 'op-1'
+        // Regular op seq 1 is BEFORE full-state op seq 2
         const regularEntry = createMockEntry(1, 'op-0', 'client-1');
         const fullStateEntry = createFullStateEntry(2, 'op-1', 'client-1', OpType.Repair);
         mockOpLogStore.getUnsynced.and.returnValue(
@@ -1062,7 +1086,7 @@ describe('OperationLogUploadService', () => {
       });
 
       it('should upload regular ops created AFTER full-state snapshot', async () => {
-        // Full-state op id 'op-1' sorts BEFORE regular op id 'op-2',
+        // Full-state op seq 1 is BEFORE regular op seq 2,
         // meaning the regular op was created AFTER the snapshot and is NOT included in it.
         const fullStateEntry = createFullStateEntry(
           1,
@@ -1092,6 +1116,40 @@ describe('OperationLogUploadService', () => {
         // markSynced called for full-state op (seq 1) only; regular op synced via upload
         expect(mockOpLogStore.markSynced).toHaveBeenCalledWith([1]);
         expect(mockOpLogStore.markSynced).toHaveBeenCalledWith([2]);
+      });
+
+      it('should upload a post-snapshot op even when its UUIDv7 id sorts before the full-state op id (clock rollback)', async () => {
+        // Wall-clock rollback regression: the regular op was created AFTER the
+        // snapshot (seq 2 > seq 1) but got a lexically SMALLER UUIDv7 id
+        // ('op-0' < 'op-1'). It is NOT in the frozen snapshot payload, so it
+        // must be uploaded — never just marked synced.
+        const fullStateEntry = createFullStateEntry(
+          1,
+          'op-1',
+          'client-1',
+          OpType.BackupImport,
+        );
+        const regularEntry = createMockEntry(2, 'op-0', 'client-1');
+        mockOpLogStore.getUnsynced.and.returnValue(
+          Promise.resolve([fullStateEntry, regularEntry]),
+        );
+        mockApiProvider.uploadOps.and.returnValue(
+          Promise.resolve({
+            results: [{ opId: 'op-0', accepted: true }],
+            latestSeq: 2,
+            newOps: [],
+          }),
+        );
+
+        const result = await service.uploadPendingOps(mockApiProvider);
+
+        expect(mockApiProvider.uploadSnapshot).toHaveBeenCalled();
+        expect(mockApiProvider.uploadOps).toHaveBeenCalled();
+        const uploadedOpIds = mockApiProvider.uploadOps.calls
+          .mostRecent()
+          .args[0].map((op) => op.id);
+        expect(uploadedOpIds).toEqual(['op-0']);
+        expect(result.uploadedCount).toBe(2);
       });
 
       it('should NOT auto-set isCleanSlate for SyncImport unlike BackupImport/Repair', async () => {

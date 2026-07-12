@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getConflictEntityIds,
   isSameDuplicateOperation,
   isSameDuplicateTimestamp,
   pruneVectorClockForStorage,
@@ -36,6 +37,7 @@ const duplicateCandidate = (
   opType: 'CRT',
   entityType: 'TASK',
   entityId: 'task-1',
+  entityIds: [],
   payload: { title: 'A' },
   vectorClock: { 'client-a': 1 },
   schemaVersion: 1,
@@ -47,6 +49,28 @@ const duplicateCandidate = (
 });
 
 describe('conflict helpers', () => {
+  it('includes a divergent scalar entityId in the incoming conflict set', () => {
+    expect(
+      getConflictEntityIds(op({ entityId: 'task-scalar', entityIds: ['task-array'] })),
+    ).toEqual(['task-scalar', 'task-array']);
+  });
+
+  it.each([false, true])(
+    'aliases legacy misc config writes to tasks when encrypted=%s',
+    (isPayloadEncrypted) => {
+      expect(
+        getConflictEntityIds(
+          op({
+            entityType: 'GLOBAL_CONFIG',
+            entityId: 'misc',
+            schemaVersion: 1,
+            isPayloadEncrypted,
+          }),
+        ),
+      ).toEqual(['misc', 'tasks']);
+    },
+  );
+
   it('accepts matching duplicate operations regardless of JSON key order', () => {
     const incoming = op({
       payload: { title: 'A', nested: { b: 2, a: 1 } },
@@ -64,6 +88,57 @@ describe('conflict helpers', () => {
     expect(isSameDuplicateOperation(duplicateCandidate(), 1, incoming, 60_000)).toBe(
       false,
     );
+  });
+
+  it('accepts batch retries with identical entityIds', () => {
+    const incoming = op({ entityIds: ['task-1', 'task-2'] });
+    const existing = duplicateCandidate({ entityIds: ['task-1', 'task-2'] });
+
+    expect(isSameDuplicateOperation(existing, 1, incoming, 60_000)).toBe(true);
+  });
+
+  it('rejects duplicate ids when entityIds differ', () => {
+    const incoming = op({ entityIds: ['task-1', 'task-3'] });
+    const existing = duplicateCandidate({ entityIds: ['task-1', 'task-2'] });
+
+    expect(isSameDuplicateOperation(existing, 1, incoming, 60_000)).toBe(false);
+  });
+
+  it('rejects duplicate ids when only one side has entityIds', () => {
+    const incomingWithBatch = op({ entityIds: ['task-1', 'task-2'] });
+    expect(
+      isSameDuplicateOperation(duplicateCandidate(), 1, incomingWithBatch, 60_000),
+    ).toBe(false);
+
+    const existingWithBatch = duplicateCandidate({ entityIds: ['task-1', 'task-2'] });
+    expect(isSameDuplicateOperation(existingWithBatch, 1, op(), 60_000)).toBe(false);
+  });
+
+  it('accepts single-entity retries whose entityIds collapse to the scalar entityId', () => {
+    // getStoredEntityIds persists [] when entityIds is exactly [entityId], so a
+    // retry that re-sends that redundant array must still match the stored row.
+    const incoming = op({ entityIds: ['task-1'] });
+
+    expect(isSameDuplicateOperation(duplicateCandidate(), 1, incoming, 60_000)).toBe(
+      true,
+    );
+  });
+
+  it('rejects encrypted retries when entityIds differ', () => {
+    // With both sides encrypted the payload comparison is skipped, so entityIds
+    // must independently block a batch-op id collision.
+    const incoming = op({
+      payload: 'BASE64-CIPHERTEXT-A',
+      isPayloadEncrypted: true,
+      entityIds: ['task-1', 'task-3'],
+    });
+    const existing = duplicateCandidate({
+      payload: 'BASE64-CIPHERTEXT-B',
+      isPayloadEncrypted: true,
+      entityIds: ['task-1', 'task-2'],
+    });
+
+    expect(isSameDuplicateOperation(existing, 1, incoming, 60_000)).toBe(false);
   });
 
   it('accepts encrypted retries whose ciphertext differs from the stored payload', () => {

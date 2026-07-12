@@ -45,7 +45,7 @@ android/.idea
 # misc
 \\backups
 /backups
-/.angular/cache
+/.angular
 /.sass-cache
 /connect.lock
 /coverage

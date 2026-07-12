@@ -16,6 +16,7 @@ import { COMPACTION_THRESHOLD } from '../core/operation-log.const';
 import {
   bufferDeferredAction,
   clearDeferredActions,
+  getDeferredActions,
 } from './operation-capture.meta-reducer';
 import { ClientIdService } from '../../core/util/client-id.service';
 import { OperationCaptureService } from './operation-capture.service';
@@ -804,7 +805,7 @@ describe('OperationLogEffects', () => {
     });
 
     it('should do nothing when no deferred actions are buffered', async () => {
-      await effects.processDeferredActions();
+      await expectAsync(effects.processDeferredActions()).toBeResolved();
 
       expect(mockOpLogStore.appendWithVectorClockUpdate).not.toHaveBeenCalled();
     });
@@ -876,8 +877,114 @@ describe('OperationLogEffects', () => {
       // Should not throw - errors are logged but don't stop processing
       await expectAsync(effects.processDeferredActions()).toBeResolved();
 
-      // Both actions should have been attempted
-      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(2);
+      // The failed write is retried once, then processing continues to action 2.
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(3);
+    });
+
+    it('should stop the drain at an exhausted transient failure, keeping it AND its successors queued in order', async () => {
+      // Persisting a successor before the failed action would record them in
+      // reversed order with inverted vector clocks — the OLDER same-entity
+      // edit would win LWW on every client.
+      const failedAction = createPersistentAction(ActionType.TASK_SHARED_ADD);
+      const successorAction = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(failedAction);
+      bufferDeferredAction(successorAction);
+      mockOpLogStore.appendWithVectorClockUpdate.and.rejectWith(
+        new Error('transient failure'),
+      );
+
+      await expectAsync(effects.processDeferredActions()).toBeRejected();
+
+      // Only the failed action was attempted (3 retries); the successor was
+      // never written out of order and both remain buffered.
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(3);
+      expect(getDeferredActions()).toEqual([failedAction, successorAction]);
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({
+          msg: T.F.SYNC.S.DEFERRED_ACTION_FAILED,
+          actionStr: T.G.DISMISS,
+        }),
+      );
+
+      mockOpLogStore.appendWithVectorClockUpdate.calls.reset();
+      mockOpLogStore.appendWithVectorClockUpdate.and.resolveTo(2);
+      await effects.processDeferredActions();
+
+      // Next window drains both in the original order.
+      const calls = mockOpLogStore.appendWithVectorClockUpdate.calls.all();
+      expect(calls.length).toBe(2);
+      expect(calls[0].args[0].actionType).toBe(ActionType.TASK_SHARED_ADD);
+      expect(calls[1].args[0].actionType).toBe(ActionType.TASK_SHARED_UPDATE);
+      expect(getDeferredActions()).toEqual([]);
+    });
+
+    it('should block and keep a permanently invalid deferred action with its successors', async () => {
+      // Invalid entity identifiers are deterministic: retrying every sync
+      // window forever (with a sticky error snack each time) can never succeed.
+      const invalidAction = createPersistentAction(ActionType.TASK_SHARED_ADD);
+      (invalidAction.meta as { entityId?: string }).entityId = '';
+      const validAction = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(invalidAction);
+      bufferDeferredAction(validAction);
+
+      await expectAsync(effects.processDeferredActions()).toBeRejected();
+
+      // The invalid reducer action already changed live state. Neither it nor
+      // its successor may be discarded or persisted out of order.
+      expect(mockOpLogStore.appendWithVectorClockUpdate).not.toHaveBeenCalled();
+      expect(getDeferredActions()).toEqual([invalidAction, validAction]);
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({
+          msg: T.F.SYNC.S.DEFERRED_ACTION_PERMANENT_FAILED,
+          actionStr: T.PS.RELOAD,
+          actionFn: jasmine.any(Function),
+        }),
+      );
+    });
+
+    it('should serialize overlapping drains so one buffered action is persisted exactly once', async () => {
+      // getDeferredActions() is a non-destructive snapshot: without
+      // serialization two concurrent drains would both see the same
+      // unacknowledged action and mint two ops for one user intent.
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(action);
+
+      let resolveFirstWrite!: (seq: number) => void;
+      mockOpLogStore.appendWithVectorClockUpdate.and.returnValue(
+        new Promise<number>((resolve) => {
+          resolveFirstWrite = resolve;
+        }),
+      );
+
+      const firstDrain = effects.processDeferredActions();
+      const secondDrain = effects.processDeferredActions();
+      // Let the first drain reach its (pending) write before releasing it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      resolveFirstWrite(1);
+      await Promise.all([firstDrain, secondDrain]);
+
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(1);
+      expect(getDeferredActions()).toEqual([]);
+    });
+
+    it('should not re-append a deferred action when post-append bookkeeping fails', async () => {
+      // After appendWithVectorClockUpdate commits, a bookkeeping throw (e.g.
+      // getCompactionCounter) must not bubble into the retry loop — that would
+      // append the same user action again under a fresh op id and double-apply
+      // additive payloads on every client.
+      const action = createPersistentAction(ActionType.TASK_SHARED_UPDATE);
+      bufferDeferredAction(action);
+      mockOpLogStore.getCompactionCounter.and.rejectWith(
+        new Error('bookkeeping failure'),
+      );
+
+      await effects.processDeferredActions();
+
+      expect(mockOpLogStore.appendWithVectorClockUpdate).toHaveBeenCalledTimes(1);
+      expect(getDeferredActions()).toEqual([]);
+      expect(mockSnackService.open).not.toHaveBeenCalledWith(
+        jasmine.objectContaining({ msg: T.F.SYNC.S.DEFERRED_ACTION_FAILED }),
+      );
     });
 
     it('should use fresh vector clock for deferred actions', async () => {
@@ -922,7 +1029,9 @@ describe('OperationLogEffects', () => {
         new DOMException('Quota exceeded', 'QuotaExceededError'),
       );
 
-      await effects.processDeferredActions({ callerHoldsOperationLogLock: true });
+      await expectAsync(
+        effects.processDeferredActions({ callerHoldsOperationLogLock: true }),
+      ).toBeRejected();
 
       expect(mockCompactionService.emergencyCompact).not.toHaveBeenCalled();
       expect(mockLockService.request).not.toHaveBeenCalledWith(
@@ -955,7 +1064,9 @@ describe('OperationLogEffects', () => {
         new DOMException('Quota exceeded', 'QuotaExceededError'),
       );
 
-      await effects.processDeferredActions({ callerHoldsOperationLogLock: true });
+      await expectAsync(
+        effects.processDeferredActions({ callerHoldsOperationLogLock: true }),
+      ).toBeRejected();
 
       // 1. The bail path actually ran (proves handleQuotaExceeded was invoked
       //    AND took the caller-holds-lock branch — not some other code path).

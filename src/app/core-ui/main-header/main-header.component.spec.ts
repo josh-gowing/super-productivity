@@ -25,6 +25,7 @@ import { MetricService } from '../../features/metric/metric.service';
 import { DateService } from '../../core/date/date.service';
 import { UserProfileService } from '../../features/user-profile/user-profile.service';
 import { DEFAULT_GLOBAL_CONFIG } from '../../features/config/default-global-config.const';
+import { SyncStatus } from '../../op-log/sync-exports';
 
 // Regression test for #7477: in a project view a long title pushed the
 // right-side header actions (simple-counter / habit buttons) off screen.
@@ -166,6 +167,7 @@ describe('MainHeaderComponent focus button visibility', () => {
         {
           provide: SyncWrapperService,
           useValue: {
+            sync: jasmine.createSpy('sync'),
             isEnabledAndReady$: of(false),
             syncState$: of('IN_SYNC'),
             isSyncInProgress$: of(false),
@@ -173,7 +175,13 @@ describe('MainHeaderComponent focus button visibility', () => {
             superSyncIsConfirmedInSync$: of(false),
           },
         },
-        { provide: SnackService, useValue: { open: jasmine.createSpy('open') } },
+        {
+          provide: SnackService,
+          useValue: {
+            open: jasmine.createSpy('open'),
+            hasPendingPersistentAction: jasmine.createSpy('hasPendingPersistentAction'),
+          },
+        },
         { provide: Router, useValue: { events: EMPTY } },
         {
           provide: GlobalConfigService,
@@ -228,5 +236,20 @@ describe('MainHeaderComponent focus button visibility', () => {
     component = createComponent();
 
     expect(component.isFocusButtonVisible()).toBe(false);
+  });
+
+  it('keeps a persistent recovery action instead of showing routine sync success', async () => {
+    component = createComponent();
+    const syncWrapperService = TestBed.inject(
+      SyncWrapperService,
+    ) as jasmine.SpyObj<SyncWrapperService>;
+    const snackService = TestBed.inject(SnackService) as jasmine.SpyObj<SnackService>;
+    syncWrapperService.sync.and.resolveTo(SyncStatus.UpdateRemote);
+    snackService.hasPendingPersistentAction.and.returnValue(true);
+
+    component.sync();
+    await Promise.resolve();
+
+    expect(snackService.open).not.toHaveBeenCalled();
   });
 });

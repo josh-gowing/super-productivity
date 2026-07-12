@@ -73,9 +73,18 @@ export class OperationLogDownloadService implements OnDestroy {
     this.clockDriftRetryServerTimestamp = null;
   }
 
+  /**
+   * @param options.includeOwnAndAppliedOps - Raw-rebuild mode for USE_REMOTE:
+   *        skips the appliedOpIds filter AND downloads ops authored by this
+   *        client (no excludeClient param). Required to reconstruct the full
+   *        server history — the normal filters would drop everything the local
+   *        store already knows, leaving a destructive replace with nothing to
+   *        replay. Callers are expected to clear the local op store before
+   *        appending the result.
+   */
   async downloadRemoteOps(
     syncProvider: OperationSyncCapable,
-    options?: { forceFromSeq0?: boolean },
+    options?: { forceFromSeq0?: boolean; includeOwnAndAppliedOps?: boolean },
   ): Promise<DownloadResult> {
     if (!syncProvider) {
       OpLog.warn(
@@ -89,7 +98,7 @@ export class OperationLogDownloadService implements OnDestroy {
 
   private async _downloadRemoteOpsViaApi(
     syncProvider: OperationSyncCapable,
-    options?: { forceFromSeq0?: boolean },
+    options?: { forceFromSeq0?: boolean; includeOwnAndAppliedOps?: boolean },
   ): Promise<DownloadResult> {
     const forceFromSeq0 = options?.forceFromSeq0 ?? false;
     OpLog.normal(
@@ -130,8 +139,14 @@ export class OperationLogDownloadService implements OnDestroy {
 
     await this.lockService.request(LOCK_NAMES.DOWNLOAD, async () => {
       const lastServerSeq = forceFromSeq0 ? 0 : await syncProvider.getLastServerSeq();
-      const appliedOpIds = await this.opLogStore.getAppliedOpIds();
-      const clientId = await this.clientIdProvider.loadClientId();
+      // Raw-rebuild mode: an empty applied set disables the duplicate filter
+      // below; a missing clientId makes the server include this client's own ops.
+      const appliedOpIds = options?.includeOwnAndAppliedOps
+        ? new Set<string>()
+        : await this.opLogStore.getAppliedOpIds();
+      const clientId = options?.includeOwnAndAppliedOps
+        ? null
+        : await this.clientIdProvider.loadClientId();
       OpLog.verbose(
         `OperationLogDownloadService: [DEBUG] Starting download. ` +
           `lastServerSeq=${lastServerSeq}, appliedOpIds.size=${appliedOpIds.size}, clientId=${clientId}`,
@@ -227,6 +242,12 @@ export class OperationLogDownloadService implements OnDestroy {
         }
 
         if (response.ops.length === 0) {
+          if (response.hasMore) {
+            OpLog.error(
+              'OperationLogDownloadService: Server returned an empty page with hasMore=true. Aborting to avoid accepting a partial download.',
+            );
+            downloadFailed = true;
+          }
           // No ops to download - caller will persist latestServerSeq after this method returns
           break;
         }
@@ -320,8 +341,18 @@ export class OperationLogDownloadService implements OnDestroy {
           break;
         }
 
-        // Update cursors
-        sinceSeq = response.ops[response.ops.length - 1].serverSeq;
+        // Update cursors. A page that claims more data must advance the cursor;
+        // otherwise accepting the accumulated prefix would silently skip the
+        // unseen suffix (or spin until the iteration cap).
+        const nextSinceSeq = response.ops[response.ops.length - 1].serverSeq;
+        if (response.hasMore && nextSinceSeq <= sinceSeq) {
+          OpLog.error(
+            `OperationLogDownloadService: Non-progressing page cursor (${nextSinceSeq} <= ${sinceSeq}) with hasMore=true. Aborting partial download.`,
+          );
+          downloadFailed = true;
+          break;
+        }
+        sinceSeq = nextSinceSeq;
         hasMore = response.hasMore;
 
         // Monotonicity check: warn if server seq decreased (indicates potential server bug)

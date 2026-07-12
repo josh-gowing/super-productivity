@@ -154,20 +154,21 @@ Comprehensive spec of all scenarios that can occur during SuperSync synchronizat
 3. Throw `LocalDataConflictError`
 4. Show full conflict dialog: USE_LOCAL / USE_REMOTE / CANCEL
 5. USE_LOCAL → `forceUploadLocalState()` (creates SYNC_IMPORT)
-6. USE_REMOTE → `forceDownloadRemoteState()` (clears local ops)
+6. USE_REMOTE → capture a single-slot pre-replace backup, then `forceDownloadRemoteState()` (clears local ops)
+7. The replacement transaction sets a raw-rebuild resume marker. Completion atomically replaces it with a durable Undo provenance token; startup re-offers Undo after reload while the same backup remains.
 
 **User sees:** Full conflict resolution dialog.
 
 ### C.3: Fresh Client — Has Pending Ops with Meaningful User Data (File-Based Sync Only)
 
-**Trigger:** Client has unsynced ops containing task/project/tag/note create/update actions, receiving a snapshot from a file-based provider
+**Trigger:** Client has unsynced local work and receives a snapshot from a file-based provider
 
 **Expected:**
 
 1. Download detects remote snapshot (file-based sync path)
-2. Check unsynced ops for meaningful user data: TASK/PROJECT/TAG/NOTE CREATE/UPDATE ops, or any full-state op (SYNC_IMPORT/BACKUP_IMPORT/REPAIR)
+2. Treat every pending op as meaningful except onboarding example-task creates and, before the first completed sync only, the `GLOBAL_CONFIG:sync` setup write needed to configure the provider. Other config sections, non-task entities, and MIGRATION/RECOVERY full-state batches remain protected.
 3. If meaningful → throw `LocalDataConflictError` → full conflict dialog
-4. If only config/system ops → proceed without dialog
+4. If only the explicitly discardable startup ops remain → proceed without dialog and reject those ops locally so they cannot replay after the imported state
 
 **Note:** This op-content check only applies to the file-based snapshot path. For SuperSync (incremental ops path), the fresh client check uses `_hasMeaningfulStoreData()` (store-based check) instead.
 
@@ -198,13 +199,13 @@ Comprehensive spec of all scenarios that can occur during SuperSync synchronizat
 **Expected:**
 
 1. Download batch contains SYNC_IMPORT
-2. Check pending local ops → N > 0 (condition satisfied regardless of meaningful data)
+2. Check pending local ops. Any pending work triggers the dialog except onboarding example-task creates and the never-synced `GLOBAL_CONFIG:sync` provider-setup write. Other GLOBAL_CONFIG sections remain protected.
 3. **Show conflict dialog BEFORE processing** with `scenario: 'INCOMING_IMPORT'` and `syncImportReason`
 4. USE_LOCAL → `forceUploadLocalState()` (overrides remote with local data)
-5. USE_REMOTE → `forceDownloadRemoteState()` (clears local ops, downloads from seq 0)
+5. USE_REMOTE → capture a pre-replace backup, then `forceDownloadRemoteState()` (clears local ops, downloads from seq 0)
 6. CANCEL → return with `cancelled: true`, skip upload phase
 
-**User sees:** Conflict dialog explaining remote import detected with local changes at risk. "Use Server Data" recommended.
+**User sees:** Conflict dialog explaining remote import detected with local changes at risk. "Use Server Data" recommended. After replacement, a persistent Undo action remains recoverable across reloads while its matching backup exists.
 
 ### D.3: Remote Ops Filtered by Stored Local SYNC_IMPORT ✓
 
@@ -254,12 +255,12 @@ Comprehensive spec of all scenarios that can occur during SuperSync synchronizat
 
 1. Upload completes → server returns piggybacked ops containing SYNC_IMPORT
 2. Check for SYNC_IMPORT in piggybacked ops BEFORE `processRemoteOps()`
-3. If found AND `_hasMeaningfulPendingOps()` = true (unsynced TASK/PROJECT/TAG/NOTE C/U/D or full-state ops):
+3. If found AND `_hasMeaningfulPendingOps()` = true (all pending work except onboarding example-task creates and the never-synced `GLOBAL_CONFIG:sync` provider-setup write):
    - **Show conflict dialog** with `scenario: 'INCOMING_IMPORT'` and `syncImportReason` from the piggybacked op
    - USE_LOCAL → `forceUploadLocalState()` (overrides remote)
    - USE_REMOTE → `forceDownloadRemoteState()` (clears local, downloads from seq 0)
    - CANCEL → return with `cancelled: true`, callers skip post-upload logic
-4. If no meaningful pending ops → `processRemoteOps()` applies silently (no dialog) regardless of whether the NgRx store already has user data — that data was already synced and the SYNC_IMPORT is the new authoritative state.
+4. If no meaningful pending ops → `processRemoteOps()` applies silently (no dialog), then reject live discardable startup ops only after processing succeeds. Existing NgRx store data does not trigger a dialog because it was already synced and the SYNC_IMPORT is the new authoritative state.
 
 **Mirrors the download path (D.1 / D.2):** the gate is unsynced pending changes, not store contents. Prompting on already-synced store data would let an old client roll back the remote import via USE_LOCAL.
 
@@ -465,9 +466,9 @@ network changes while switching Wi-Fi) before surfacing the warning.
 
 **Expected:** Log warning ("Remote model version newer than local — app update may be required"). Returns `HANDLED_ERROR`. No alert shown to user. User needs to update app.
 
-### G.8: Operation Migration Failure
+### G.8: Operation Migration or Apply Failure
 
-**Expected:** Failed ops skipped. Snackbar shown once per session. Other ops applied normally.
+**Expected:** A schema migration block keeps the server cursor behind the incompatible op and reports an error instead of skipping it. A remote op whose reducer/archive checkpoint is incomplete stays `pending`, `archive_pending`, or `failed`; later same-session downloads and uploads are blocked so the cursor cannot advance past it. Startup hydration restores reducer state and retries only outstanding archive side effects before sync can continue.
 
 ### G.9: Concurrent Sync Attempts
 

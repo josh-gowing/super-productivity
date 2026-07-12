@@ -15,7 +15,6 @@ import { OperationApplierService } from '../apply/operation-applier.service';
 import { HydrationStateService } from '../apply/hydration-state.service';
 import { VectorClockService } from '../sync/vector-clock.service';
 import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider';
-import { MAX_CONFLICT_RETRY_ATTEMPTS } from '../core/operation-log.const';
 import { ActionType, EntityType, Operation, OpType } from '../core/operation.types';
 import { ApplyOperationsResult } from '../core/types/apply.types';
 import { uuidv7 } from '../../util/uuid-v7';
@@ -25,10 +24,9 @@ import { uuidv7 } from '../../util/uuid-v7';
  * OperationLogStoreService (real IndexedDB), with only the applier controlled.
  *
  * The co-located unit spec mocks the store, so it can't prove the actual status
- * transitions the retry depends on: failed -> applied on success, the
- * slice-from-failure re-mark, and the retry-count -> reject lifecycle that ends
- * with getFailedRemoteOps filtering the op out. These tests exercise exactly
- * that, end to end, across simulated reboots.
+ * transitions the retry depends on: failed -> applied on success and durable
+ * failed quarantine across repeated startup retries. These tests exercise that
+ * end to end, across simulated reboots.
  */
 describe('OperationLogHydratorService retryFailedRemoteOps (integration, real store)', () => {
   let hydrator: OperationLogHydratorService;
@@ -132,6 +130,13 @@ describe('OperationLogHydratorService retryFailedRemoteOps (integration, real st
     expect(applier.applyOperations).toHaveBeenCalledTimes(1);
     const passed = applier.applyOperations.calls.argsFor(0)[0] as Operation[];
     expect(passed.length).toBe(3);
+    // Archive side effects only: the failed ops' reducers committed in the
+    // batch that marked them failed, so a reducer re-dispatch would
+    // double-apply additive reducers.
+    expect(applier.applyOperations.calls.argsFor(0)[1]).toEqual({
+      skipReducerDispatch: true,
+      skipDeferredLocalActions: true,
+    });
   });
 
   it('on partial failure marks the failed op and every op after it as still-failing', async () => {
@@ -153,7 +158,7 @@ describe('OperationLogHydratorService retryFailedRemoteOps (integration, real st
     expect(stillFailed).toEqual([b.id, c.id].sort());
   });
 
-  it('eventually rejects a permanently-failing op across reboots, then stops returning it', async () => {
+  it('keeps a permanently-failing archive op quarantined across retries', async () => {
     const op = createOp();
     await seedFailedRemoteOps([op]); // retryCount starts at 1 after the seed markFailed
     applier.applyOperations.and.callFake((toApply: Operation[]) =>
@@ -163,19 +168,18 @@ describe('OperationLogHydratorService retryFailedRemoteOps (integration, real st
       } as ApplyOperationsResult),
     );
 
-    // Each call simulates one boot's retry. The seed left retryCount at 1, so
-    // it takes MAX_CONFLICT_RETRY_ATTEMPTS - 1 more failed retries to hit the cap.
-    let guard = 0;
-    while ((await store.getFailedRemoteOps()).length > 0 && guard < 10) {
+    // Each call simulates one boot's retry. It must remain visible to both the
+    // next startup retry and the sync safety gate instead of turning rejected.
+    const repeatedStartupRetries = 6;
+    for (let retry = 0; retry < repeatedStartupRetries; retry++) {
       await hydrator.retryFailedRemoteOps();
-      guard++;
     }
 
-    // Op is gone from the retry set and persisted as rejected, not failed.
-    expect(await store.getFailedRemoteOps()).toEqual([]);
-    expect(guard).toBe(MAX_CONFLICT_RETRY_ATTEMPTS - 1);
-    const rejected = await store.getOpById(op.id);
-    expect(rejected?.rejectedAt).toBeTruthy();
-    expect(rejected?.applicationStatus).toBeUndefined();
+    expect((await store.getFailedRemoteOps()).map((entry) => entry.op.id)).toEqual([
+      op.id,
+    ]);
+    const quarantined = await store.getOpById(op.id);
+    expect(quarantined?.rejectedAt).toBeUndefined();
+    expect(quarantined?.applicationStatus).toBe('failed');
   });
 });
