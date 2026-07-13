@@ -1,5 +1,4 @@
 import { TestBed } from '@angular/core/testing';
-import { firstValueFrom } from 'rxjs';
 import { ConflictJournalService } from './conflict-journal.service';
 import {
   ConflictJournalEntry,
@@ -64,14 +63,14 @@ describe('ConflictJournalService (store)', () => {
     expect(unreviewed.map((e) => e.id)).toEqual(['new', 'old']);
   });
 
-  it('unreviewedCount$ reflects the number of unreviewed entries', async () => {
-    expect(await firstValueFrom(service.unreviewedCount$)).toBe(0);
+  it('unreviewedCount reflects the number of unreviewed entries', async () => {
+    expect(service.unreviewedCount()).toBe(0);
 
     await service.record(makeEntry({ id: 'a', status: 'unreviewed' }));
     await service.record(makeEntry({ id: 'b', status: 'unreviewed' }));
     await service.record(makeEntry({ id: 'c', status: 'info' }));
 
-    expect(await firstValueFrom(service.unreviewedCount$)).toBe(2);
+    expect(service.unreviewedCount()).toBe(2);
   });
 
   it('markKept / markFlipped update status and the unreviewed count', async () => {
@@ -83,20 +82,20 @@ describe('ConflictJournalService (store)', () => {
 
     expect((await service.getEntry('a'))?.status).toBe('kept');
     expect((await service.getEntry('b'))?.status).toBe('flipped');
-    expect(await firstValueFrom(service.unreviewedCount$)).toBe(0);
+    expect(service.unreviewedCount()).toBe(0);
   });
 
   it('clearAll() removes every entry and resets the unreviewed count (profile switch)', async () => {
     await service.record(makeEntry({ id: 'a', status: 'unreviewed' }));
     await service.record(makeEntry({ id: 'b', status: 'kept' }));
-    expect(await firstValueFrom(service.unreviewedCount$)).toBe(1);
+    expect(service.unreviewedCount()).toBe(1);
 
     await service.clearAll();
 
     expect(await service.getEntry('a')).toBeUndefined();
     expect(await service.getEntry('b')).toBeUndefined();
     expect((await service.list('history')).length).toBe(0);
-    expect(await firstValueFrom(service.unreviewedCount$)).toBe(0);
+    expect(service.unreviewedCount()).toBe(0);
   });
 
   describe('retention (pruneOnStart)', () => {

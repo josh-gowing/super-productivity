@@ -19,9 +19,8 @@
  * Journal entries are DEVICE-LOCAL and are NEVER uploaded to the sync server.
  */
 
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { DBSchema, IDBPDatabase, openDB } from 'idb';
-import { BehaviorSubject, Observable } from 'rxjs';
 import { OpLog } from '../../core/log';
 import {
   CONFLICT_JOURNAL_DB_NAME,
@@ -56,9 +55,9 @@ export class ConflictJournalService {
   private _db?: IDBPDatabase<ConflictJournalDB>;
   private _initPromise?: Promise<IDBPDatabase<ConflictJournalDB>>;
 
-  private readonly _unreviewedCount$ = new BehaviorSubject<number>(0);
+  private readonly _unreviewedCount = signal(0);
   /** Number of entries still awaiting review (status === 'unreviewed'). */
-  readonly unreviewedCount$: Observable<number> = this._unreviewedCount$.asObservable();
+  readonly unreviewedCount = this._unreviewedCount.asReadonly();
 
   private _openDb(): Promise<IDBPDatabase<ConflictJournalDB>> {
     return openDB<ConflictJournalDB>(
@@ -270,6 +269,6 @@ export class ConflictJournalService {
       CONFLICT_JOURNAL_INDEX_STATUS,
       IDBKeyRange.only('unreviewed'),
     );
-    this._unreviewedCount$.next(count);
+    this._unreviewedCount.set(count);
   }
 }
