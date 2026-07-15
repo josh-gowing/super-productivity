@@ -737,6 +737,39 @@ describe('operation-converter utility', () => {
         expect((action as any).id).toBe('task-1');
       });
 
+      it('should expose the LWW payload mode in action metadata (#8956)', () => {
+        const op = createMockOperation({
+          actionType: '[TASK] LWW Update' as ActionType,
+          payload: {
+            actionPayload: { id: 'task-1', title: 'Winning state' },
+            entityChanges: [],
+            lwwUpdateMode: 'replace',
+          },
+        });
+
+        const action = convertOpToAction(op);
+
+        expect(
+          (action.meta as typeof action.meta & { lwwUpdateMode?: string }).lwwUpdateMode,
+        ).toBe('replace');
+      });
+
+      it('should expose recreate-after-delete metadata (#8997)', () => {
+        const op = createMockOperation({
+          actionType: '[TASK] LWW Update' as ActionType,
+          payload: {
+            actionPayload: { id: 'task-1', projectId: 'project-1' },
+            entityChanges: [],
+            lwwUpdateMode: 'replace',
+            recreatesEntityAfterDelete: true,
+          },
+        });
+
+        const action = convertOpToAction(op);
+
+        expect(action.meta.recreatesEntityAfterDelete).toBeTrue();
+      });
+
       it('should fall back to legacy payload format when not MultiEntityPayload', () => {
         const op = createMockOperation({
           payload: { directProperty: 'value', nested: { prop: 123 } },

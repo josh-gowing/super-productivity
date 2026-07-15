@@ -28,6 +28,7 @@ import { INBOX_PROJECT } from '../project/project.const';
 import { signal } from '@angular/core';
 import { DeletedTaskIssueSidecarService } from '../issue/two-way-sync/deleted-task-issue-sidecar.service';
 import { TaskTimeSyncService } from './task-time-sync.service';
+import { selectTaskEntities } from './store/task.selectors';
 
 describe('TaskService', () => {
   let service: TaskService;
@@ -335,12 +336,14 @@ describe('TaskService', () => {
   });
 
   describe('removeMultipleTasks', () => {
-    it('should dispatch deleteTasks with only taskIds', () => {
+    it('should dispatch deleteTasks with snapshots for conflict recovery', () => {
       service.removeMultipleTasks(['task-1', 'task-2']);
 
-      expect(store.dispatch).toHaveBeenCalledWith(
-        TaskSharedActions.deleteTasks({ taskIds: ['task-1', 'task-2'] }),
-      );
+      const action = (store.dispatch as jasmine.Spy).calls.mostRecent().args[0] as
+        | (ReturnType<typeof TaskSharedActions.deleteTasks> & { tasks?: Task[] })
+        | undefined;
+      expect(action?.taskIds).toEqual(['task-1', 'task-2']);
+      expect(action?.tasks?.map(({ id }) => id)).toEqual(['task-1', 'task-2']);
     });
 
     it('should populate sidecar with issue info before dispatch', () => {
@@ -348,6 +351,23 @@ describe('TaskService', () => {
       service.removeMultipleTasks(['task-1', 'task-2']);
 
       expect(deletedTaskIssueSidecar.set).toHaveBeenCalledWith([]);
+    });
+
+    it('should include cascade-deleted subtasks in conflict-recovery snapshots', () => {
+      const clearOneSpy = spyOn(taskTimeSync, 'clearOne');
+      const parent = createMockTask('parent', { subTaskIds: ['subtask'] });
+      const subtask = createMockTask('subtask', { parentId: 'parent' });
+      store.overrideSelector(selectTaskEntities, { parent, subtask });
+      store.refreshState();
+
+      service.removeMultipleTasks(['parent']);
+
+      const action = (store.dispatch as jasmine.Spy).calls.mostRecent().args[0] as
+        | ReturnType<typeof TaskSharedActions.deleteTasks>
+        | undefined;
+      expect(action?.taskIds).toEqual(['parent']);
+      expect(action?.tasks?.map(({ id }) => id)).toEqual(['parent', 'subtask']);
+      expect(clearOneSpy.calls.allArgs()).toEqual([['parent'], ['subtask']]);
     });
   });
 
@@ -378,6 +398,47 @@ describe('TaskService', () => {
       service.update('task-1', { title: 'Updated Title' });
 
       expect(flushOneSpy).not.toHaveBeenCalled();
+    });
+
+    it('should capture linked and reverse-linked subtasks for project moves', () => {
+      const parent = createMockTask('parent', { subTaskIds: ['listed-subtask'] });
+      const listedSubTask = createMockTask('listed-subtask', {
+        parentId: 'parent',
+      });
+      const reverseLinkedSubTask = createMockTask('reverse-linked-subtask', {
+        parentId: 'parent',
+      });
+      store.setState({
+        tasks: {
+          ids: ['parent', 'listed-subtask', 'reverse-linked-subtask'],
+          entities: {
+            parent,
+            ['listed-subtask']: listedSubTask,
+            ['reverse-linked-subtask']: reverseLinkedSubTask,
+          },
+          currentTaskId: null,
+          selectedTaskId: null,
+          taskDetailTargetPanel: null,
+          isDataLoaded: true,
+        },
+      });
+      store.refreshState();
+
+      service.update('parent', { projectId: 'project-2', title: 'Moved' });
+
+      const expectedAction = TaskSharedActions.updateTask({
+        task: {
+          id: 'parent',
+          changes: { projectId: 'project-2', title: 'Moved' },
+        },
+        projectMoveSubTaskIds: ['listed-subtask', 'reverse-linked-subtask'],
+      });
+      expect(store.dispatch).toHaveBeenCalledWith(expectedAction);
+      expect(expectedAction.meta.entityIds).toEqual([
+        'parent',
+        'listed-subtask',
+        'reverse-linked-subtask',
+      ]);
     });
   });
 

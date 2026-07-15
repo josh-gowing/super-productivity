@@ -9,8 +9,10 @@ import {
 } from '../src/conflict-resolution';
 import { adjustForClockCorruption, buildEntityFrontier } from '../src/entity-frontier';
 import {
+  extractActionPayload,
   extractEntityFromPayload,
   extractUpdateChanges,
+  isLwwUpdatePayload,
   OpType,
 } from '../src/operation.types';
 import type { EntityConflict, Operation } from '../src/operation.types';
@@ -190,6 +192,92 @@ describe('suggestConflictResolution', () => {
 });
 
 describe('planLwwConflictResolutions', () => {
+  const isDeleteWinsAction = (op: Operation): boolean =>
+    op.actionType === '[Test] Delete Wins';
+
+  it('lets a remote delete-wins action beat a newer local update', () => {
+    const conflict = createConflict(
+      [createOp({ id: 'local-update', timestamp: 2_000 })],
+      [
+        createOp({
+          id: 'remote-delete',
+          actionType: '[Test] Delete Wins',
+          opType: OpType.Delete,
+          timestamp: 1_000,
+        }),
+      ],
+    );
+
+    expect(
+      planLwwConflictResolutions([conflict], {
+        isArchiveAction,
+        isDeleteWinsAction,
+      }),
+    ).toEqual([
+      {
+        conflict,
+        winner: 'remote',
+        reason: 'remote-delete-wins',
+      },
+    ]);
+  });
+
+  it('plans a replacement delete when a local delete-wins action is older', () => {
+    const conflict = createConflict(
+      [
+        createOp({
+          id: 'local-delete',
+          actionType: '[Test] Delete Wins',
+          opType: OpType.Delete,
+          timestamp: 1_000,
+        }),
+      ],
+      [createOp({ id: 'remote-update', timestamp: 2_000 })],
+    );
+
+    expect(
+      planLwwConflictResolutions([conflict], {
+        isArchiveAction,
+        isDeleteWinsAction,
+      }),
+    ).toEqual([
+      {
+        conflict,
+        winner: 'local',
+        reason: 'local-delete-wins',
+        localWinOperationKind: 'delete-win',
+      },
+    ]);
+  });
+
+  it('keeps timestamp semantics for an unmarked delete', () => {
+    const conflict = createConflict(
+      [
+        createOp({
+          id: 'local-delete',
+          opType: OpType.Delete,
+          timestamp: 1_000,
+        }),
+      ],
+      [createOp({ id: 'remote-update', timestamp: 2_000 })],
+    );
+
+    expect(
+      planLwwConflictResolutions([conflict], {
+        isArchiveAction,
+        isDeleteWinsAction,
+      }),
+    ).toEqual([
+      {
+        conflict,
+        winner: 'remote',
+        reason: 'remote-timestamp-or-tie',
+        localMaxTimestamp: 1_000,
+        remoteMaxTimestamp: 2_000,
+      },
+    ]);
+  });
+
   it('lets a remote archive win over local non-archive operations', () => {
     const conflict = createConflict(
       [createOp({ id: 'local', timestamp: 2_000 })],
@@ -567,6 +655,18 @@ describe('partitionLwwResolutions', () => {
 });
 
 describe('delete-loses-to-update payload helpers', () => {
+  it('recognizes and unwraps backward-compatible LWW payload modes', () => {
+    const payload = {
+      actionPayload: { id: 'task-1', title: 'Winning state' },
+      entityChanges: [],
+      lwwUpdateMode: 'replace' as const,
+    };
+
+    expect(isLwwUpdatePayload(payload)).toBe(true);
+    expect(extractActionPayload(payload)).toEqual(payload.actionPayload);
+    expect(isLwwUpdatePayload({ ...payload, lwwUpdateMode: 'unknown' })).toBe(false);
+  });
+
   it('extracts a base entity from direct and multi-entity payloads', () => {
     const entity = { id: 'task-1', title: 'Deleted' };
 
@@ -577,6 +677,21 @@ describe('delete-loses-to-update payload helpers', () => {
         'task',
       ),
     ).toEqual(entity);
+  });
+
+  it('extracts a matching entity from a bulk payload array', () => {
+    expect(
+      extractEntityFromPayload(
+        {
+          tasks: [
+            { id: 'task-1', title: 'One' },
+            { id: 'task-2', title: 'Two' },
+          ],
+        },
+        'task',
+        'task-2',
+      ),
+    ).toEqual({ id: 'task-2', title: 'Two' });
   });
 
   it('falls back to a direct entity payload with an id field', () => {
@@ -615,6 +730,65 @@ describe('delete-loses-to-update payload helpers', () => {
         'task',
       ),
     ).toEqual({ title: 'New' });
+  });
+
+  it('extracts the matching entity from a real plural bulk-update payload', () => {
+    expect(
+      extractUpdateChanges(
+        {
+          actionPayload: {
+            tasks: [
+              { id: 'task-1', changes: { title: 'First' } },
+              { id: 'task-2', changes: { title: 'Second' } },
+            ],
+          },
+          entityChanges: [],
+        },
+        'task',
+        'task-2',
+      ),
+    ).toEqual({ title: 'Second' });
+  });
+
+  it('extracts from an irregularly-keyed bulk-update payload (e.g. taskUpdates)', () => {
+    // __updateMultipleTaskSimple carries updates under `taskUpdates`, not `tasks`,
+    // and with empty entityChanges. The old `${payloadKey}s` guess missed it and
+    // returned {}, silently dropping the remote winner's changes (#8956).
+    expect(
+      extractUpdateChanges(
+        {
+          actionPayload: {
+            taskUpdates: [
+              { id: 'task-1', changes: { title: 'First' } },
+              { id: 'task-2', changes: { title: 'Second' } },
+            ],
+          },
+          entityChanges: [],
+        },
+        'task',
+        'task-2',
+      ),
+    ).toEqual({ title: 'Second' });
+  });
+
+  it('falls back to capture-time entity changes for bulk updates', () => {
+    expect(
+      extractUpdateChanges(
+        {
+          actionPayload: { taskIds: ['task-1'] },
+          entityChanges: [
+            {
+              entityType: 'TASK',
+              entityId: 'task-1',
+              opType: OpType.Update,
+              changes: { title: 'Captured' },
+            },
+          ],
+        },
+        'task',
+        'task-1',
+      ),
+    ).toEqual({ title: 'Captured' });
   });
 
   it('returns empty changes when the update payload key is absent', () => {
@@ -678,11 +852,147 @@ describe('convertLocalDeleteRemoteUpdatesToLww', () => {
       ...conflict.remoteOps[0],
       actionType: '[TASK] LWW Update',
       payload: {
-        id: 'task-1',
-        title: 'Remote',
-        notes: 'Keep me',
-        projectId: 'project-1',
+        actionPayload: {
+          id: 'task-1',
+          title: 'Remote',
+          notes: 'Keep me',
+          projectId: 'project-1',
+        },
+        entityChanges: [],
+        lwwUpdateMode: 'replace',
+        recreatesEntityAfterDelete: true,
       },
+    });
+  });
+
+  it('preserves an existing replacement LWW winner instead of rebuilding it from the delete', () => {
+    const remoteLww = createOp({
+      id: 'remote-lww',
+      actionType: '[TASK] LWW Update',
+      payload: {
+        actionPayload: {
+          id: 'task-1',
+          title: 'Remote replacement',
+          notes: 'Remote notes',
+        },
+        entityChanges: [],
+        lwwUpdateMode: 'replace',
+      },
+    });
+    const conflict = createConflict(
+      [
+        createOp({
+          id: 'local-delete',
+          opType: OpType.Delete,
+          payload: {
+            task: {
+              id: 'task-1',
+              title: 'Stale deleted title',
+              notes: 'Stale deleted notes',
+            },
+          },
+        }),
+      ],
+      [remoteLww],
+    );
+
+    const result = convertLocalDeleteRemoteUpdatesToLww(conflict, {
+      payloadKey: 'task',
+      toLwwUpdateActionType,
+    });
+
+    expect(result[0]).toEqual({
+      ...remoteLww,
+      payload: {
+        actionPayload: {
+          id: 'task-1',
+          title: 'Remote replacement',
+          notes: 'Remote notes',
+        },
+        entityChanges: [],
+        lwwUpdateMode: 'replace',
+        recreatesEntityAfterDelete: true,
+      },
+    });
+  });
+
+  it('rebuilds an existing patch LWW winner as a complete replacement', () => {
+    const remotePatch = createOp({
+      id: 'remote-patch',
+      actionType: '[TASK] LWW Update',
+      payload: {
+        actionPayload: { id: 'task-1', title: 'Patched title' },
+        entityChanges: [],
+        lwwUpdateMode: 'patch',
+      },
+    });
+    const conflict = createConflict(
+      [
+        createOp({
+          id: 'local-delete',
+          opType: OpType.Delete,
+          payload: {
+            task: {
+              id: 'task-1',
+              title: 'Deleted title',
+              notes: 'Preserved notes',
+            },
+          },
+        }),
+      ],
+      [remotePatch],
+    );
+
+    const [result] = convertLocalDeleteRemoteUpdatesToLww(conflict, {
+      payloadKey: 'task',
+      toLwwUpdateActionType,
+    });
+
+    expect(result.payload).toEqual({
+      actionPayload: {
+        id: 'task-1',
+        title: 'Patched title',
+        notes: 'Preserved notes',
+      },
+      entityChanges: [],
+      lwwUpdateMode: 'replace',
+      recreatesEntityAfterDelete: true,
+    });
+  });
+
+  it('uses the matching snapshot from a bulk delete payload', () => {
+    const conflict = createConflict(
+      [
+        createOp({
+          id: 'local-bulk-delete',
+          opType: OpType.Delete,
+          payload: {
+            taskIds: ['task-1', 'task-2'],
+            tasks: [
+              { id: 'task-1', title: 'One', notes: 'One notes' },
+              { id: 'task-2', title: 'Two', notes: 'Two notes' },
+            ],
+          },
+        }),
+      ],
+      [
+        createOp({
+          id: 'remote-update',
+          payload: { task: { id: 'task-2', changes: { title: 'Updated two' } } },
+        }),
+      ],
+      { entityId: 'task-2' },
+    );
+
+    const [result] = convertLocalDeleteRemoteUpdatesToLww(conflict, {
+      payloadKey: 'task',
+      toLwwUpdateActionType,
+    });
+
+    expect(extractActionPayload(result.payload)).toEqual({
+      id: 'task-2',
+      title: 'Updated two',
+      notes: 'Two notes',
     });
   });
 
@@ -708,7 +1018,12 @@ describe('convertLocalDeleteRemoteUpdatesToLww', () => {
       toLwwUpdateActionType,
     });
 
-    expect(result[0].payload).toEqual({ id: 'task-1', title: 'Remote' });
+    expect(result[0].payload).toEqual({
+      actionPayload: { id: 'task-1', title: 'Remote' },
+      entityChanges: [],
+      lwwUpdateMode: 'replace',
+      recreatesEntityAfterDelete: true,
+    });
   });
 
   it('does not inject an id for singleton entity ids', () => {
@@ -740,8 +1055,13 @@ describe('convertLocalDeleteRemoteUpdatesToLww', () => {
     });
 
     expect(result[0].payload).toEqual({
-      sync: { provider: null },
-      misc: false,
+      actionPayload: {
+        sync: { provider: null },
+        misc: false,
+      },
+      entityChanges: [],
+      lwwUpdateMode: 'replace',
+      recreatesEntityAfterDelete: true,
     });
   });
 

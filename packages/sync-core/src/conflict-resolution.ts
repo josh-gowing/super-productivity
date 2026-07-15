@@ -2,6 +2,7 @@ import {
   extractActionPayload,
   extractEntityFromPayload,
   extractUpdateChanges,
+  isLwwUpdatePayload,
   OpType,
 } from './operation.types';
 import type { EntityConflict, Operation } from './operation.types';
@@ -10,11 +11,13 @@ import type { SyncLogger } from './sync-logger';
 
 export type ConflictResolutionSuggestion = 'local' | 'remote' | 'manual';
 export type LwwConflictResolutionWinner = 'local' | 'remote';
-export type LwwLocalWinOperationKind = 'archive-win' | 'update';
+export type LwwLocalWinOperationKind = 'archive-win' | 'delete-win' | 'update';
 export type LwwConflictResolutionReason =
   | 'remote-archive'
   | 'local-archive'
   | 'local-archive-sibling'
+  | 'remote-delete-wins'
+  | 'local-delete-wins'
   | 'local-timestamp'
   | 'remote-timestamp-or-tie';
 
@@ -41,6 +44,7 @@ export interface LwwConflictResolutionPlanningOptions<
   TOperation extends Operation<string> = Operation,
 > {
   isArchiveAction: (op: TOperation) => boolean;
+  isDeleteWinsAction?: (op: TOperation) => boolean;
   toEntityKey?: (entityType: string, entityId: string) => string;
 }
 
@@ -127,24 +131,50 @@ export const convertLocalDeleteRemoteUpdatesToLww = <
   }
 
   const payloadKey = resolvePayloadKey(conflict.entityType, options.payloadKey);
-  const baseEntity = extractEntityFromPayload(localDeleteOp.payload, payloadKey);
+  const baseEntity = extractEntityFromPayload(
+    localDeleteOp.payload,
+    payloadKey,
+    conflict.entityId,
+  );
 
   return conflict.remoteOps.map((remoteOp) => {
     if (remoteOp.opType !== OpType.Update) {
       return remoteOp;
     }
 
+    const lwwActionType = options.toLwwUpdateActionType(remoteOp.entityType);
+    const existingLwwPayload =
+      remoteOp.actionType === lwwActionType && isLwwUpdatePayload(remoteOp.payload)
+        ? remoteOp.payload
+        : undefined;
+    if (existingLwwPayload?.lwwUpdateMode === 'replace') {
+      return {
+        ...remoteOp,
+        payload: {
+          ...existingLwwPayload,
+          recreatesEntityAfterDelete: true,
+        },
+      } as TOperation;
+    }
+
     if (baseEntity) {
       const remotePayloadKey = resolvePayloadKey(remoteOp.entityType, options.payloadKey);
-      const updateChanges = extractUpdateChanges(remoteOp.payload, remotePayloadKey);
+      const updateChanges = existingLwwPayload
+        ? extractActionPayload(existingLwwPayload)
+        : extractUpdateChanges(remoteOp.payload, remotePayloadKey, conflict.entityId);
       const mergedEntity = options.isSingletonEntityId?.(conflict.entityId)
         ? { ...baseEntity, ...updateChanges }
         : { ...baseEntity, ...updateChanges, id: conflict.entityId };
 
       return {
         ...remoteOp,
-        actionType: options.toLwwUpdateActionType(remoteOp.entityType),
-        payload: mergedEntity,
+        actionType: lwwActionType,
+        payload: {
+          actionPayload: mergedEntity,
+          entityChanges: [],
+          lwwUpdateMode: 'replace',
+          recreatesEntityAfterDelete: true,
+        },
       } as TOperation;
     }
 
@@ -307,9 +337,10 @@ export const suggestConflictResolution = <TOperation extends Operation<string>>(
  * Plans last-write-wins conflict resolution without looking up host state or
  * creating operations.
  *
- * The host supplies archive-action detection because archive semantics are
- * domain-specific. The returned plan tells the host whether a local-win op must
- * be created and which app-side factory should create it.
+ * The host supplies archive-action detection and may opt specific operations
+ * into delete-wins precedence because both policies are domain-specific. The
+ * returned plan tells the host whether a local-win op must be created and which
+ * app-side factory should create it.
  */
 export const planLwwConflictResolutions = <
   TOperation extends Operation<string> = Operation,
@@ -356,6 +387,31 @@ export const planLwwConflictResolutions = <
         winner: 'local',
         reason: thisConflictHasLocalArchive ? 'local-archive' : 'local-archive-sibling',
         localWinOperationKind: thisConflictHasLocalArchive ? 'archive-win' : undefined,
+      };
+    }
+
+    const isDeleteWinsAction = options.isDeleteWinsAction;
+    const remoteHasDeleteWins = isDeleteWinsAction
+      ? conflict.remoteOps.some(isDeleteWinsAction)
+      : false;
+    const localHasDeleteWins = isDeleteWinsAction
+      ? conflict.localOps.some(isDeleteWinsAction)
+      : false;
+
+    if (remoteHasDeleteWins) {
+      return {
+        conflict,
+        winner: 'remote',
+        reason: 'remote-delete-wins',
+      };
+    }
+
+    if (localHasDeleteWins) {
+      return {
+        conflict,
+        winner: 'local',
+        reason: 'local-delete-wins',
+        localWinOperationKind: 'delete-win',
       };
     }
 
