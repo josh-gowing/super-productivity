@@ -651,7 +651,11 @@ describe('sectionSharedMetaReducer', () => {
       expect(updatedState[SECTION_FEATURE_NAME].entities['sOther']?.taskIds).toEqual([]);
     });
 
-    it('strips old-project sections when a task moves through LWW resolution', () => {
+    it('strips old-project sections for the authenticated footprint on LWW resolution', () => {
+      // Footprint comes from the authenticated meta.projectMoveFootprint (sourced from
+      // the encrypted payload), not the plaintext meta.entityIds envelope.
+      // 'receiverOnly' is a divergent receiver-side child outside the footprint,
+      // so it must survive.
       const state = stateWith(
         {
           parent: { projectId: 'oldP', subTaskIds: [] },
@@ -674,7 +678,7 @@ describe('sectionSharedMetaReducer', () => {
         type: '[TASK] LWW Update',
         id: 'parent',
         projectId: 'newP',
-        meta: { entityIds: ['parent', 'sub1'] },
+        meta: { projectMoveFootprint: ['parent', 'sub1'] },
       } as Action);
 
       const updated = (
@@ -683,6 +687,46 @@ describe('sectionSharedMetaReducer', () => {
         }
       )[SECTION_FEATURE_NAME];
       expect(updated.entities['sOld']?.taskIds).toEqual(['receiverOnly']);
+    });
+
+    it('ignores a tampered meta.entityIds envelope on LWW resolution (GHSA-8pxh-mgc7-gp3g)', () => {
+      // A compromised server injects 'victim' into the plaintext meta.entityIds
+      // envelope. The reducer derives the footprint only from the authenticated
+      // meta.projectMoveFootprint, so 'victim' is not stripped from its section.
+      const state = stateWith(
+        {
+          parent: { projectId: 'oldP', subTaskIds: ['sub1'] },
+          sub1: { projectId: 'oldP', parentId: 'parent' },
+          victim: { projectId: 'oldP' },
+        },
+        [
+          {
+            id: 'sOld',
+            contextId: 'oldP',
+            contextType: WorkContextType.PROJECT,
+            title: 'old project section',
+            taskIds: ['parent', 'sub1', 'victim'],
+          },
+        ],
+      );
+      addProject(state, 'newP');
+
+      metaReducer(state, {
+        type: '[TASK] LWW Update',
+        id: 'parent',
+        projectId: 'newP',
+        meta: {
+          projectMoveFootprint: ['parent', 'sub1'],
+          entityIds: ['parent', 'sub1', 'victim'],
+        },
+      } as Action);
+
+      const updated = (
+        mockReducer.calls.mostRecent().args[0] as RootState & {
+          [SECTION_FEATURE_NAME]: SectionState;
+        }
+      )[SECTION_FEATURE_NAME];
+      expect(updated.entities['sOld']?.taskIds).toContain('victim');
     });
 
     it('repairs stale other-project sections for a same-project LWW snapshot', () => {
@@ -742,6 +786,70 @@ describe('sectionSharedMetaReducer', () => {
         }
       )[SECTION_FEATURE_NAME];
       expect(updated.entities['sOld']?.taskIds).toEqual([]);
+    });
+
+    it('keeps the current-project section for a patch-mode null projectId (#9025)', () => {
+      // A patch-path null keeps the task in its current project (mirroring the
+      // task slice), so its current-project section membership must survive
+      // while stale other-project references are still repaired.
+      const state = stateWith({ parent: { projectId: 'project1' } }, [
+        {
+          id: 'sTarget',
+          contextId: 'project1',
+          contextType: WorkContextType.PROJECT,
+          title: 'target section',
+          taskIds: ['parent'],
+        },
+        {
+          id: 'sStale',
+          contextId: 'oldP',
+          contextType: WorkContextType.PROJECT,
+          title: 'stale section',
+          taskIds: ['parent'],
+        },
+      ]);
+
+      metaReducer(state, {
+        type: '[TASK] LWW Update',
+        id: 'parent',
+        projectId: null,
+      } as Action);
+
+      const updated = (
+        mockReducer.calls.mostRecent().args[0] as RootState & {
+          [SECTION_FEATURE_NAME]: SectionState;
+        }
+      )[SECTION_FEATURE_NAME];
+      expect(updated.entities['sTarget']?.taskIds).toEqual(['parent']);
+      expect(updated.entities['sStale']?.taskIds).toEqual([]);
+    });
+
+    it('keeps the current-project section for a replace-mode null projectId (#9025)', () => {
+      // Invalid destinations are mode-independent: even a replace snapshot's
+      // null keeps the task in its current project, so its section survives.
+      const state = stateWith({ parent: { projectId: 'project1' } }, [
+        {
+          id: 'sTarget',
+          contextId: 'project1',
+          contextType: WorkContextType.PROJECT,
+          title: 'target section',
+          taskIds: ['parent'],
+        },
+      ]);
+
+      metaReducer(state, {
+        type: '[TASK] LWW Update',
+        id: 'parent',
+        projectId: null,
+        meta: { lwwUpdateMode: 'replace' },
+      } as Action);
+
+      const updated = (
+        mockReducer.calls.mostRecent().args[0] as RootState & {
+          [SECTION_FEATURE_NAME]: SectionState;
+        }
+      )[SECTION_FEATURE_NAME];
+      expect(updated.entities['sTarget']?.taskIds).toEqual(['parent']);
     });
 
     it('strips project sections for reverse-linked children when LWW recreates a parent', () => {

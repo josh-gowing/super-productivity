@@ -1,6 +1,9 @@
 import { TestBed } from '@angular/core/testing';
 import { SyncConflictBannerService } from './sync-conflict-banner.service';
-import { ConflictResolutionService } from './conflict-resolution.service';
+import {
+  ConflictResolutionService,
+  getLatestTaskProjectMoveEntityIds,
+} from './conflict-resolution.service';
 import { Store } from '@ngrx/store';
 import { OperationApplierService } from '../apply/operation-applier.service';
 import { HydrationStateService } from '../apply/hydration-state.service';
@@ -27,6 +30,7 @@ import { CLIENT_ID_PROVIDER } from '../util/client-id.provider';
 import { CURRENT_SCHEMA_VERSION } from '../persistence/schema-migration.service';
 import { MAX_VECTOR_CLOCK_SIZE } from '../core/operation-log.const';
 import { buildEntityRegistry, ENTITY_REGISTRY } from '../core/entity-registry';
+import { WorkContextType } from '../../features/work-context/work-context.model';
 import { OperationLogEffects } from '../capture/operation-log.effects';
 import { IncompleteRemoteOperationsError } from '../core/errors/sync-errors';
 import { ConflictJournalService } from './conflict-journal.service';
@@ -1080,6 +1084,45 @@ describe('ConflictResolutionService', () => {
         ).toBeTrue();
       });
 
+      it('should recreate a locally-winning UPDATE over a concurrent remote DELETE on a client-ID tie (#9024)', async () => {
+        const now = Date.now();
+        mockStore.select.and.returnValue(
+          of({ id: 'task-1', title: 'Local winning task' }),
+        );
+        // Exact-timestamp tie against a remote DELETE. Local's clientId
+        // (client-z) is the larger, so the deterministic tiebreak makes the
+        // local UPDATE win — reaching the SAME delete-recreation path as the
+        // "UPDATE is newer" case above, just via the tie rather than the
+        // timestamp. Guards that the #9024 tiebreak doesn't bypass entity
+        // recreation when the loser was a delete.
+        const conflicts: EntityConflict[] = [
+          createConflict(
+            'task-1',
+            [
+              {
+                ...createOpWithTimestamp('local-upd', 'client-z', now),
+                opType: OpType.Update,
+              },
+            ],
+            [
+              {
+                ...createOpWithTimestamp('remote-del', 'client-a', now),
+                opType: OpType.Delete,
+              },
+            ],
+          ),
+        ];
+
+        await service.autoResolveConflictsLWW(conflicts);
+
+        expect(mockOpLogStore.markRejected).toHaveBeenCalledWith(['local-upd']);
+        expect(mockOpLogStore.markRejected).toHaveBeenCalledWith(['remote-del']);
+        expect(
+          (getFirstMixedLocalOp().payload as { recreatesEntityAfterDelete?: boolean })
+            .recreatesEntityAfterDelete,
+        ).toBeTrue();
+      });
+
       it('should resolve DELETE vs UPDATE conflict when DELETE is older (remote UPDATE wins)', async () => {
         const now = Date.now();
         const conflicts: EntityConflict[] = [
@@ -1838,6 +1881,270 @@ describe('ConflictResolutionService', () => {
         );
         expect(getMixedRemoteOps().map(({ id }) => id)).toEqual([remoteProjectDelete.id]);
         expect(mockOperationApplier.applyOperations).not.toHaveBeenCalled();
+      });
+
+      it('recreates notes, sections and repeat-cfgs of a losing deleteProject (#9037)', async () => {
+        const remoteProjectDelete: Operation = {
+          ...createOpWithTimestamp(
+            'remote-project-delete',
+            'client-b',
+            1_000,
+            OpType.Delete,
+            'project-1',
+          ),
+          actionType: ActionType.TASK_SHARED_DELETE_PROJECT,
+          entityType: 'PROJECT',
+          payload: {
+            actionPayload: {
+              projectId: 'project-1',
+              allTaskIds: [],
+              noteIds: ['noteA'],
+            },
+            entityChanges: [],
+          },
+        };
+        const localProjectEdit: Operation = {
+          ...createOpWithTimestamp(
+            'local-project-edit',
+            'client-a',
+            2_000,
+            OpType.Update,
+            'project-1',
+          ),
+          entityType: 'PROJECT',
+        };
+        const noteSel = mockEntityRegistry.NOTE!.selectEntities;
+        const sectionSel = mockEntityRegistry.SECTION!.selectEntities;
+        const cfgSel = mockEntityRegistry.TASK_REPEAT_CFG!.selectEntities;
+        mockStore.select.and.callFake((selector: unknown, props?: { id: string }) => {
+          if (props?.id === 'project-1') {
+            return of({
+              id: 'project-1',
+              title: 'Winning project',
+              taskIds: [],
+              backlogTaskIds: [],
+            });
+          }
+          if (selector === noteSel) {
+            return of({
+              noteA: { id: 'noteA', content: 'Kept note', modified: 5_000 },
+            });
+          }
+          if (selector === sectionSel) {
+            return of({
+              sectionA: {
+                id: 'sectionA',
+                title: 'Project section',
+                contextType: WorkContextType.PROJECT,
+                contextId: 'project-1',
+                taskIds: [],
+              },
+              // Belongs to a different project — must NOT be recreated.
+              sectionOther: {
+                id: 'sectionOther',
+                title: 'Other section',
+                contextType: WorkContextType.PROJECT,
+                contextId: 'project-2',
+                taskIds: [],
+              },
+            });
+          }
+          if (selector === cfgSel) {
+            return of({
+              cfgA: { id: 'cfgA', title: 'Repeat', projectId: 'project-1' },
+              // Different project — must NOT be recreated.
+              cfgOther: { id: 'cfgOther', title: 'Other', projectId: 'project-2' },
+            });
+          }
+          return of(undefined);
+        });
+
+        await service.autoResolveConflictsLWW([
+          {
+            entityType: 'PROJECT',
+            entityId: 'project-1',
+            localOps: [localProjectEdit],
+            remoteOps: [remoteProjectDelete],
+            suggestedResolution: 'manual',
+          },
+        ]);
+
+        const localOps = getMixedLocalOps();
+        const projectComps = localOps.filter((op) => op.entityType === 'PROJECT');
+        const noteRecreations = localOps.filter((op) => op.entityType === 'NOTE');
+        const sectionRecreations = localOps.filter((op) => op.entityType === 'SECTION');
+        const cfgRecreations = localOps.filter(
+          (op) => op.entityType === 'TASK_REPEAT_CFG',
+        );
+
+        expect(noteRecreations.map(({ entityId }) => entityId)).toEqual(['noteA']);
+        expect(sectionRecreations.map(({ entityId }) => entityId)).toEqual(['sectionA']);
+        expect(cfgRecreations.map(({ entityId }) => entityId)).toEqual(['cfgA']);
+
+        for (const op of [...noteRecreations, ...sectionRecreations, ...cfgRecreations]) {
+          expect(
+            (op.payload as { recreatesEntityAfterDelete?: boolean })
+              .recreatesEntityAfterDelete,
+          )
+            .withContext(`recreate flag on ${op.entityType}:${op.entityId}`)
+            .toBeTrue();
+          expect((op.payload as { lwwUpdateMode?: string }).lwwUpdateMode)
+            .withContext(`replace mode on ${op.entityType}:${op.entityId}`)
+            .toBe('replace');
+          expect(compareVectorClocks(op.vectorClock, remoteProjectDelete.vectorClock))
+            .withContext(`clock domination for ${op.entityType}:${op.entityId}`)
+            .toBe(VectorClockComparison.GREATER_THAN);
+        }
+        // The note carries `modified`, so its own timestamp is preserved (protects a
+        // concurrent note edit). Sections/cfgs have no `modified`, so they fall back
+        // to the project compensation timestamp.
+        expect(noteRecreations[0].timestamp).toBe(5_000);
+        expect(sectionRecreations[0].timestamp).toBe(projectComps[0].timestamp);
+        expect(cfgRecreations[0].timestamp).toBe(projectComps[0].timestamp);
+        expect(extractActionPayload(noteRecreations[0].payload)['id']).toBe('noteA');
+      });
+
+      it('skips notes/sections/cfgs concurrently deleted in-batch and strips dead section taskIds (#9037)', async () => {
+        const remoteProjectDelete: Operation = {
+          ...createOpWithTimestamp(
+            'remote-project-delete',
+            'client-b',
+            1_000,
+            OpType.Delete,
+            'project-1',
+          ),
+          actionType: ActionType.TASK_SHARED_DELETE_PROJECT,
+          entityType: 'PROJECT',
+          payload: {
+            actionPayload: {
+              projectId: 'project-1',
+              allTaskIds: ['task-live'],
+              noteIds: ['noteKeep', 'noteGone'],
+            },
+            entityChanges: [],
+          },
+        };
+        const localProjectEdit: Operation = {
+          ...createOpWithTimestamp(
+            'local-project-edit',
+            'client-a',
+            2_000,
+            OpType.Update,
+            'project-1',
+          ),
+          entityType: 'PROJECT',
+        };
+        // Concurrent non-conflicting deletes from a third device, not yet applied
+        // to the pre-batch store this recovery reads.
+        const concurrentNoteDelete: Operation = {
+          ...createOpWithTimestamp(
+            'del-note',
+            'client-c',
+            1_500,
+            OpType.Delete,
+            'noteGone',
+          ),
+          entityType: 'NOTE',
+          actionType: ActionType.TASK_SHARED_DELETE,
+        };
+        const concurrentSectionDelete: Operation = {
+          ...createOpWithTimestamp(
+            'del-sec',
+            'client-c',
+            1_500,
+            OpType.Delete,
+            'sectionGone',
+          ),
+          entityType: 'SECTION',
+          actionType: ActionType.TASK_SHARED_DELETE,
+        };
+        const concurrentTaskDelete: Operation = {
+          ...createOpWithTimestamp(
+            'del-task',
+            'client-c',
+            1_500,
+            OpType.Delete,
+            'task-gone',
+          ),
+          entityType: 'TASK',
+          actionType: ActionType.TASK_SHARED_DELETE,
+        };
+        const noteSel = mockEntityRegistry.NOTE!.selectEntities;
+        const sectionSel = mockEntityRegistry.SECTION!.selectEntities;
+        const cfgSel = mockEntityRegistry.TASK_REPEAT_CFG!.selectEntities;
+        mockStore.select.and.callFake((selector: unknown, props?: { id: string }) => {
+          if (props?.id === 'project-1') {
+            return of({
+              id: 'project-1',
+              title: 'Winning project',
+              taskIds: ['task-live'],
+              backlogTaskIds: [],
+            });
+          }
+          if (props?.id === 'task-live') {
+            return of({
+              id: 'task-live',
+              title: 'Live task',
+              projectId: 'project-1',
+              subTaskIds: [],
+            });
+          }
+          if (selector === noteSel) {
+            return of({
+              noteKeep: { id: 'noteKeep', content: 'Keep', modified: 5_000 },
+              noteGone: { id: 'noteGone', content: 'Gone', modified: 5_000 },
+            });
+          }
+          if (selector === sectionSel) {
+            return of({
+              sectionKeep: {
+                id: 'sectionKeep',
+                title: 'Keep',
+                contextType: WorkContextType.PROJECT,
+                contextId: 'project-1',
+                taskIds: ['task-live', 'task-gone'],
+              },
+              sectionGone: {
+                id: 'sectionGone',
+                title: 'Gone',
+                contextType: WorkContextType.PROJECT,
+                contextId: 'project-1',
+                taskIds: [],
+              },
+            });
+          }
+          if (selector === cfgSel) {
+            return of({});
+          }
+          return of(undefined);
+        });
+
+        await service.autoResolveConflictsLWW(
+          [
+            {
+              entityType: 'PROJECT',
+              entityId: 'project-1',
+              localOps: [localProjectEdit],
+              remoteOps: [remoteProjectDelete],
+              suggestedResolution: 'manual',
+            },
+          ],
+          [concurrentNoteDelete, concurrentSectionDelete, concurrentTaskDelete],
+        );
+
+        const localOps = getMixedLocalOps();
+        const noteRecreations = localOps.filter((op) => op.entityType === 'NOTE');
+        const sectionRecreations = localOps.filter((op) => op.entityType === 'SECTION');
+
+        // note-gone / section-gone were concurrently deleted → not resurrected.
+        expect(noteRecreations.map(({ entityId }) => entityId)).toEqual(['noteKeep']);
+        expect(sectionRecreations.map(({ entityId }) => entityId)).toEqual([
+          'sectionKeep',
+        ]);
+        // The surviving section drops its ref to the concurrently-deleted task.
+        expect(extractActionPayload(sectionRecreations[0].payload)['taskIds']).toEqual([
+          'task-live',
+        ]);
       });
 
       it('does not resurrect a task deleted by a concurrent non-conflicting op (#8997 review)', async () => {
@@ -5185,7 +5492,8 @@ describe('ConflictResolutionService', () => {
         {
           entityType: 'TASK',
           entityId: 'task-1',
-          // client-a < client-b alphabetically, but we test that remote wins on tie
+          // Remote's clientId (client-b) is lexicographically larger, so the
+          // deterministic tiebreak makes remote win the exact-timestamp tie.
           localOps: [createOpWithTimestamp('local-1', 'client-a', now)],
           remoteOps: [createOpWithTimestamp('remote-1', 'client-b', now)],
           suggestedResolution: 'remote', // Remote wins on tie
@@ -5209,6 +5517,37 @@ describe('ConflictResolutionService', () => {
         jasmine.any(Object),
       );
       expect(mockOpLogStore.markRejected).toHaveBeenCalledWith(['local-1']);
+    });
+
+    it('should let local win the tie when its client ID is larger', async () => {
+      const now = Date.now();
+
+      // Same exact-millisecond tie, but now LOCAL's clientId (client-z) is the
+      // larger, so the deterministic tiebreak flips the winner to local. This is
+      // the direction the pre-existing tie tests never exercised (#9024): both
+      // devices see the sides swapped yet pick the same physical client, so they
+      // converge instead of each keeping the other's value.
+      const conflicts: EntityConflict[] = [
+        {
+          entityType: 'TASK',
+          entityId: 'task-1',
+          localOps: [createOpWithTimestamp('local-1', 'client-z', now)],
+          remoteOps: [createOpWithTimestamp('remote-1', 'client-a', now)],
+          suggestedResolution: 'remote',
+        },
+      ];
+
+      mockOpLogStore.hasOp.and.resolveTo(false);
+      mockOpLogStore.append.and.resolveTo(1);
+      mockOpLogStore.markApplied.and.resolveTo(undefined);
+      mockOpLogStore.markRejected.and.resolveTo(undefined);
+      mockOperationApplier.applyOperations.and.resolveTo({ appliedOps: [] });
+
+      await service.autoResolveConflictsLWW(conflicts);
+
+      // Local wins the tie → the remote op is rejected (mirrors the local-win
+      // timestamp cases in this block).
+      expect(mockOpLogStore.markRejected).toHaveBeenCalledWith(['remote-1']);
     });
   });
 
@@ -7287,6 +7626,102 @@ describe('ConflictResolutionService', () => {
       );
 
       expect(op.entityIds).toEqual(['task-canonical', 'subtask-1']);
+      // The same footprint must also ride inside the authenticated payload so
+      // remote clients don't have to trust the plaintext envelope.
+      // GHSA-8pxh-mgc7-gp3g.
+      expect(
+        (op.payload as { projectMoveFootprint?: readonly string[] }).projectMoveFootprint,
+      ).toEqual(['task-canonical', 'subtask-1']);
+    });
+
+    it('should omit projectMoveFootprint when no footprint is supplied', () => {
+      const op = service.createLWWUpdateOp(
+        'TASK',
+        'task-canonical',
+        { title: 'Local winner' },
+        TEST_CLIENT_ID,
+        { [TEST_CLIENT_ID]: 1 },
+        Date.now(),
+      );
+
+      expect(op.entityIds).toBeUndefined();
+      expect(
+        (op.payload as { projectMoveFootprint?: readonly string[] }).projectMoveFootprint,
+      ).toBeUndefined();
+    });
+
+    describe('getLatestTaskProjectMoveEntityIds (authenticated footprint source)', () => {
+      const lwwMoveOp = (overrides: Partial<Operation>): Operation =>
+        ({
+          id: 'op-x',
+          actionType: toLwwUpdateActionType('TASK'),
+          opType: OpType.Update,
+          entityType: 'TASK',
+          entityId: 'taskT',
+          payload: {
+            actionPayload: { id: 'taskT' },
+            entityChanges: [],
+            lwwUpdateMode: 'replace',
+          },
+          clientId: 'c',
+          vectorClock: { c: 1 },
+          timestamp: 1,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          ...overrides,
+        }) as Operation;
+
+      it('reuses the footprint from the authenticated payload, ignoring a tampered entityIds envelope (GHSA-8pxh-mgc7-gp3g)', () => {
+        // A compromised server appended 'victim' to a remote LWW op's plaintext
+        // entityIds envelope. Re-derivation must launder nothing: the merged op's
+        // footprint comes from the authenticated payload.projectMoveFootprint.
+        const op = lwwMoveOp({
+          entityIds: ['taskT', 'victim'],
+          payload: {
+            actionPayload: { id: 'taskT' },
+            entityChanges: [],
+            lwwUpdateMode: 'replace',
+            projectMoveFootprint: ['taskT', 'sub1'],
+          } as unknown as Operation['payload'],
+        });
+
+        expect(getLatestTaskProjectMoveEntityIds([op])).toEqual(['taskT', 'sub1']);
+      });
+
+      it('returns undefined for a legacy LWW op with entityIds but no authenticated footprint (no laundering)', () => {
+        const op = lwwMoveOp({ entityIds: ['taskT', 'victim'] });
+
+        expect(getLatestTaskProjectMoveEntityIds([op])).toBeUndefined();
+      });
+
+      it('takes the raw TASK_SHARED_UPDATE footprint ROOT from the authenticated payload, not the tampered entityId envelope (GHSA-8pxh-mgc7-gp3g)', () => {
+        // A raw TASK_SHARED_UPDATE op's entityId is NOT bound to payload.id by the
+        // decrypt gate (that gate only covers LWW ops). A compromised server
+        // retargets the plaintext envelope entityId to 'victim' while the
+        // authenticated payload still moves the real task 'taskT'. The footprint
+        // root must come from the authenticated payload.task.id.
+        const op = {
+          id: 'op-upd',
+          actionType: ActionType.TASK_SHARED_UPDATE,
+          opType: OpType.Update,
+          entityType: 'TASK',
+          entityId: 'victim',
+          payload: {
+            actionPayload: {
+              task: { id: 'taskT', changes: { projectId: 'proj-2' } },
+              projectMoveSubTaskIds: ['sub1'],
+            },
+            entityChanges: [],
+          },
+          clientId: 'c',
+          vectorClock: { c: 1 },
+          timestamp: 1,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+        } as unknown as Operation;
+
+        const result = getLatestTaskProjectMoveEntityIds([op]);
+        expect(result).toEqual(['taskT', 'sub1']);
+        expect(result).not.toContain('victim');
+      });
     });
 
     it('should ensure _convertToLWWUpdatesIfNeeded merged payload has id even when base entity lacks id', () => {
