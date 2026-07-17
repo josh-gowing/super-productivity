@@ -38,6 +38,7 @@ import {
   LocalOnlySyncSettings,
 } from '../../features/config/local-only-sync-settings.util';
 import { HydrationStateService } from '../apply/hydration-state.service';
+import { SyncProviderManager } from '../sync-providers/provider-manager.service';
 
 /**
  * Handles the core pipeline for processing remote operations.
@@ -70,6 +71,7 @@ export class RemoteOpsProcessingService {
   private syncImportFilterService = inject(SyncImportFilterService);
   private writeFlushService = inject(OperationWriteFlushService);
   private hydrationStateService = inject(HydrationStateService);
+  private providerManager = inject(SyncProviderManager);
   private injector = inject(Injector);
 
   /** Flag to show version-incompatibility warnings only once per session */
@@ -106,6 +108,13 @@ export class RemoteOpsProcessingService {
        * aborts the apply so the caller can show UI after the lock is released.
        */
       beforeFullStateApply?: (fullStateOps: Operation[]) => Promise<boolean>;
+      /**
+       * Sync epoch captured at cycle start (#9074). Re-asserted INSIDE each
+       * apply-lock closure (i.e. after the lock wait), so a stale cycle that
+       * queued behind a destructive replacement (e.g. createCleanSlate) cannot
+       * apply old-epoch ops onto the fresh state.
+       */
+      fenceEpoch?: number;
     },
   ): Promise<{
     localWinOpsCreated: number;
@@ -281,6 +290,13 @@ export class RemoteOpsProcessingService {
         committedFullStateOpIds: string[];
         blockedByLocalConflict: boolean;
       }> => {
+        // #9074: asserted AFTER the lock wait — the highest-value fence site
+        // for full-state ops (a stale SYNC_IMPORT applied wholesale after a
+        // clean-slate/switch is the worst interleave).
+        this.providerManager.assertSyncEpochUnchanged(
+          options?.fenceEpoch,
+          'full-state apply',
+        );
         // The operation-log lock blocks cross-tab operation writes, while this
         // hold makes same-tab reducer actions enter the deferred queue. Together
         // they keep the final pending-work read and destructive apply stable.
@@ -380,6 +396,7 @@ export class RemoteOpsProcessingService {
         'RemoteOpsProcessingService: Skipping conflict detection (skipConflictDetection=true). ' +
           `Applying ${validOps.length} ops directly.`,
       );
+      this.providerManager.assertSyncEpochUnchanged(options?.fenceEpoch, 'direct apply');
       await this.applyNonConflictingOps(
         validOps,
         options.callerHoldsOperationLogLock ?? false,
@@ -408,10 +425,18 @@ export class RemoteOpsProcessingService {
     // detect conflicts, AND apply resolutions.
     let localWinOpsCreated = 0;
     await this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
-      const appliedFrontierByEntity = await this.vectorClockService.getEntityFrontier();
+      // #9074: asserted AFTER the lock wait — a stale cycle that queued behind
+      // a destructive replacement must not apply old-epoch ops onto it.
+      this.providerManager.assertSyncEpochUnchanged(
+        options?.fenceEpoch,
+        'remote-ops apply',
+      );
+      const { frontier: appliedFrontierByEntity, retainedOpsByEntity } =
+        await this.vectorClockService.getEntityFrontierWithOps();
       const conflictResult = await this.detectConflicts(
         validOps,
         appliedFrontierByEntity,
+        retainedOpsByEntity,
       );
       const { nonConflicting, conflicts } = conflictResult;
 
@@ -437,10 +462,26 @@ export class RemoteOpsProcessingService {
         // Auto-resolve conflicts using Last-Write-Wins strategy.
         // Piggyback non-conflicting ops so they're applied with resolved conflicts.
         // Validation failure is surfaced via the session-validation latch.
+        //
+        // PRODUCER FREEZE for the conflict-review rollback. Both flags are set
+        // here, at the only production entry point, so the feature's two
+        // producers stop at the fleet boundary while the service keeps the
+        // capability intact for its own tests and for a one-line revert:
+        //  - disableDisjointMerge: conflicts resolve by whole-entity LWW, which
+        //    is the behaviour of every released version to date, so the stable
+        //    fleet gains nothing it would later have to be migrated off.
+        //  - disableConflictJournal: stop persisting the discarded side of a
+        //    conflict verbatim, so that device-local data obligation does not
+        //    expand beyond the edge/internal builds that already carry it.
+        // Reverting the freeze = drop these two lines.
         const lwwResult = await this.conflictResolutionService.autoResolveConflictsLWW(
           conflicts,
           nonConflicting,
-          { callerHoldsOperationLogLock: true },
+          {
+            callerHoldsOperationLogLock: true,
+            disableDisjointMerge: true,
+            disableConflictJournal: true,
+          },
         );
         localWinOpsCreated = lwwResult.localWinOpsCreated;
         return;
@@ -744,11 +785,15 @@ export class RemoteOpsProcessingService {
    *
    * @param remoteOps - Remote operations to check for conflicts
    * @param appliedFrontierByEntity - Per-entity vector clocks of applied ops
+   * @param retainedOpsByEntity - Per-entity retained (non-rejected) ops from the
+   *        same scan as the frontier; reconstructs the local side of no-pending
+   *        CONCURRENT crossings (#9073)
    * @returns Object with `nonConflicting` ops to apply and `conflicts` to resolve
    */
   async detectConflicts(
     remoteOps: Operation[],
     appliedFrontierByEntity: Map<string, VectorClock>,
+    retainedOpsByEntity: Map<string, Operation[]>,
   ): Promise<ConflictResult> {
     const localPendingOpsByEntity = await this.opLogStore.getUnsyncedByEntity();
     const conflicts: EntityConflict[] = [];
@@ -772,6 +817,7 @@ export class RemoteOpsProcessingService {
       const result = await this.conflictResolutionService.checkOpForConflicts(remoteOp, {
         localPendingOpsByEntity,
         appliedFrontierByEntity,
+        retainedOpsByEntity,
         snapshotVectorClock,
         snapshotEntityKeys,
         hasNoSnapshotClock,

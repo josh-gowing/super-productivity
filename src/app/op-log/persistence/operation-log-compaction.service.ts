@@ -16,6 +16,9 @@ import { extractEntityKeysFromState } from './extract-entity-keys';
 import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider';
 import { limitVectorClockSize } from '../../core/util/vector-clock';
 import { hasMeaningfulStateData } from '../validation/has-meaningful-state-data.util';
+import { OperationCaptureService } from '../capture/operation-capture.service';
+import { getPhantomChangeRisk } from '../capture/phantom-change-guard.util';
+import { OperationWriteFlushService } from '../sync/operation-write-flush.service';
 
 /**
  * Manages the compaction (garbage collection) of the operation log.
@@ -32,6 +35,8 @@ export class OperationLogCompactionService {
   private stateSnapshot = inject(StateSnapshotService);
   private vectorClockService = inject(VectorClockService);
   private clientIdProvider: ClientIdProvider = inject(CLIENT_ID_PROVIDER);
+  private operationCapture = inject(OperationCaptureService);
+  private writeFlushService = inject(OperationWriteFlushService);
 
   async compact(): Promise<boolean> {
     return this._doCompact(COMPACTION_RETENTION_MS, false);
@@ -57,7 +62,17 @@ export class OperationLogCompactionService {
    * @param isEmergency - Whether this is an emergency compaction (for logging)
    */
   private async _doCompact(retentionMs: number, isEmergency: boolean): Promise<boolean> {
-    return this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
+    // Fast-path (re-checked inside the lock via getPhantomChangeRisk): the
+    // divergence flag is sticky for the session, so once set every attempt
+    // would skip anyway — avoid the cross-tab lock churn, since a compact()
+    // fires after every write while the counter sits at the threshold.
+    if (this.operationCapture.hasUnrecoveredPersistFailure()) {
+      OpLog.warn(
+        'OperationLogCompactionService: Skipping compaction — an unrecovered persist failure left live state ahead of the op log (#8751)',
+      );
+      return false;
+    }
+    const compactExclusively = async (): Promise<boolean> => {
       const startTime = Date.now();
       const label = isEmergency ? 'emergency ' : '';
 
@@ -69,6 +84,39 @@ export class OperationLogCompactionService {
       if (pendingRemoteOps.length > 0) {
         OpLog.warn(
           'OperationLogCompactionService: Skipping compaction — remote reducer work is pending',
+        );
+        return false;
+      }
+
+      // GUARD (#8751): live state must not be snapshotted while it contains
+      // changes that no durable op represents (failed or still-pending writes,
+      // undrained deferred actions) — the state-cache write below would bake
+      // such a phantom change in as permanent, silent cross-device divergence.
+      // Checked synchronously IMMEDIATELY before the snapshot read (no awaits
+      // in between) so nothing can slip in behind the guard.
+      //
+      // DO NOT HOIST THIS ABOVE THE getPendingRemoteOps() AWAIT. The position
+      // is load-bearing in both directions, and this is the upper bound:
+      // triggerCompaction() fires from inside the write path, so the action
+      // that triggered us is still counted pending here and is decremented on
+      // a microtask chain once that write releases the lock we just took. The
+      // await above is a real IndexedDB round-trip, which lets those
+      // microtasks drain first — that is the ONLY reason the guard observes a
+      // settled counter rather than skipping on every single attempt.
+      // Checking earlier ("the cheap guard first") starves compaction
+      // permanently. Covered by the guard-position spec.
+      //
+      // Skipping is always safe: the op-log stays the source of truth, and
+      // compaction re-runs once writes settle / the deferred drain succeeds /
+      // the user reloads after an unrecovered failure (the sticky snackbar
+      // asks for exactly that). Note the quota corollary: emergency compaction is
+      // invoked while the failing write is still pending, so it skips here
+      // deterministically — freeing space at that moment is impossible
+      // without baking that write's phantom change.
+      const phantomRisk = getPhantomChangeRisk(this.operationCapture);
+      if (phantomRisk) {
+        OpLog.warn(
+          `OperationLogCompactionService: Skipping ${label}compaction — ${phantomRisk} (#8751)`,
         );
         return false;
       }
@@ -161,7 +209,20 @@ export class OperationLogCompactionService {
       }
 
       return true;
-    });
+    };
+
+    // #8469: drain the capture pipeline before capturing so no action can be
+    // dispatched-but-unsequenced at the state read — otherwise its effect is
+    // baked into the cache while its seq lands after lastAppliedOpSeq, and the
+    // next boot's tail replay double-applies it. Emergency compaction is
+    // invoked from the failing write's own call stack (quota handling), where
+    // that write's pending-counter entry is still elevated — flushing there
+    // would wait on ourselves until the flush timeout and break quota
+    // recovery, so it keeps the bare lock and accepts the residual re-replay
+    // window.
+    return isEmergency
+      ? this.lockService.request(LOCK_NAMES.OPERATION_LOG, compactExclusively)
+      : this.writeFlushService.flushThenRunExclusive(compactExclusively);
   }
 
   /**

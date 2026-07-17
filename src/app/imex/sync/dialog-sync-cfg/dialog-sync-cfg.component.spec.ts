@@ -61,6 +61,7 @@ describe('DialogSyncCfgComponent', () => {
 
     mockProviderManager = jasmine.createSpyObj('SyncProviderManager', [
       'getProviderById',
+      'notifyProviderTargetChanged',
     ]);
 
     mockGlobalConfigService = jasmine.createSpyObj('GlobalConfigService', [], {
@@ -100,6 +101,139 @@ describe('DialogSyncCfgComponent', () => {
 
     fixture = TestBed.createComponent(DialogSyncCfgComponent);
     component = fixture.componentInstance;
+  });
+
+  describe('save() — LocalFile pending folder commit (#9075)', () => {
+    let commitSpy: jasmine.Spy;
+    let originalEa: unknown;
+
+    const setupSaveWithProvider = (providerId: SyncProviderId): void => {
+      const providerStub = {
+        id: providerId,
+        isReady: jasmine.createSpy('isReady').and.resolveTo(true),
+        privateCfg: { load: jasmine.createSpy('load').and.resolveTo(null) },
+      };
+      mockProviderManager.getProviderById.and.resolveTo(providerStub as any);
+      mockSyncWrapperService.configuredAuthForSyncProviderIfNecessary.and.resolveTo({
+        wasConfigured: true,
+      });
+      (component as any)._tmpUpdatedCfg = {
+        ...(component as any)._tmpUpdatedCfg,
+        syncProvider: providerId,
+        isEnabled: true,
+      };
+    };
+
+    beforeEach(() => {
+      commitSpy = jasmine
+        .createSpy('commitPickedDirectory')
+        .and.resolveTo({ path: '/new-folder', isChanged: true });
+      originalEa = (window as { ea?: unknown }).ea;
+      (window as { ea?: unknown }).ea = {
+        commitPickedDirectory: commitSpy,
+        discardPickedDirectory: jasmine
+          .createSpy('discardPickedDirectory')
+          .and.resolveTo(),
+      };
+    });
+
+    afterEach(() => {
+      // window.ea is global — a leaked stub would flip other specs into
+      // "Electron mode".
+      (window as { ea?: unknown }).ea = originalEa;
+    });
+
+    it('commits the pending folder and asserts the target change on a real move', async () => {
+      setupSaveWithProvider(SyncProviderId.LocalFile);
+
+      await component.save();
+
+      expect(commitSpy).toHaveBeenCalledTimes(1);
+      expect(mockProviderManager.notifyProviderTargetChanged).toHaveBeenCalledTimes(1);
+      expect(mockSyncConfigService.updateSettingsFromForm).toHaveBeenCalled();
+      expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+
+    it('does NOT wipe per-target state when re-picking the same folder or without a pick', async () => {
+      setupSaveWithProvider(SyncProviderId.LocalFile);
+      commitSpy.and.resolveTo({ path: '/same-folder', isChanged: false });
+      await component.save();
+      expect(mockProviderManager.notifyProviderTargetChanged).not.toHaveBeenCalled();
+
+      // Routine save without a pick this session → main returns null.
+      mockDialogRef.close.calls.reset();
+      commitSpy.and.resolveTo(null);
+      await component.save();
+      expect(mockProviderManager.notifyProviderTargetChanged).not.toHaveBeenCalled();
+      expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+
+    it('keeps the dialog open and saves nothing when the commit fails, then retries cleanly', async () => {
+      // Folder deleted between pick and Save: the old target must stay live
+      // and the user must get the chance to re-pick or cancel.
+      setupSaveWithProvider(SyncProviderId.LocalFile);
+      commitSpy.and.rejectWith(new Error('ENOENT'));
+
+      await component.save();
+
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({ type: 'ERROR' }),
+      );
+      expect(mockSyncConfigService.updateSettingsFromForm).not.toHaveBeenCalled();
+      expect(mockDialogRef.close).not.toHaveBeenCalled();
+
+      // A second Save after the user re-picked must go through normally.
+      commitSpy.and.resolveTo({ path: '/recovered', isChanged: true });
+      await component.save();
+      expect(mockProviderManager.notifyProviderTargetChanged).toHaveBeenCalledTimes(1);
+      expect(mockSyncConfigService.updateSettingsFromForm).toHaveBeenCalledTimes(1);
+      expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+
+    it('treats a safe Error VALUE from main as the failure path (IPC contract)', async () => {
+      setupSaveWithProvider(SyncProviderId.LocalFile);
+      commitSpy.and.resolveTo(new Error('COMMIT_PICKED_DIRECTORY failed: Error'));
+
+      await component.save();
+
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({ type: 'ERROR' }),
+      );
+      expect(mockSyncConfigService.updateSettingsFromForm).not.toHaveBeenCalled();
+      expect(mockDialogRef.close).not.toHaveBeenCalled();
+    });
+
+    it('does not commit when saving a different provider after a LocalFile pick', async () => {
+      setupSaveWithProvider(SyncProviderId.WebDAV);
+
+      await component.save();
+
+      expect(commitSpy).not.toHaveBeenCalled();
+      expect(mockProviderManager.notifyProviderTargetChanged).not.toHaveBeenCalled();
+      expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+
+    it('is a no-op on platforms without a main-side pending slot (Android/web)', async () => {
+      (window as { ea?: unknown }).ea = undefined;
+      setupSaveWithProvider(SyncProviderId.LocalFile);
+
+      await component.save();
+
+      expect(mockProviderManager.notifyProviderTargetChanged).not.toHaveBeenCalled();
+      expect(mockSyncConfigService.updateSettingsFromForm).toHaveBeenCalled();
+      expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+
+    it('discards the pending pick when the dialog is destroyed without a save', async () => {
+      const discardSpy = (
+        window as unknown as { ea: { discardPickedDirectory: jasmine.Spy } }
+      ).ea.discardPickedDirectory;
+
+      fixture.destroy();
+
+      expect(discardSpy).toHaveBeenCalledTimes(1);
+      expect(commitSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('save() — auth cancelled (reproduces issue #7131)', () => {
@@ -797,6 +931,64 @@ describe('DialogSyncCfgComponent', () => {
 
       expect(mockSyncConfigService.updateSettingsFromForm).toHaveBeenCalled();
       expect(mockDialogRef.close).toHaveBeenCalled();
+    });
+  });
+
+  describe('save() — OneDrive pre-auth cfg write (Task 2 target isolation)', () => {
+    const storedCfg = {
+      clientId: 'cid',
+      tenantId: 'common',
+      syncFolderPath: 'Super Productivity',
+      accessToken: 'at',
+      refreshToken: 'rt',
+      tokenExpiresAt: 1,
+    };
+    let setComplete: jasmine.Spy;
+
+    const arrangeOneDrive = (formOneDriveCfg: Record<string, unknown>): void => {
+      setComplete = jasmine.createSpy('setComplete').and.resolveTo(undefined);
+      mockProviderManager.getProviderById.and.resolveTo({
+        id: SyncProviderId.OneDrive,
+        isReady: jasmine.createSpy('isReady').and.resolveTo(true),
+        privateCfg: {
+          load: jasmine.createSpy('load').and.resolveTo({ ...storedCfg }),
+          setComplete,
+        },
+      } as any);
+      mockSyncWrapperService.configuredAuthForSyncProviderIfNecessary.and.resolveTo({
+        isSuccess: true,
+      } as any);
+      (component as any)._tmpUpdatedCfg = {
+        ...(component as any)._tmpUpdatedCfg,
+        syncProvider: SyncProviderId.OneDrive,
+        isEnabled: true,
+        oneDrive: formOneDriveCfg,
+      };
+    };
+
+    it('signals a target change when the sync folder moves', async () => {
+      // This write bypasses setProviderConfig(), so by the time the save's later
+      // setProviderConfig runs, load() already returns the NEW folder and its
+      // diff is a no-op. Without the explicit signal the previous folder's seq
+      // cursor/revs/clocks stay keyed under 'OneDrive' and get reused against the
+      // new folder — the cross-target data loss Task 2 exists to prevent.
+      arrangeOneDrive({ ...storedCfg, syncFolderPath: 'Elsewhere' });
+
+      await component.save();
+
+      expect(setComplete).toHaveBeenCalled();
+      expect(mockProviderManager.notifyProviderTargetChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT signal a target change when nothing moved', async () => {
+      // This runs on EVERY OneDrive save. Signalling unconditionally would wipe
+      // the seq cursor and dead-end the next sync in a spurious conflict dialog.
+      arrangeOneDrive({ ...storedCfg });
+
+      await component.save();
+
+      expect(setComplete).toHaveBeenCalled();
+      expect(mockProviderManager.notifyProviderTargetChanged).not.toHaveBeenCalled();
     });
   });
 });

@@ -314,6 +314,13 @@ test.describe('@supersync SuperSync E2E', () => {
    * 6. Client B syncs
    *
    * Expected: Conflict detected or auto-merged, final state consistent
+   *
+   * WEAK — do not trust this as conflict coverage. Both clients change the SAME
+   * field (isDone), so there is no disjoint merge to get wrong, and the only
+   * assertion is that the task still exists. Strengthening it to rename-vs-done
+   * uncovered real data loss: the rename is committed as an op and then lost in
+   * sync. The stronger version lives in #9095 and stays out of this PR because it
+   * fails for a pre-existing reason unrelated to the fixes here.
    */
   test('3.1 Concurrent edits handled gracefully', async ({
     browser,

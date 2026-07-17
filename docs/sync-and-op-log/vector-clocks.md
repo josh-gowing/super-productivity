@@ -77,7 +77,7 @@ interface VectorClockEntry {
 }
 ```
 
-The global clock is the **single source of truth** for the client's current causal knowledge. During local operation capture, it is updated atomically with operation writes (single IndexedDB transaction via `appendWithVectorClockUpdate`). The remote merge path (`mergeRemoteOpClocks`) updates the clock in a separate write after reading the current state.
+The global clock is the **single source of truth** for the client's current causal knowledge. During local operation capture, it is updated atomically with operation writes (single IndexedDB transaction via `appendWithVectorClockOverwrite`). The remote merge path (`mergeRemoteOpClocks`) updates the clock in a separate write after reading the current state.
 
 ### Snapshot Clock
 
@@ -98,7 +98,7 @@ In `operation-log.effects.ts`:
 1. `VectorClockService.getCurrentVectorClock()` reads the global clock from the `vector_clock` store
 2. `incrementVectorClock(currentClock, clientId)` creates a new clock with the client's counter incremented
 3. The operation is created with this **full, unpruned** clock
-4. `appendWithVectorClockUpdate(op, 'local')` writes the operation AND updates the global clock in a **single atomic IndexedDB transaction**
+4. `appendWithVectorClockOverwrite(op, 'local')` writes the operation AND updates the global clock in a **single atomic IndexedDB transaction**
 
 **Key invariant: Normal operations carry full (unpruned) vector clocks. No client-side pruning happens during capture.**
 
@@ -108,7 +108,7 @@ In `sync.service.ts` (`processOperation`):
 
 1. `ValidationService.validateOp()` sanitizes the clock (DoS cap at 2.5×MAX = 50 entries) but does **NOT** prune
 2. `detectConflict()` compares the **full unpruned** incoming clock against the existing entity clock
-3. If accepted: `limitVectorClockSize(clock, [clientId])` prunes to MAX before storage, preserving only the uploading client's ID
+3. If accepted: `limitVectorClockSize()` prunes to MAX before storage, preserving the uploading client and, when present, the latest causal full-state author
 4. The pruned clock is stored in the database
 
 ### Step 3: Download by Other Clients
@@ -146,22 +146,22 @@ Implemented in `packages/sync-core/src/vector-clock.ts`. The client wrapper in `
 
 ### When Pruning Happens (Exhaustive List)
 
-| Location                                        | When                                            | What's Preserved      |
-| ----------------------------------------------- | ----------------------------------------------- | --------------------- |
-| **Server** `processOperation()`                 | After conflict detection, before storage        | Uploading client's ID |
-| **Server** `getOpsSinceWithSeq()`               | Aggregating snapshot vector clock               | Requesting client     |
-| **Client** `SyncHydrationService`               | Creating SYNC_IMPORT during conflict resolution | Current client only   |
-| **Client** `ServerMigrationService`             | Creating SYNC_IMPORT during migration           | Current client only   |
-| **Client** `RepairOperationService`             | Creating REPAIR operation                       | Current client only   |
-| **Client** `OperationLogSnapshotService`        | Saving snapshot to state cache                  | Current client only   |
-| **Client** `OperationLogCompactionService`      | Compaction (saving snapshot + deleting old ops) | Current client only   |
-| **Client** `OperationLogHydratorService`        | Restoring snapshot during hydration             | Current client only   |
-| **Client** normal op capture                    | **NEVER**                                       | N/A                   |
-| **Client** `SupersededOperationResolverService` | **NEVER** (conflict resolution)                 | N/A                   |
+| Location                                        | When                                            | What's Preserved                            |
+| ----------------------------------------------- | ----------------------------------------------- | ------------------------------------------- |
+| **Server** `processOperation()`                 | After conflict detection, before storage        | Uploading client + active full-state author |
+| **Server** `getOpsSinceWithSeq()`               | Aggregating snapshot vector clock               | Requesting client                           |
+| **Client** `SyncHydrationService`               | Creating SYNC_IMPORT during conflict resolution | Current client only                         |
+| **Client** `ServerMigrationService`             | Creating SYNC_IMPORT during migration           | Current client only                         |
+| **Client** `RepairOperationService`             | Creating REPAIR operation                       | Current client only                         |
+| **Client** `OperationLogSnapshotService`        | Saving snapshot to state cache                  | Current client only                         |
+| **Client** `OperationLogCompactionService`      | Compaction (saving snapshot + deleting old ops) | Current client only                         |
+| **Client** `OperationLogHydratorService`        | Restoring snapshot during hydration             | Current client only                         |
+| **Client** normal op capture                    | **NEVER**                                       | N/A                                         |
+| **Client** `SupersededOperationResolverService` | **NEVER** (conflict resolution)                 | N/A                                         |
 
 ### Pruning is Rare
 
-With MAX=20, a user needs 21+ unique client IDs before pruning triggers. In the unlikely event it does trigger, the worst case is one extra server round-trip (false CONCURRENT → client resolves → re-uploads with >MAX clock → GREATER_THAN → accepted).
+With MAX=20, a user needs 21+ unique client IDs before pruning triggers. The server preserves both the uploader and the latest causal full-state author when they are present in the incoming clock. Preserving that boundary edge prevents high-counter historical clients from making a post-import operation appear concurrent to the importing client. Other pruned edges can still cause one extra server round-trip (false CONCURRENT → client resolves → re-uploads with >MAX clock → GREATER_THAN → accepted).
 
 ---
 
@@ -406,16 +406,21 @@ before storage**. This is the invariant in §6 and §9.
 
 ### Why MAX = 20 (the 10 → 30 → 20 evolution)
 
-The original defense against the Feb-2026 loop was a 4-layer scheme (protected
-client IDs, pruning-aware comparison, an `isLikelyPruningArtifact` heuristic,
-the same-client check) — symptom treatment. The root cause was that `MAX = 10`
-was too small, making pruning frequent and interacting badly with SYNC_IMPORT.
+The original defense against the Feb-2026 loop was a 4-layer scheme (broad
+protected-client tracking, pruning-aware comparison, an
+`isLikelyPruningArtifact` heuristic, the same-client check) — symptom treatment.
+The root cause was that `MAX = 10` was too small, making pruning frequent and
+interacting badly with SYNC_IMPORT.
 
 Commit `d70f18a94d` raised `MAX` 10 → 30 (later reduced to 20 — a 20-entry
-clock is ~333 bytes, negligible) and **removed three of the four layers**.
+clock is ~333 bytes, negligible) and removed the broad tracking and comparison
+heuristics. The server now has one narrow storage-only exception: it preserves
+the latest causal full-state author so post-import operations retain that
+boundary edge.
 `isLikelyPruningArtifact` was dropped (known false positives, unnecessary at
 MAX = 20). Only the **same-client check** remains — always mathematically
-correct (monotonic counters are definitive) and independent of MAX. At
+correct during conflict comparison (monotonic counters are definitive) and
+independent of MAX. At
 MAX = 20, pruning needs **21+ distinct client IDs**, extremely rare for a
 personal productivity app, so the pruning path is effectively dormant
 (see §5 "Pruning is Rare").

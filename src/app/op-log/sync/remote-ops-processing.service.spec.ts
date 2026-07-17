@@ -8,6 +8,7 @@ import {
 } from '../persistence/schema-migration.service';
 import { SnackService } from '../../core/snack/snack.service';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
+import { SyncProviderManager } from '../sync-providers/provider-manager.service';
 import { VectorClockService } from './vector-clock.service';
 import { OperationApplierService } from '../apply/operation-applier.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
@@ -127,10 +128,18 @@ describe('RemoteOpsProcessingService', () => {
     opLogStoreSpy.clearFullStateOpsExcept.and.resolveTo(0);
     vectorClockServiceSpy = jasmine.createSpyObj('VectorClockService', [
       'getEntityFrontier',
+      'getEntityFrontierWithOps',
       'getSnapshotVectorClock',
       'getSnapshotEntityKeys',
       'getCurrentVectorClock',
     ]);
+    // Delegate to the getEntityFrontier spy so the many per-test frontier
+    // stubs keep driving the flow; retained ops default to empty (no
+    // no-pending crossing detection in these tests).
+    vectorClockServiceSpy.getEntityFrontierWithOps.and.callFake(async () => ({
+      frontier: await vectorClockServiceSpy.getEntityFrontier(),
+      retainedOpsByEntity: new Map<string, Operation[]>(),
+    }));
     operationApplierServiceSpy = jasmine.createSpyObj('OperationApplierService', [
       'applyOperations',
     ]);
@@ -277,6 +286,11 @@ describe('RemoteOpsProcessingService', () => {
         { provide: OperationLogCompactionService, useValue: compactionServiceSpy },
         { provide: SyncImportFilterService, useValue: syncImportFilterServiceSpy },
         { provide: OperationWriteFlushService, useValue: writeFlushServiceSpy },
+        {
+          // Narrow stub: without a fenceEpoch the #9074 assert is a no-op.
+          provide: SyncProviderManager,
+          useValue: { assertSyncEpochUnchanged: () => undefined },
+        },
       ],
     });
 
@@ -425,6 +439,53 @@ describe('RemoteOpsProcessingService', () => {
         ],
       });
       expect(JSON.stringify(summary)).not.toContain('private');
+    });
+
+    // Producer freeze for the conflict-review rollback: this is the only
+    // production entry point into autoResolveConflictsLWW, so if these two flags
+    // are ever dropped the stable fleet silently starts persisting the discarded
+    // side of every conflict verbatim again. Delete this test with the freeze.
+    it('should freeze both conflict-review producers on the production resolve path', async () => {
+      const localOp = {
+        id: 'local-op',
+        entityType: 'TASK',
+        entityId: 'task-1',
+        payload: { title: 'local title' },
+      } as Operation;
+      const remoteOp = {
+        id: 'remote-op',
+        entityType: 'TASK',
+        entityId: 'task-1',
+        payload: { title: 'remote title' },
+        schemaVersion: 1,
+      } as Operation;
+      spyOn(service, 'detectConflicts').and.resolveTo({
+        nonConflicting: [],
+        conflicts: [
+          {
+            entityType: 'TASK',
+            entityId: 'task-1',
+            localOps: [localOp],
+            remoteOps: [remoteOp],
+            suggestedResolution: 'manual',
+          },
+        ],
+      });
+      conflictResolutionServiceSpy.autoResolveConflictsLWW.and.resolveTo({
+        localWinOpsCreated: 0,
+      });
+      vectorClockServiceSpy.getEntityFrontier.and.resolveTo(new Map());
+
+      await service.processRemoteOps([remoteOp]);
+
+      expect(conflictResolutionServiceSpy.autoResolveConflictsLWW).toHaveBeenCalledWith(
+        jasmine.any(Array),
+        jasmine.any(Array),
+        jasmine.objectContaining({
+          disableDisjointMerge: true,
+          disableConflictJournal: true,
+        }),
+      );
     });
 
     it('should drop operations if migrateOperation returns null', async () => {
@@ -742,6 +803,7 @@ describe('RemoteOpsProcessingService', () => {
 
       expect(service.detectConflicts).toHaveBeenCalledWith(
         [migratedOp],
+        jasmine.any(Map),
         jasmine.any(Map),
       );
     });
@@ -1503,7 +1565,7 @@ describe('RemoteOpsProcessingService', () => {
         }),
       ];
 
-      const result = await service.detectConflicts(remoteTaskOps, new Map());
+      const result = await service.detectConflicts(remoteTaskOps, new Map(), new Map());
 
       // TASK op should be non-conflicting (not a conflict!)
       expect(result.nonConflicting.length).toBe(1);
@@ -1540,7 +1602,7 @@ describe('RemoteOpsProcessingService', () => {
         }),
       ];
 
-      const result = await service.detectConflicts(remoteOps, new Map());
+      const result = await service.detectConflicts(remoteOps, new Map(), new Map());
 
       // Should be detected as conflict (concurrent modifications to same entity)
       expect(result.conflicts.length).toBe(1);
@@ -1575,7 +1637,7 @@ describe('RemoteOpsProcessingService', () => {
         conflicts,
       });
 
-      const result = await service.detectConflicts([remoteOp], new Map());
+      const result = await service.detectConflicts([remoteOp], new Map(), new Map());
 
       expect(result.conflicts.map((conflict) => conflict.entityId)).toEqual([
         'task-1',
@@ -1605,7 +1667,7 @@ describe('RemoteOpsProcessingService', () => {
         }),
       ];
 
-      const result = await service.detectConflicts(remoteOps, new Map());
+      const result = await service.detectConflicts(remoteOps, new Map(), new Map());
 
       // Should be skipped (superseded)
       expect(result.nonConflicting.length).toBe(0);

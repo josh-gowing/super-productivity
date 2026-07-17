@@ -15,6 +15,7 @@ import {
   ForceUploadFailedError,
   ForceUploadPendingOpsError,
   IncompleteRemoteOperationsError,
+  SyncEpochChangedError,
 } from '../core/errors/sync-errors';
 import { SnackService } from '../../core/snack/snack.service';
 import { T } from '../../t.const';
@@ -193,7 +194,10 @@ export class WsTriggeredDownloadService implements OnDestroy {
     // dropped before the next user-initiated sync() reset the latch.)
     return this._sessionValidation.withSession(async () => {
       try {
+        // #9074: the (provider, epoch) pair MUST be read in one synchronous
+        // block — see the matching note in SyncWrapperService._syncBody.
         const rawProvider = this._providerManager.getActiveProvider();
+        const fenceEpoch = this._providerManager.syncEpoch;
         if (!rawProvider) {
           SyncLog.log(
             'WsTriggeredDownloadService: No active provider, skipping WS download',
@@ -201,8 +205,10 @@ export class WsTriggeredDownloadService implements OnDestroy {
           return false;
         }
 
-        const syncCapableProvider =
-          await this._wrappedProvider.getOperationSyncCapable(rawProvider);
+        const syncCapableProvider = await this._wrappedProvider.getOperationSyncCapable(
+          rawProvider,
+          { fenceEpoch },
+        );
         if (!syncCapableProvider) {
           SyncLog.log(
             'WsTriggeredDownloadService: Provider not operation-sync capable, skipping',
@@ -222,7 +228,9 @@ export class WsTriggeredDownloadService implements OnDestroy {
           `WsTriggeredDownloadService: Downloading ops triggered by WS notification (latestSeq=${latestSeq})`,
         );
 
-        const result = await this._syncService.downloadRemoteOps(syncCapableProvider);
+        const result = await this._syncService.downloadRemoteOps(syncCapableProvider, {
+          fenceEpoch,
+        });
 
         SyncLog.log(`WsTriggeredDownloadService: Download complete. kind=${result.kind}`);
 
@@ -246,8 +254,10 @@ export class WsTriggeredDownloadService implements OnDestroy {
             `WsTriggeredDownloadService: LWW created ${result.localWinOpsCreated} ` +
               `local-win op(s), re-uploading`,
           );
-          const uploadResult =
-            await this._syncService.uploadPendingOps(syncCapableProvider);
+          const uploadResult = await this._syncService.uploadPendingOps(
+            syncCapableProvider,
+            { fenceEpoch },
+          );
           if (uploadResult.kind === 'blocked_incompatible') {
             SyncLog.warn(
               'WsTriggeredDownloadService: Local-win re-upload blocked by an incompatible operation',
@@ -312,6 +322,15 @@ export class WsTriggeredDownloadService implements OnDestroy {
               config: { duration: 0 },
             });
           }
+          return false;
+        }
+        if (err instanceof SyncEpochChangedError) {
+          // #9074: a provider switch/encryption op landed mid-download; this
+          // cycle is stale by design. No retry, no ERROR — the new epoch's own
+          // sync covers catch-up.
+          SyncLog.log(
+            'WsTriggeredDownloadService: Sync epoch changed mid-download, abandoning stale cycle',
+          );
           return false;
         }
         if (err instanceof AuthFailSPError || err instanceof MissingCredentialsSPError) {

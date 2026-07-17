@@ -84,6 +84,7 @@ import {
   mergeChangedFields,
   synthesizeMergedChanges,
 } from './conflict-disjoint-merge.util';
+import { NOISE_FIELDS } from './conflict-journal.model';
 import { RECREATE_FALLBACK } from '../core/recreate-fallback.const';
 
 /**
@@ -124,6 +125,22 @@ interface ResolvedConflicts {
 interface AutoResolveConflictsLwwOptions {
   callerHoldsOperationLogLock?: boolean;
   disableDisjointMerge?: boolean;
+  /**
+   * Skip conflict-journal emission entirely (observe-only hook, so this can
+   * never change which op resolution picks).
+   *
+   * Set by the production caller as a PRODUCER FREEZE ahead of the
+   * conflict-review rollback: journal rows capture the discarded side of a
+   * conflict verbatim (titles, arbitrary field values), and that device-local
+   * data obligation must not expand to the stable fleet on the next release
+   * tag while the feature is still slated for removal.
+   *
+   * Ceiling: rows already written on edge/internal builds stay readable and
+   * expire on their own (14 days / 200 rows). Upgrade path: the store, reader,
+   * UI and the `SUP_CONFLICT_JOURNAL_CLEARED_BEFORE` marker are deleted
+   * together in the conflict-review rollback, after which this option goes too.
+   */
+  disableConflictJournal?: boolean;
   remoteApplyLifecycleOwnedByCaller?: boolean;
 }
 
@@ -1695,8 +1712,8 @@ export class ConflictResolutionService {
         ...merged.conflict.remoteOps.map((op) => op.id),
       ]),
     );
-    const remainingLocalOpsToReject = localOpsToReject.filter(
-      (opId) => !fallbackOriginalOpIds.has(opId),
+    const remainingLocalOpsToReject = await this._withoutSyncedOps(
+      localOpsToReject.filter((opId) => !fallbackOriginalOpIds.has(opId)),
     );
     const remainingRemoteOpsToReject = remoteOpsToReject.filter(
       (opId) => !fallbackOriginalOpIds.has(opId),
@@ -1720,12 +1737,14 @@ export class ConflictResolutionService {
       );
     }
 
-    for (const plan of lwwPlans) {
-      await this._journalResolution(plan);
-    }
-    for (const merged of successfulMergedResolutions) {
-      if (writtenMergedOpIds.has(merged.mergedOp.id)) {
-        await this._journalMergedResolution(merged.plan);
+    if (!options.disableConflictJournal) {
+      for (const plan of lwwPlans) {
+        await this._journalResolution(plan);
+      }
+      for (const merged of successfulMergedResolutions) {
+        if (writtenMergedOpIds.has(merged.mergedOp.id)) {
+          await this._journalMergedResolution(merged.plan);
+        }
       }
     }
 
@@ -1816,16 +1835,25 @@ export class ConflictResolutionService {
     const named = labels.join(', ');
     const taskList = contentConflicts.length > MAX_NAMED ? `${named} …` : named;
 
+    // This banner fires off the resolutions, not off the journal, so REVIEW must
+    // be gated on the journal actually holding rows: under the producer freeze
+    // (or a swallowed `record()` failure) it would otherwise land the user on the
+    // review page's empty state. Without the action this is exactly the released
+    // v18.14.0 banner — message + built-in dismiss (no action2). Count is fresh:
+    // the journal loop awaits `record()`, which refreshes it, before this step.
+    const hasEntriesToReview = this.conflictJournal.unreviewedCount() > 0;
+
     this.bannerService.open({
       id: BannerId.SyncConflictContentResolved,
       ico: 'sync_problem',
       msg: T.F.SYNC.B.CONTENT_CONFLICT_RESOLVED,
       translateParams: { taskList },
-      // SPAP-15: REVIEW opens the conflicts page; DISMISS auto-renders (no action2).
-      action: {
-        label: T.F.SYNC.CONFLICT_REVIEW.BANNER_REVIEW,
-        fn: () => this.syncConflictBanner.navigateToReview(),
-      },
+      action: hasEntriesToReview
+        ? {
+            label: T.F.SYNC.CONFLICT_REVIEW.BANNER_REVIEW,
+            fn: () => this.syncConflictBanner.navigateToReview(),
+          }
+        : undefined,
     });
   }
 
@@ -3652,6 +3680,7 @@ export class ConflictResolutionService {
     ctx: {
       localPendingOpsByEntity: Map<string, Operation[]>;
       appliedFrontierByEntity: Map<string, VectorClock>;
+      retainedOpsByEntity: Map<string, Operation[]>;
       snapshotVectorClock: VectorClock | undefined;
       snapshotEntityKeys: Set<string> | undefined;
       hasNoSnapshotClock: boolean;
@@ -3667,6 +3696,7 @@ export class ConflictResolutionService {
       const result = await this._checkEntityForConflict(remoteOp, entityId, entityKey, {
         localOpsForEntity,
         appliedFrontier: ctx.appliedFrontierByEntity.get(entityKey),
+        retainedOpsForEntity: ctx.retainedOpsByEntity.get(entityKey) ?? [],
         snapshotVectorClock: ctx.snapshotVectorClock,
         snapshotEntityKeys: ctx.snapshotEntityKeys,
         hasNoSnapshotClock: ctx.hasNoSnapshotClock,
@@ -3695,6 +3725,7 @@ export class ConflictResolutionService {
     ctx: {
       localOpsForEntity: Operation[];
       appliedFrontier: VectorClock | undefined;
+      retainedOpsForEntity: Operation[];
       snapshotVectorClock: VectorClock | undefined;
       snapshotEntityKeys: Set<string> | undefined;
       hasNoSnapshotClock: boolean;
@@ -3757,6 +3788,22 @@ export class ConflictResolutionService {
           );
           return { isSupersededOrDuplicate: true, conflict: null };
         }
+        // #9073: the entity still exists, so a blind apply would let ARRIVAL
+        // ORDER decide the winner — two clients that each already synced one
+        // side of the crossing would keep the other's value and permanently
+        // diverge. Reconstruct the local side from the retained (already
+        // applied) concurrent ops and route it through the normal LWW
+        // pipeline, which resolves the same unordered op pair identically on
+        // every client. Crossings that commute (identical, disjoint real
+        // fields, noise-only, task-time deltas) keep today's lossless apply.
+        const crossingConflict = this._buildNoPendingConcurrentConflict(
+          remoteOp,
+          entityId,
+          ctx.retainedOpsForEntity,
+        );
+        if (crossingConflict) {
+          return { isSupersededOrDuplicate: false, conflict: crossingConflict };
+        }
       }
       return { isSupersededOrDuplicate: false, conflict: null };
     }
@@ -3789,6 +3836,142 @@ export class ConflictResolutionService {
     }
 
     return { isSupersededOrDuplicate: false, conflict: null };
+  }
+
+  /**
+   * #9073: builds a synthetic conflict for a CONCURRENT remote op on an entity
+   * that still exists and has NO pending local ops. The local side is every
+   * retained op still concurrent with the incoming clock — the whole crossing,
+   * not just the frontier op, so a newer disjoint edit cannot mask an older
+   * overlapping one. Both clients reconstruct the same unordered pair, so the
+   * LWW plan (timestamps, then clientId) picks the same winner everywhere; a
+   * local win emits the usual dominating LWW Update op that heals clients
+   * whose frontier could not see the crossing (e.g. snapshot-clock frontiers).
+   *
+   * Returns null for crossings where applying the op as-is stays correct:
+   *  - commuting pairs (identical content, disjoint real fields, noise-only
+   *    sides, concurrent task-time deltas) — apply-both is lossless AND
+   *    convergent, whole-entity LWW would discard one side;
+   *  - cases with no deterministic local side (retained ops compacted away)
+   *    or that would need the pending path's rejection/compensation machinery
+   *    (multi-entity ops, local Delete/archive against a live entity) — these
+   *    keep today's arrival-order behavior as a documented residual.
+   */
+  private _buildNoPendingConcurrentConflict(
+    remoteOp: Operation,
+    entityId: string,
+    retainedOpsForEntity: Operation[],
+  ): EntityConflict | null {
+    // Resolving one entity of an atomic multi-entity op would drop its
+    // sibling changes without the pending path's compensation machinery.
+    if (getOpEntityIds(remoteOp).length > 1) {
+      return null;
+    }
+
+    const localOps = retainedOpsForEntity.filter(
+      (op) =>
+        compareVectorClocks(op.vectorClock, remoteOp.vectorClock) ===
+        VectorClockComparison.CONCURRENT,
+    );
+    // Empty = the CONCURRENT verdict came from the snapshot clock alone (the
+    // concurrent local history was compacted away) — no local side to compare.
+    if (localOps.length === 0) {
+      return null;
+    }
+
+    // A local Delete/archive op with the entity still in state is a
+    // contradictory edge (also covers the plan's delete-win/archive-win
+    // kinds); multi-entity local ops would mint per-entity against an atomic
+    // op. Both keep the status quo.
+    if (
+      localOps.some(
+        (op) =>
+          op.opType === OpType.Delete ||
+          op.actionType === ActionType.TASK_SHARED_MOVE_TO_ARCHIVE ||
+          getOpEntityIds(op).length > 1,
+      )
+    ) {
+      return null;
+    }
+
+    // Concurrent task-time batches are positive deltas and commute — LWW
+    // would discard one user's tracked time (mirror of the pending-path
+    // exemption above).
+    if (
+      remoteOp.actionType === ActionType.TIME_TRACKING_SYNC_TIME_SPENT &&
+      localOps.every((op) => op.actionType === ActionType.TIME_TRACKING_SYNC_TIME_SPENT)
+    ) {
+      return null;
+    }
+
+    const conflict: EntityConflict = {
+      entityType: remoteOp.entityType,
+      entityId,
+      localOps,
+      remoteOps: [remoteOp],
+      suggestedResolution: this._suggestResolution(localOps, [remoteOp]),
+    };
+
+    // Same content on both sides: applying is equivalent either way. This also
+    // damps echo rounds when several holders of the winner mint
+    // identical-content resolution ops that later cross each other.
+    if (this.isIdenticalConflict(conflict)) {
+      return null;
+    }
+
+    const payloadKey = this._resolvePayloadKey(remoteOp.entityType);
+    // A side that changed nothing real: apply-both already converges on every
+    // real field; only noise-field arrival divergence remains (status quo,
+    // cosmetic). Whole-entity LWW could instead clobber the real side.
+    if (
+      this._isNoiseOnlySide(localOps, payloadKey, entityId) ||
+      this._isNoiseOnlySide([remoteOp], payloadKey, entityId)
+    ) {
+      return null;
+    }
+
+    // Disjoint real-field updates commute — apply-both is lossless and
+    // convergent, while a whole-entity LWW winner would discard the loser's
+    // fields fleet-wide. Same predicate as the SPAP-14 merge eligibility, so a
+    // conflict forwarded from here is by construction never merge-eligible.
+    if (
+      isDisjointMergeEligible({
+        localOps,
+        remoteOps: [remoteOp],
+        payloadKey,
+        entityId,
+      })
+    ) {
+      return null;
+    }
+
+    OpLog.normal(
+      `ConflictResolutionService: No-pending CONCURRENT crossing for ` +
+        `${remoteOp.entityType}:${entityId} (${localOps.length} retained local op(s) ` +
+        `vs remote op ${remoteOp.id}) — routing through LWW (#9073)`,
+    );
+    return conflict;
+  }
+
+  /**
+   * True when every field the side changed is a NOISE field (and the side is
+   * decomposable at all — opaque ops carry real, non-extractable mutations).
+   */
+  private _isNoiseOnlySide(
+    ops: Operation[],
+    payloadKey: string,
+    entityId: string,
+  ): boolean {
+    if (ops.some((op) => op.opType === OpType.Delete)) {
+      return false;
+    }
+    if (hasOpaqueChanges(ops, payloadKey, entityId)) {
+      return false;
+    }
+    const changedFields = Object.keys(mergeChangedFields(ops, payloadKey, entityId));
+    return (
+      changedFields.length > 0 && changedFields.every((field) => NOISE_FIELDS.has(field))
+    );
   }
 
   /**
@@ -3865,6 +4048,33 @@ export class ConflictResolutionService {
     remoteOps: Operation[],
   ): 'local' | 'remote' | 'manual' {
     return suggestConflictResolution(localOps, remoteOps);
+  }
+
+  /**
+   * Invariant guard: NEVER reject an already-synced op. A synced row is on the
+   * server and in other clients' histories; rejecting it here would erase it
+   * from this client's frontier scans (they skip `rejectedAt`) while the rest
+   * of the fleet keeps it — corrupting later conflict detection. Pending-path
+   * conflicts only ever queue unsynced ids (they come from getUnsyncedByEntity
+   * by construction), so this filter is a no-op for them; the synthetic
+   * no-pending crossings (#9073) queue their already-synced localOps, which
+   * are dropped here — the winning LWW op supersedes them by clock domination
+   * instead. Fails open when a row cannot be loaded.
+   */
+  private async _withoutSyncedOps(opIds: string[]): Promise<string[]> {
+    const result: string[] = [];
+    for (const opId of opIds) {
+      const entry = await this.opLogStore.getOpById(opId);
+      if (entry?.syncedAt !== undefined) {
+        OpLog.verbose(
+          `ConflictResolutionService: Not rejecting already-synced op ${opId} ` +
+            `(superseded by resolution op's clock instead)`,
+        );
+        continue;
+      }
+      result.push(opId);
+    }
+    return result;
   }
 
   /**
