@@ -264,31 +264,9 @@ describe('OperationLogSnapshotService', () => {
       expect(mockOpLogStore.saveStateCache).not.toHaveBeenCalled();
     });
 
-    it('should prune vector clock before saving when it exceeds MAX_VECTOR_CLOCK_SIZE', async () => {
-      // Create a bloated vector clock with more entries than MAX_VECTOR_CLOCK_SIZE
-      const bloatedClock: Record<string, number> = {};
-      for (let i = 0; i < MAX_VECTOR_CLOCK_SIZE + 10; i++) {
-        bloatedClock[`client-${i}`] = i + 1;
-      }
-      // Ensure the local client is in the clock
-      bloatedClock['test-client'] = 999;
-
-      mockStateSnapshotService.getStateSnapshot.and.returnValue(
-        MEANINGFUL_SNAPSHOT_STATE as any,
-      );
-      mockVectorClockService.getCurrentVectorClock.and.resolveTo(bloatedClock);
-      mockOpLogStore.getLastSeq.and.resolveTo(1);
-      mockOpLogStore.saveStateCache.and.resolveTo(undefined);
-
-      await service.saveCurrentStateAsSnapshot();
-
-      const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
-      const savedClockSize = Object.keys(savedCache.vectorClock).length;
-      expect(savedClockSize).toBeLessThanOrEqual(MAX_VECTOR_CLOCK_SIZE);
-      // Local client ID must be preserved after pruning
-      expect(savedCache.vectorClock['test-client']).toBe(999);
-    });
-
+    // Vector-clock pruning is store-owned (saveStateCache prunes internally,
+    // #9096) — covered by the OperationLogStoreService spec. This service
+    // passes the clock through unmodified:
     it('should not prune vector clock when it is within MAX_VECTOR_CLOCK_SIZE', async () => {
       const smallClock = { client1: 5, client2: 3 };
       mockStateSnapshotService.getStateSnapshot.and.returnValue(
@@ -322,8 +300,7 @@ describe('OperationLogSnapshotService', () => {
       expect(savedCache.vectorClock).toEqual(exactClock);
     });
 
-    it('should save unpruned clock if clientId is null', async () => {
-      mockClientIdProvider.loadClientId.and.resolveTo(null);
+    it('should save the clock from the vector clock service verbatim', async () => {
       const clock = { client1: 5 };
       mockStateSnapshotService.getStateSnapshot.and.returnValue(
         MEANINGFUL_SNAPSHOT_STATE as any,
@@ -377,10 +354,10 @@ describe('OperationLogSnapshotService', () => {
       mockStateSnapshotService.getStateSnapshot.and.returnValue(
         MEANINGFUL_SNAPSHOT_STATE as any,
       );
-      // Must be stubbed for the whole describe, not per test: without it the
-      // save path throws (limitVectorClockSize on undefined) into the outer
-      // catch and skips the write anyway — which makes every "should skip"
-      // test below pass even when the guard is deleted.
+      // Stubbed for the whole describe so the save path runs with a realistic
+      // clock. (Historically load-bearing: the service used to prune here and
+      // threw on an unstubbed clock, which made the "should skip" tests below
+      // vacuously green; pruning is store-owned now — #9096.)
       mockVectorClockService.getCurrentVectorClock.and.resolveTo({ c1: 1 });
       clearDeferredActions();
     });
@@ -726,7 +703,12 @@ describe('OperationLogSnapshotService', () => {
       );
     });
 
-    it('should restore backup and not save when migrated state fails validation', async () => {
+    it('should restore backup, not save, but still return the migrated snapshot when state fails validation', async () => {
+      // Non-fatal path: a validation failure here is often reducer-healable (e.g.
+      // an older snapshot missing a newly-required config default). Bricking to
+      // recovery would empty the store on upgrade, so we roll the on-disk cache
+      // back to the backup, never persist the unvalidated snapshot, yet return it
+      // for reducer-healed hydration (Checkpoint C re-checks and persists).
       const snapshot = createSnapshot();
       const migratedSnapshot = { ...snapshot, schemaVersion: CURRENT_SCHEMA_VERSION };
       mockOpLogStore.saveStateCacheBackup.and.resolveTo(undefined);
@@ -737,10 +719,9 @@ describe('OperationLogSnapshotService', () => {
       });
       mockOpLogStore.restoreStateCacheFromBackup.and.resolveTo(undefined);
 
-      await expectAsync(
-        service.migrateSnapshotWithBackup(snapshot),
-      ).toBeRejectedWithError(/Migrated snapshot validation failed/);
+      const result = await service.migrateSnapshotWithBackup(snapshot);
 
+      expect(result).toBe(migratedSnapshot);
       expect(mockOpLogStore.saveStateCache).not.toHaveBeenCalled();
       expect(mockOpLogStore.restoreStateCacheFromBackup).toHaveBeenCalled();
       expect(mockOpLogStore.clearStateCacheBackup).not.toHaveBeenCalled();

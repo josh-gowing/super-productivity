@@ -11,11 +11,7 @@ import { SyncSessionValidationService } from '../sync/sync-session-validation.se
 import { loadAllData } from '../../root-store/meta/load-all-data.action';
 import { Operation, OpType, ActionType, SyncImportReason } from '../core/operation.types';
 import { uuidv7 } from '../../util/uuid-v7';
-import {
-  incrementVectorClock,
-  limitVectorClockSize,
-  mergeVectorClocks,
-} from '../../core/util/vector-clock';
+import { incrementVectorClock, mergeVectorClocks } from '../../core/util/vector-clock';
 import { OpLog } from '../../core/log';
 import { AppDataComplete } from '../model/model-config';
 import { selectSyncConfig } from '../../features/config/store/global-config.reducer';
@@ -204,9 +200,13 @@ export class SyncHydrationService {
         });
       }
 
-      const newClock = limitVectorClockSize(
+      // Store-owned pruning (#9096): preserves the current client and — for
+      // the file-snapshot bootstrap branch, where no SYNC_IMPORT is created
+      // and a previously stored full-state op stays the filter baseline — the
+      // latest full-state author. Must run after getOrGenerateClientId() so
+      // the id is persisted for the store's lookup.
+      const newClock = await this.opLogStore.pruneClockForStorage(
         incrementVectorClock(mergedClock, clientId),
-        clientId,
       );
 
       let lastSeq: number;

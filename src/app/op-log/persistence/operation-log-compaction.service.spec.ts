@@ -6,7 +6,6 @@ import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { VectorClockService } from '../sync/vector-clock.service';
 import {
   COMPACTION_RETENTION_MS,
-  MAX_VECTOR_CLOCK_SIZE,
   SLOW_COMPACTION_THRESHOLD_MS,
 } from '../core/operation-log.const';
 import { CURRENT_SCHEMA_VERSION } from './schema-migration.service';
@@ -194,24 +193,10 @@ describe('OperationLogCompactionService', () => {
       );
     });
 
-    it('should prune vector clock before saving when it exceeds MAX_VECTOR_CLOCK_SIZE', async () => {
-      const bloatedClock: Record<string, number> = {};
-      for (let i = 0; i < MAX_VECTOR_CLOCK_SIZE + 10; i++) {
-        bloatedClock[`client-${i}`] = i + 1;
-      }
-      bloatedClock['test-client'] = 999;
-      mockVectorClockService.getCurrentVectorClock.and.resolveTo(bloatedClock);
-
-      await service.compact();
-
-      const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
-      expect(Object.keys(savedCache.vectorClock).length).toBeLessThanOrEqual(
-        MAX_VECTOR_CLOCK_SIZE,
-      );
-      expect(savedCache.vectorClock['test-client']).toBe(999);
-    });
-
-    it('should not prune vector clock when within MAX_VECTOR_CLOCK_SIZE', async () => {
+    // Vector-clock pruning is store-owned (saveStateCache prunes internally,
+    // #9096) — covered by the OperationLogStoreService spec. This service
+    // passes the clock through unmodified:
+    it('should pass the current vector clock through to saveStateCache unmodified', async () => {
       const smallClock = { clientA: 10, clientB: 5 };
       mockVectorClockService.getCurrentVectorClock.and.resolveTo(smallClock);
 
@@ -219,17 +204,6 @@ describe('OperationLogCompactionService', () => {
 
       const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
       expect(savedCache.vectorClock).toEqual(smallClock);
-    });
-
-    it('should save unpruned clock if clientId is null', async () => {
-      mockClientIdProvider.loadClientId.and.resolveTo(null);
-      const clock = { clientA: 10 };
-      mockVectorClockService.getCurrentVectorClock.and.resolveTo(clock);
-
-      await service.compact();
-
-      const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
-      expect(savedCache.vectorClock).toEqual(clock);
     });
 
     it('should save state cache with compactedAt timestamp', async () => {

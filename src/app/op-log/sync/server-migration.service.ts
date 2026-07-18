@@ -6,11 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { OperationSyncCapable } from '../sync-providers/provider.interface';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { VectorClockService } from './vector-clock.service';
-import {
-  incrementVectorClock,
-  limitVectorClockSize,
-  mergeVectorClocks,
-} from '../../core/util/vector-clock';
+import { incrementVectorClock, mergeVectorClocks } from '../../core/util/vector-clock';
 import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { ValidateStateService } from '../validation/validate-state.service';
 import { SnackService } from '../../core/snack/snack.service';
@@ -297,9 +293,12 @@ export class ServerMigrationService {
       for (const entry of allLocalOps) {
         mergedClock = mergeVectorClocks(mergedClock, entry.op.vectorClock);
       }
-      const newClock = limitVectorClockSize(
+      // Store-owned pruning (#9096) preserves self — the author of the
+      // SYNC_IMPORT built here, whose entry the sync-import filter's rescue
+      // predicate reads on peers — and, harmlessly, the author of the stored
+      // import this one supersedes.
+      const newClock = await this.opLogStore.pruneClockForStorage(
         incrementVectorClock(mergedClock, clientId),
-        clientId,
       );
 
       OpLog.normal(

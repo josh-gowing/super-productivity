@@ -53,10 +53,13 @@ describe('SyncHydrationService', () => {
       'loadStateCache',
       'getUnsynced',
       'markRejected',
+      'pruneClockForStorage',
     ]);
     // Default: no unsynced ops (for tests that don't care about this)
     mockOpLogStore.getUnsynced.and.resolveTo([]);
     mockOpLogStore.markRejected.and.resolveTo();
+    // Store-owned pruning (#9096): pass-through by default.
+    mockOpLogStore.pruneClockForStorage.and.callFake(async (clock) => clock);
     mockStateSnapshotService = jasmine.createSpyObj('StateSnapshotService', [
       'getAllSyncModelDataFromStoreAsync',
     ]);
@@ -620,6 +623,24 @@ describe('SyncHydrationService', () => {
           }),
         );
         expect(mockOpLogStore.setVectorClock).not.toHaveBeenCalled();
+      });
+
+      it('should route the bootstrap baseline clock through store-owned pruning (#9096)', async () => {
+        // No SYNC_IMPORT is created on this branch, so a previously stored
+        // full-state op stays the filter baseline — the durable clock
+        // committed here must go through pruneClockForStorage (which
+        // preserves the import author; behavior covered in the store spec).
+        mockVectorClockService.getCurrentVectorClock.and.resolveTo({ localClient: 5 });
+        const prunedSentinel = { localClient: 6, importAuthor: 1 };
+        mockOpLogStore.pruneClockForStorage.and.resolveTo(prunedSentinel);
+
+        await service.hydrateFromRemoteSync({ task: {} }, undefined, false);
+
+        const pruneArg = mockOpLogStore.pruneClockForStorage.calls.mostRecent().args[0];
+        expect(pruneArg['localClient']).toBe(6); // incremented BEFORE pruning
+        const commitArg =
+          mockOpLogStore.commitFileSnapshotBaseline.calls.mostRecent().args[0];
+        expect(commitArg.vectorClock).toBe(prunedSentinel);
       });
 
       it('should still dispatch loadAllData when createSyncImportOp is false', async () => {
