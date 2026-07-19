@@ -33,6 +33,9 @@ import { IDB_OPEN_ERROR_RELOAD_KEY } from './operation-log-hydrator.service';
 import { SyncProviderId } from '../sync-providers/provider.const';
 import { OperationLogEffects } from '../capture/operation-log.effects';
 import { reportBulkReplayReducerFailure } from '../apply/bulk-replay-failure-collector';
+import { reportLoadAllDataReducerFailure } from '../apply/load-all-data-failure-guard.meta-reducer';
+import { Action } from '@ngrx/store';
+import { T } from '../../t.const';
 
 describe('OperationLogHydratorService', () => {
   let service: OperationLogHydratorService;
@@ -151,6 +154,7 @@ describe('OperationLogHydratorService', () => {
     mockHydrationStateService = jasmine.createSpyObj('HydrationStateService', [
       'startApplyingRemoteOps',
       'endApplyingRemoteOps',
+      'setHydrationFallbackActive',
     ]);
     mockSnapshotService = jasmine.createSpyObj('OperationLogSnapshotService', [
       'isValidSnapshot',
@@ -208,7 +212,10 @@ describe('OperationLogHydratorService', () => {
     );
     mockSnapshotService.isValidSnapshot.and.returnValue(true);
     mockSnapshotService.migrateSnapshotWithBackup.and.callFake(async (s) => s);
-    mockSnapshotService.saveCurrentStateAsSnapshot.and.returnValue(Promise.resolve());
+    // Resolves `true` = "a snapshot was actually written". The convergence gate
+    // branches on this return value, so a mock resolving undefined would model a
+    // guard-skipped save and silently change which branch the tests exercise.
+    mockSnapshotService.saveCurrentStateAsSnapshot.and.resolveTo(true);
     mockRecoveryService.recoverPendingRemoteOps.and.resolveTo([]);
     mockRecoveryService.cleanupCorruptOps.and.returnValue(Promise.resolve());
     mockRecoveryService.attemptRecovery.and.returnValue(Promise.resolve());
@@ -660,7 +667,7 @@ describe('OperationLogHydratorService', () => {
         });
         mockSnapshotService.saveCurrentStateAsSnapshot.and.callFake(() => {
           callOrder.push('saveSnapshot');
-          return Promise.resolve();
+          return Promise.resolve(true);
         });
 
         await service.hydrateStore();
@@ -1066,6 +1073,294 @@ describe('OperationLogHydratorService', () => {
         expect(mockSnapshotService.migrateSnapshotWithBackup).not.toHaveBeenCalled();
       });
 
+      // Post-migration convergence: after a migrating hydration reducer-heals the
+      // state, a fresh CURRENT_SCHEMA_VERSION snapshot must be persisted so the
+      // on-disk cache converges in ONE boot instead of re-migrating every launch
+      // (the "Failed to load data" root cause when a required field lacked a
+      // backfill). See the CONVERGENCE block in hydrateStore.
+      describe('post-migration convergence', () => {
+        it('persists a fresh snapshot after a migration even with zero tail ops', async () => {
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          // Zero tail ops: before this change nothing re-persisted the snapshot,
+          // so migration re-ran on every boot.
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(1);
+        });
+
+        it('skips the convergence save when the current state does not validate', async () => {
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+          // Unhealed / corrupt current state must never be cached (Checkpoint B
+          // would trust a matching-schema snapshot unvalidated next boot).
+          mockValidateStateService.validateState.and.resolveTo({
+            isValid: false,
+            typiaErrors: [{ path: '$input.foo', expected: 'string', value: undefined }],
+          } as any);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).not.toHaveBeenCalled();
+        });
+
+        it('does not double-save when the tail-replay branch already persisted', async () => {
+          const oldSnapshot = createMockSnapshot({
+            schemaVersion: 0,
+            lastAppliedOpSeq: 5,
+          });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            lastAppliedOpSeq: 5,
+          });
+          // >10 tail ops → the existing Checkpoint-C save fires; convergence must
+          // not add a second write.
+          const tailOps = Array.from({ length: 11 }, (_, i) =>
+            createMockEntry(6 + i, createMockOperation(`op-${6 + i}`)),
+          );
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo(tailOps);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(1);
+        });
+
+        it('does NOT persist a convergence snapshot on a normal boot (no migration)', async () => {
+          const snapshot = createMockSnapshot({ schemaVersion: CURRENT_SCHEMA_VERSION });
+          mockOpLogStore.loadStateCache.and.resolveTo(snapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(false);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).not.toHaveBeenCalled();
+        });
+
+        it('converges after a migrating full-state-op (SyncImport) boot', async () => {
+          // The full-state-op load branch loads directly and never sets the
+          // Checkpoint-C save flag, so a migrating boot whose tail is a SyncImport
+          // must still converge. Second positive test that FAILS if the
+          // convergence block is removed.
+          const oldSnapshot = createMockSnapshot({
+            schemaVersion: 0,
+            lastAppliedOpSeq: 5,
+          });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            lastAppliedOpSeq: 5,
+          });
+          const syncImportOp = createMockOperation('sync-op', OpType.SyncImport, {
+            payload: { appDataComplete: { task: {}, project: {} } },
+            entityType: 'ALL',
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([createMockEntry(6, syncImportOp)]);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(1);
+        });
+
+        it('runs the convergence save AFTER retryFailedRemoteOps', async () => {
+          // Ordering matters for #7700: retryFailedRemoteOps merges the retried
+          // remote ops' vector clocks, and the deferred-action drain must follow
+          // that merge so deferred local ops get clocks dominating them. Moving
+          // the convergence block before the retry flips this and fails here.
+          // (The drain itself is asserted separately — retryFailedRemoteOps
+          // early-returns before its own drain when there are no failed ops.)
+          const callOrder: string[] = [];
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+          // getFailedRemoteOps is the first call inside retryFailedRemoteOps.
+          mockOpLogStore.getFailedRemoteOps.and.callFake(() => {
+            callOrder.push('retryFailedRemoteOps');
+            return Promise.resolve([]);
+          });
+          mockSnapshotService.saveCurrentStateAsSnapshot.and.callFake(() => {
+            callOrder.push('convergenceSave');
+            return Promise.resolve(true);
+          });
+
+          await service.hydrateStore();
+
+          expect(callOrder).toContain('convergenceSave');
+          expect(callOrder.indexOf('convergenceSave')).toBeGreaterThan(
+            callOrder.indexOf('retryFailedRemoteOps'),
+          );
+        });
+
+        it('does not converge on a later non-migrating boot (per-run flag reset)', async () => {
+          // Guards the per-run reset of _migrationRanDuringHydration: a migrating
+          // boot must not leave a stale flag that fires convergence on a later
+          // non-migrating boot on the same instance. Removing the reset makes the
+          // second boot save spuriously.
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+
+          await service.hydrateStore();
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(1);
+
+          // Second boot on the same instance: current-schema snapshot, no migration.
+          mockSnapshotService.saveCurrentStateAsSnapshot.calls.reset();
+          mockOpLogStore.loadStateCache.and.resolveTo(
+            createMockSnapshot({ schemaVersion: CURRENT_SCHEMA_VERSION }),
+          );
+          mockSchemaMigrationService.needsMigration.and.returnValue(false);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).not.toHaveBeenCalled();
+        });
+
+        it('does not double-save when a corrupt migrated snapshot falls through to full replay', async () => {
+          // Reachable path with NO other coverage: a migrated snapshot that fails
+          // isValidSnapshot() sets snapshot = null and drops into the full-replay
+          // branch while _migrationRanDuringHydration is already true. Guards the
+          // full-replay branch's persisted-flag assignment — dropping it there
+          // produces a second, unguarded startup write.
+          mockOpLogStore.loadStateCache.and.resolveTo(
+            createMockSnapshot({ schemaVersion: 0 }),
+          );
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(
+            createMockSnapshot({ schemaVersion: CURRENT_SCHEMA_VERSION }),
+          );
+          mockSnapshotService.isValidSnapshot.and.returnValue(false);
+          mockOpLogStore.getLastSeq.and.resolveTo(5);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([
+            createMockEntry(1, createMockOperation('op-1')),
+            createMockEntry(2, createMockOperation('op-2')),
+          ]);
+
+          await service.hydrateStore();
+
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(1);
+        });
+
+        it('still converges when the Checkpoint-C save was internally SKIPPED', async () => {
+          // saveCurrentStateAsSnapshot() resolves normally when one of its own
+          // guards (#8751 phantom / #7892 empty) or a caught write failure skipped
+          // the write. Treating "resolved" as "persisted" would leave the on-disk
+          // cache at the old schema and re-migrate every boot — the exact bug this
+          // block exists to fix. Fails if the flag is set unconditionally instead
+          // of from the return value.
+          const oldSnapshot = createMockSnapshot({
+            schemaVersion: 0,
+            lastAppliedOpSeq: 5,
+          });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            lastAppliedOpSeq: 5,
+          });
+          // >10 tail ops → Checkpoint C runs, but reports it did NOT persist.
+          const tailOps = Array.from({ length: 11 }, (_, i) =>
+            createMockEntry(6 + i, createMockOperation(`op-${6 + i}`)),
+          );
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo(tailOps);
+          mockSnapshotService.saveCurrentStateAsSnapshot.and.resolveTo(false);
+
+          await service.hydrateStore();
+
+          // Checkpoint C + convergence retry = 2 attempts, not 1.
+          expect(mockSnapshotService.saveCurrentStateAsSnapshot).toHaveBeenCalledTimes(2);
+        });
+
+        it('drains deferred actions before the convergence save', async () => {
+          // The phantom-change guard (#8751) skips the save while deferred actions
+          // are buffered, and retryFailedRemoteOps() early-returns before its
+          // drain when there are no failed ops — the common boot. So the drain
+          // must be explicit here. Fails if it is removed.
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+          // No failed remote ops → retryFailedRemoteOps() returns before its
+          // own drain, so any drain observed here is the convergence block's.
+          mockOpLogStore.getFailedRemoteOps.and.resolveTo([]);
+
+          const callOrder: string[] = [];
+          mockOperationLogEffects.processDeferredActions.and.callFake(() => {
+            callOrder.push('drain');
+            return Promise.resolve();
+          });
+          mockSnapshotService.saveCurrentStateAsSnapshot.and.callFake(() => {
+            callOrder.push('convergenceSave');
+            return Promise.resolve(true);
+          });
+
+          await service.hydrateStore();
+
+          expect(callOrder).toEqual(['drain', 'convergenceSave']);
+        });
+
+        it('never escalates a convergence failure into hydration recovery', async () => {
+          // The convergence block is a best-effort cache optimization. If it threw,
+          // the outer catch would run attemptRecovery() — which refuses because a
+          // snapshot exists — and surface the very "Failed to load data" snack this
+          // fix removes, on an otherwise perfectly hydrated store.
+          const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
+          const migratedSnapshot = createMockSnapshot({
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
+          mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+          mockSchemaMigrationService.needsMigration.and.returnValue(true);
+          mockSnapshotService.migrateSnapshotWithBackup.and.resolveTo(migratedSnapshot);
+          mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+          // Throw from the convergence-path validation specifically: the earlier
+          // Checkpoint-B validation of the migrated snapshot must still succeed.
+          mockValidateStateService.validateState.and.callFake(async () => {
+            if (mockValidateStateService.validateState.calls.count() > 1) {
+              throw new Error('validator blew up');
+            }
+            return { isValid: true, typiaErrors: [] } as any;
+          });
+
+          await expectAsync(service.hydrateStore()).toBeResolved();
+
+          expect(mockRecoveryService.attemptRecovery).not.toHaveBeenCalled();
+          expect(mockSnackService.open).not.toHaveBeenCalled();
+          // The auto-reload guard must still be cleared on a successful boot.
+          expect(sessionStorage.getItem(IDB_OPEN_ERROR_RELOAD_KEY)).toBeNull();
+        });
+      });
+
       it('should dispatch loadAllData with migrated snapshot state', async () => {
         const oldSnapshot = createMockSnapshot({ schemaVersion: 0 });
         const migratedState = { task: { entities: {}, ids: ['migrated'] } } as any;
@@ -1433,6 +1728,205 @@ describe('OperationLogHydratorService', () => {
       });
     });
 
+    // #9140: a throw on the snapshot MIGRATION path (metadata-validation
+    // failure, migration transform failure) must get the same op-log fallback
+    // the invalid-snapshot path above already has — instead of escalating into
+    // attemptRecovery(), which refuses while a snapshot exists on disk and
+    // bricks to an empty store on every boot.
+    describe('migration failure op-log fallback (#9140)', () => {
+      const arrangeMigrationThrow = (error: Error): void => {
+        const oldSnapshot = createMockSnapshot({ schemaVersion: 1 });
+        mockOpLogStore.loadStateCache.and.resolveTo(oldSnapshot);
+        mockSchemaMigrationService.needsMigration.and.returnValue(true);
+        mockSnapshotService.migrateSnapshotWithBackup.and.rejectWith(error);
+      };
+
+      it('should discard the snapshot and replay the op-log when migration throws and replayable ops exist', async () => {
+        arrangeMigrationThrow(new Error('Migrated snapshot metadata validation failed'));
+        const allOps = [
+          createMockEntry(1, createMockOperation('op-1')),
+          createMockEntry(2, createMockOperation('op-2')),
+        ];
+        mockOpLogStore.getLastSeq.and.resolveTo(2);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo(allOps);
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).not.toHaveBeenCalled();
+        expect(mockOpLogStore.getOpsAfterSeq).toHaveBeenCalledWith(0);
+        expect(mockStore.dispatch).toHaveBeenCalledWith(
+          bulkApplyHydrationOperations({
+            operations: allOps.map((e) => e.op),
+            localClientId: 'test-client',
+          }),
+        );
+        // The degraded recovery must be visible to the user...
+        expect(mockSnackService.open).toHaveBeenCalledWith(
+          jasmine.objectContaining({ msg: T.F.SYNC.S.HYDRATION_FALLBACK_RECOVERY }),
+        );
+        // ...and must NEVER persist the (possibly partial) replay over the
+        // intact on-disk snapshot: for a synced client the surviving log is
+        // only a compaction-window tail, and sync never re-sends pruned ops.
+        expect(mockSnapshotService.saveCurrentStateAsSnapshot).not.toHaveBeenCalled();
+        // Compaction must also stay blocked for the session (same overwrite
+        // hazard, one writer later) — see OperationLogCompactionService.
+        expect(mockHydrationStateService.setHydrationFallbackActive).toHaveBeenCalledWith(
+          true,
+        );
+      });
+
+      it('should clear the fallback-active flag on a boot that does not fall back', async () => {
+        const snapshot = createMockSnapshot();
+        mockOpLogStore.loadStateCache.and.resolveTo(snapshot);
+
+        await service.hydrateStore();
+
+        expect(mockHydrationStateService.setHydrationFallbackActive).toHaveBeenCalledWith(
+          false,
+        );
+      });
+
+      it('should escalate instead of booting silently empty when all surviving rows are reducer-rejected', async () => {
+        arrangeMigrationThrow(new Error('SchemaMigrationService: migration failed'));
+        const rejectedOps = [
+          { ...createMockEntry(1, createMockOperation('op-1')), reducerRejectedAt: 123 },
+          { ...createMockEntry(2, createMockOperation('op-2')), reducerRejectedAt: 123 },
+        ];
+        // The cheap row-count gate passes, but nothing is actually replayable.
+        mockOpLogStore.getLastSeq.and.resolveTo(2);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo(rejectedOps);
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).toHaveBeenCalled();
+        expect(mockStore.dispatch).not.toHaveBeenCalled();
+        expect(mockSnackService.open).not.toHaveBeenCalled();
+      });
+
+      it('should escalate instead of replaying when the store already holds data (re-entrant hydration)', async () => {
+        // hydrateStore() genuinely re-enters on a LIVE store via
+        // PluginAPI.reInitData(); replay-from-0 on top would double-apply
+        // non-idempotent reducers.
+        arrangeMigrationThrow(new Error('SchemaMigrationService: migration failed'));
+        mockStateSnapshotService.getStateSnapshot.and.returnValue({
+          ...mockState,
+          task: { ids: ['live-task'], entities: { ['live-task']: {} } },
+        });
+        mockOpLogStore.getLastSeq.and.resolveTo(2);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo([
+          createMockEntry(1, createMockOperation('op-1')),
+        ]);
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).toHaveBeenCalled();
+        expect(mockStore.dispatch).not.toHaveBeenCalled();
+      });
+
+      it('should escalate to recovery when migration throws and the op-log is empty', async () => {
+        arrangeMigrationThrow(new Error('SchemaMigrationService: migration failed'));
+        mockOpLogStore.getLastSeq.and.resolveTo(0);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+
+        await service.hydrateStore();
+
+        // No replayable ops → no local source of truth left; the existing
+        // terminal handling (recovery attempt) is all that remains.
+        expect(mockRecoveryService.attemptRecovery).toHaveBeenCalled();
+        expect(mockStore.dispatch).not.toHaveBeenCalled();
+      });
+
+      it('should surface HYDRATION_FAILED when migration throws, the op-log is empty, and recovery refuses', async () => {
+        arrangeMigrationThrow(new Error('SchemaMigrationService: migration failed'));
+        mockOpLogStore.getLastSeq.and.resolveTo(0);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+        mockRecoveryService.attemptRecovery.and.rejectWith(
+          new Error('Refusing legacy recovery because a SUP_OPS snapshot still exists'),
+        );
+
+        await expectAsync(service.hydrateStore()).toBeRejected();
+
+        expect(mockSnackService.open).toHaveBeenCalledTimes(1);
+      });
+
+      it('should rethrow an IndexedDBOpenError from migration without attempting op-log fallback', async () => {
+        if (!jasmine.isSpy(window.alert)) {
+          spyOn(window, 'alert');
+        }
+        (window.alert as jasmine.Spy).calls.reset();
+        // Non-backing-store error → dialog path, no auto-reload.
+        arrangeMigrationThrow(new IndexedDBOpenError(new Error('QuotaExceededError')));
+        // Fallback WOULD be viable — but a broken IndexedDB means replay would
+        // fail identically, so the tailored IDB dialog must win.
+        mockOpLogStore.getLastSeq.and.resolveTo(5);
+
+        await expectAsync(service.hydrateStore()).toBeRejected();
+
+        expect(mockStore.dispatch).not.toHaveBeenCalled();
+        expect(mockRecoveryService.attemptRecovery).not.toHaveBeenCalled();
+      });
+    });
+
+    // #9140 (mechanism 2): when a feature reducer throws on the snapshot
+    // loadAllData dispatch (e.g. an old snapshot missing a required field no
+    // reducer backfills), the failure-guard meta-reducer keeps the store alive
+    // and reports the failure to the hydrator, which must fall back to op-log
+    // replay. The dispatch spy simulates the guard by reporting to the active
+    // collector, mirroring how reportBulkReplayReducerFailure is driven above.
+    describe('snapshot loadAllData reducer failure fallback (#9140)', () => {
+      const arrangeReducerRejection = (): void => {
+        const snapshot = createMockSnapshot();
+        mockOpLogStore.loadStateCache.and.resolveTo(snapshot);
+        mockStore.dispatch.and.callFake(((action: Action): void => {
+          if (action.type === loadAllData.type) {
+            reportLoadAllDataReducerFailure(
+              new Error('Cannot read properties of undefined'),
+            );
+          }
+        }) as Store['dispatch']);
+      };
+
+      it('should fall back to op-log replay when a reducer rejects the snapshot state', async () => {
+        arrangeReducerRejection();
+        const allOps = [
+          createMockEntry(1, createMockOperation('op-1')),
+          createMockEntry(2, createMockOperation('op-2')),
+        ];
+        mockOpLogStore.getLastSeq.and.resolveTo(2);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo(allOps);
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).not.toHaveBeenCalled();
+        // Fallback replays the WHOLE log from seq 0, not the snapshot tail.
+        expect(mockOpLogStore.getOpsAfterSeq).toHaveBeenCalledWith(0);
+        expect(mockStore.dispatch).toHaveBeenCalledWith(
+          bulkApplyHydrationOperations({
+            operations: allOps.map((e) => e.op),
+            localClientId: 'test-client',
+          }),
+        );
+        // Degraded recovery is visible; the partial replay is never persisted
+        // over the intact snapshot.
+        expect(mockSnackService.open).toHaveBeenCalledWith(
+          jasmine.objectContaining({ msg: T.F.SYNC.S.HYDRATION_FALLBACK_RECOVERY }),
+        );
+        expect(mockSnapshotService.saveCurrentStateAsSnapshot).not.toHaveBeenCalled();
+      });
+
+      it('should escalate when a reducer rejects the snapshot state and the op-log is empty', async () => {
+        arrangeReducerRejection();
+        mockOpLogStore.getLastSeq.and.resolveTo(0);
+        mockOpLogStore.getOpsAfterSeq.and.resolveTo([]);
+
+        await service.hydrateStore();
+
+        expect(mockRecoveryService.attemptRecovery).toHaveBeenCalled();
+        // Only the failed loadAllData attempt — no bulk replay dispatch.
+        expect(mockStore.dispatch).toHaveBeenCalledTimes(1);
+      });
+    });
+
     describe('full replay (no snapshot)', () => {
       it('should replay all operations when no snapshot exists', async () => {
         mockOpLogStore.loadStateCache.and.returnValue(Promise.resolve(null));
@@ -1490,7 +1984,7 @@ describe('OperationLogHydratorService', () => {
         });
         mockSnapshotService.saveCurrentStateAsSnapshot.and.callFake(() => {
           callOrder.push('saveSnapshot');
-          return Promise.resolve();
+          return Promise.resolve(true);
         });
 
         await service.hydrateStore();

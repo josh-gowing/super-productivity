@@ -108,10 +108,15 @@ export class OperationLogSnapshotService {
    * Failure (flush timeout, persistent dispatch activity) only skips the
    * save: the snapshot is a boot-time cache and the op-log stays the source
    * of truth.
+   *
+   * @returns Whether a snapshot was actually written. `false` means a guard
+   *   skipped it or the write failed — callers that branch on "is the on-disk
+   *   cache now current?" MUST use this rather than assuming resolution implies
+   *   a write (the hydrator's post-migration convergence gate does).
    */
-  async saveCurrentStateAsSnapshot(): Promise<void> {
+  async saveCurrentStateAsSnapshot(): Promise<boolean> {
     try {
-      await this.writeFlushService.flushThenRunExclusive(async () => {
+      return await this.writeFlushService.flushThenRunExclusive(async () => {
         // GUARD (#8751): never snapshot live state while it may contain
         // changes with no durable op behind them (failed or still-pending
         // writes, undrained deferred actions from the hydration sync window) —
@@ -123,7 +128,7 @@ export class OperationLogSnapshotService {
           OpLog.warn(
             `OperationLogSnapshotService: Skipping snapshot save — ${phantomRisk} (#8751)`,
           );
-          return;
+          return false;
         }
 
         // Read state synchronously at the quiesce cutoff (no await before it)
@@ -143,7 +148,7 @@ export class OperationLogSnapshotService {
             'OperationLogSnapshotService: Skipping snapshot save — current state has no ' +
               'meaningful data (refusing to overwrite cache with empty state)',
           );
-          return;
+          return false;
         }
 
         // Get current vector clock; pruning happens inside saveStateCache
@@ -164,10 +169,12 @@ export class OperationLogSnapshotService {
         });
 
         OpLog.normal('OperationLogSnapshotService: Saved new snapshot');
+        return true;
       });
     } catch (e) {
       // Don't fail hydration if snapshot save fails
       OpLog.warn('OperationLogSnapshotService: Failed to save snapshot', e);
+      return false;
     }
   }
 
@@ -216,16 +223,12 @@ export class OperationLogSnapshotService {
       // with correct data.
       //
       // Caveat: this non-fatal path does NOT itself persist a clean snapshot.
-      // Re-persist only happens if the hydrator's post-replay Checkpoint C runs
-      // and its save gate is met (tail ops present, not a full-state-op load,
-      // >10 replayed ops) — otherwise the on-disk cache stays at the old version
-      // and the migration re-runs every boot (correct, but a startup tax). For
-      // fields with a migration backfill (below) validation passes and step 5
-      // persists a clean snapshot immediately, so that path is the real fix;
-      // this branch is the safety net for the not-yet-backfilled case.
-      // TODO(followup): persist a fresh snapshot after a migration ran whenever
-      // Checkpoint C validates, regardless of tail-op count, to converge in one
-      // boot instead of every boot.
+      // For fields with a migration backfill (below) validation passes and step 5
+      // persists a clean snapshot immediately, so that path is the real fix; this
+      // branch is the safety net for the not-yet-backfilled case. The hydrator
+      // completes it — see the post-migration convergence block in
+      // OperationLogHydratorService.hydrateStore, which persists a fresh
+      // CURRENT_SCHEMA_VERSION snapshot once the reducer-healed state validates.
       const validationResult = await this.validateStateService.validateState(
         migratedSnapshot.state as Record<string, unknown>,
       );
