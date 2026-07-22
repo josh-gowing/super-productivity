@@ -105,7 +105,7 @@ sync primitives.
 **Key Files**:
 
 - [`packages/sync-core/src/index.ts`](packages/sync-core/src/index.ts) - Core public API
-- [`packages/sync-providers/src/index.ts`](packages/sync-providers/src/index.ts) - Provider public API
+- [`packages/sync-providers/package.json`](packages/sync-providers/package.json) - Provider public exports
 - [`eslint.config.js`](eslint.config.js) - Package boundary enforcement
 - [`src/app/op-log/sync-providers/sync-providers.factory.ts`](src/app/op-log/sync-providers/sync-providers.factory.ts) - App-side provider composition
 
@@ -156,7 +156,9 @@ from PostgreSQL RepeatableRead snapshot isolation alone.
 - Removing or sharding the `lastSeq` write requires replacing this safety
   mechanism with an equivalent per-user serialization primitive
 
-**Documentation**: [`docs/sync-and-op-log/diagrams/02-server-sync.md`](docs/sync-and-op-log/diagrams/02-server-sync.md)
+**Documentation**:
+[`packages/super-sync-server/docs/architecture.md`](packages/super-sync-server/docs/architecture.md),
+[`docs/sync-and-op-log/sync-architecture.html#transport`](docs/sync-and-op-log/sync-architecture.html#transport)
 
 **Key Files**:
 

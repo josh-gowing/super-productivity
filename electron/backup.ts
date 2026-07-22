@@ -22,10 +22,41 @@ import {
 } from './shared-with-frontend/backup-file-cleanup.util';
 
 export const BACKUP_DIR = path.join(app.getPath('userData'), `backups`);
-export const BACKUP_DIR_WINSTORE = BACKUP_DIR.replace(
+
+/**
+ * Where a virtualized MSIX package's writes to BACKUP_DIR physically land, so
+ * Explorer (which runs outside the package and sees no redirection) can be
+ * pointed at them. Display-oriented but not inert: `BACKUP_LOAD_DATA` below
+ * also accepts it as an allow-listed read root.
+ *
+ * shortcut: the package family name is hardcoded and nothing in CI would notice
+ * it drifting (the appx config lives in the WIN_STORE_ELECTRON_BUILDER_YML
+ * secret); drift just fails the probe and we show BACKUP_DIR. Verified against
+ * the shipped v18.15.1 appx on 2026-07-21 — it is `<Identity Name>_<PublisherId>`,
+ * PublisherId being base32(SHA-256(UTF-16LE Publisher)[0..8]), so any release
+ * artifact re-checks it without a Windows machine.
+ */
+const BACKUP_DIR_WINSTORE = BACKUP_DIR.replace(
   'Roaming',
   `Local\\Packages\\53707johannesjo.SuperProductivity_ch45amy23cdv6\\LocalCache\\Roaming`,
 );
+
+/**
+ * The backup location to *show* the user, which is not always the one we write
+ * to. Redirection applies only to virtualized packages and, since Windows 10
+ * 1903, is decided per file — it cannot be known statically, and assuming it
+ * always applies is what made #9209 the mirror image of #995.
+ *
+ * shortcut: an install that flipped from virtualized to full-trust keeps a
+ * stale LocalCache dir that still wins the probe, showing real but outdated
+ * backups. Accepted — restore reads BACKUP_DIR either way, so only manual
+ * recovery is affected. Upgrade path: probe for the newest filename in
+ * BACKUP_DIR (timestamps sort lexically) instead of for the directory.
+ */
+export const getBackupDirForDisplay = (): string =>
+  process.windowsStore && existsSync(BACKUP_DIR_WINSTORE)
+    ? BACKUP_DIR_WINSTORE
+    : BACKUP_DIR;
 
 // eslint-disable-next-line prefer-arrow/prefer-arrow-functions
 export function initBackupAdapter(): void {
