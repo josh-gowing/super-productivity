@@ -21,7 +21,7 @@ progress-bar {
 .wrapper {
   transition: var(--transition-standard);
 
-  @media (max-width: #{$layout-xs}) {
+  @include mq(xs, max) {
     margin: var(--s-half);
     margin-bottom: var(--s);
   }
@@ -46,6 +46,11 @@ progress-bar {
     margin-top: 0;
     color: var(--text-color);
   }
+
+  .task-detail-more-btn {
+    flex: 0 0 auto;
+    margin-inline-end: var(--s-half);
+  }
 }
 
 .task-title.task-title {
@@ -54,6 +59,9 @@ progress-bar {
   padding: var(--s);
   margin: 0;
   flex-grow: 1;
+  // Keep the title shrinkable next to the trailing overflow button so a long
+  // unbroken title wraps/truncates instead of pushing the button off-row.
+  min-width: 0;
   margin-top: var(--s-half);
   line-height: 1.4;
   min-height: 40px;

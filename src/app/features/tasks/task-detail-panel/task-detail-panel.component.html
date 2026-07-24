@@ -6,9 +6,22 @@
       [value]="task().title || ''"
       class="task-title"
     ></task-title>
-    <!--    <button mat-icon-button>-->
-    <!--      <mat-icon>more_vert</mat-icon>-->
-    <!--    </button>-->
+    @if (layoutService.isXs() && !isDialogMode()) {
+      <button
+        mat-icon-button
+        class="task-detail-more-btn"
+        (click)="openTaskMenu($event)"
+        [attr.aria-label]="T.G.MORE_ACTIONS | translate"
+        aria-haspopup="menu"
+        [attr.aria-expanded]="taskContextMenu()?.isOpen() ?? false"
+      >
+        <mat-icon>more_vert</mat-icon>
+      </button>
+      <task-context-menu
+        [isAdvancedControls]="true"
+        [task]="task()"
+      ></task-context-menu>
+    }
   </header>
 
   @if (isShowSubTasksPanel()) {
