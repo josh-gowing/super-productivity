@@ -11,6 +11,7 @@ import { TaskService } from '../../tasks/task.service';
 import { CalendarEventActionsService } from '../../calendar-integration/calendar-event-actions.service';
 import { DateTimeFormatService } from '../../../core/date-time-format/date-time-format.service';
 import { selectTaskByIdWithSubTaskData } from '../../tasks/store/task.selectors';
+import { TaskRepeatCfg } from '../../task-repeat-cfg/task-repeat-cfg.model';
 
 const makeCalendarScheduleEvent = (isReferenceCalendar: boolean): ScheduleEvent => ({
   id: 'cal-1',
@@ -152,6 +153,52 @@ describe('ScheduleEventComponent – isReferenceCalendar', () => {
     });
   });
 
+  describe('clickHandler – repeat projections', () => {
+    it('opens every repeat projection variant for its planned calendar day', async () => {
+      const repeatCfg = { id: 'repeat_cfg_with_underscores' } as TaskRepeatCfg;
+      const plannedForDay = '2026-07-30';
+      const sourceOccurrenceDate = '2026-07-29';
+      const projectionTypes = [
+        SVEType.RepeatProjection,
+        SVEType.RepeatProjectionSplit,
+        SVEType.ScheduledRepeatProjection,
+        SVEType.RepeatProjectionSplitContinued,
+        SVEType.RepeatProjectionSplitContinuedLast,
+      ];
+      const matDialog = TestBed.inject(MatDialog) as jasmine.SpyObj<MatDialog>;
+
+      for (const type of projectionTypes) {
+        const isContinuedProjection =
+          type === SVEType.RepeatProjectionSplitContinued ||
+          type === SVEType.RepeatProjectionSplitContinuedLast;
+        fixture.componentRef.setInput('event', {
+          id: 'repeat_cfg_with_underscores_not-a-date',
+          type,
+          style: '',
+          startHours: 10,
+          timeLeftInHours: 1,
+          plannedForDay,
+          sourceOccurrenceDate: isContinuedProjection ? sourceOccurrenceDate : undefined,
+          data: repeatCfg,
+        } as ScheduleEvent);
+        fixture.detectChanges();
+
+        await component.clickHandler(new MouseEvent('click'));
+
+        expect(matDialog.open).toHaveBeenCalledWith(
+          jasmine.anything(),
+          jasmine.objectContaining({
+            data: jasmine.objectContaining({
+              repeatCfg,
+              targetDate: isContinuedProjection ? sourceOccurrenceDate : plannedForDay,
+            }),
+          }),
+        );
+        matDialog.open.calls.reset();
+      }
+    });
+  });
+
   describe('resize handle', () => {
     it('should hide resizing when resize is disabled', () => {
       fixture.componentRef.setInput('event', makeTaskScheduleEvent());
@@ -171,6 +218,70 @@ describe('ScheduleEventComponent – isReferenceCalendar', () => {
       fixture.detectChanges();
 
       expect(component.isResizable()).toBe(false);
+    });
+  });
+
+  describe('split-continued segments stay interactive (#9363)', () => {
+    const setEvent = (type: SVEType): void => {
+      fixture.componentRef.setInput('event', { ...makeTaskScheduleEvent(), type });
+      fixture.detectChanges();
+    };
+
+    it('should resolve the task for the continued segments of a split task', () => {
+      setEvent(SVEType.SplitTaskContinued);
+      expect(component.task()?.id).toBe('task-1');
+
+      setEvent(SVEType.SplitTaskContinuedLast);
+      expect(component.task()?.id).toBe('task-1');
+    });
+
+    it('should select the task when a continued segment is clicked', async () => {
+      const taskService = TestBed.inject(TaskService) as jasmine.SpyObj<TaskService>;
+      setEvent(SVEType.SplitTaskContinued);
+
+      await component.clickHandler(new MouseEvent('click'));
+
+      expect(taskService.setSelectedId).toHaveBeenCalledOnceWith('task-1');
+    });
+
+    it('should keep continued segments undraggable', () => {
+      // elementId() is gated on isDraggableSE(), so an empty id also means no
+      // duplicate DOM ids across the segments of one task
+      setEvent(SVEType.Task);
+      expect(component.elementId()).toBe('t-task-1');
+
+      setEvent(SVEType.SplitTaskContinued);
+      expect(component.elementId()).toBe('');
+
+      setEvent(SVEType.SplitTaskContinuedLast);
+      expect(component.elementId()).toBe('');
+    });
+
+    it('should open the task context menu on right-click of a continued segment', () => {
+      setEvent(SVEType.SplitTaskContinuedLast);
+
+      const menu = component.taskContextMenu();
+      expect(menu).toBeTruthy();
+      const openSpy = spyOn(menu!, 'open');
+
+      component.onContextMenu(new MouseEvent('contextmenu'));
+
+      expect(openSpy).toHaveBeenCalled();
+    });
+
+    it('should not offer resizing on any continued segment', () => {
+      // the head already carries the handle, and SplitTaskContinuedLast is not
+      // reliably the final segment of a multi-day scheduled task
+      setEvent(SVEType.Task);
+      expect(fixture.nativeElement.querySelector('.resize-handle')).toBeTruthy();
+
+      setEvent(SVEType.SplitTaskContinued);
+      expect(component.isResizable()).toBe(false);
+      expect(fixture.nativeElement.querySelector('.resize-handle')).toBeNull();
+
+      setEvent(SVEType.SplitTaskContinuedLast);
+      expect(component.isResizable()).toBe(false);
+      expect(fixture.nativeElement.querySelector('.resize-handle')).toBeNull();
     });
   });
 
