@@ -2,11 +2,7 @@ For all current downloads, package links, and platform-specific notes: [check th
 
 ### Fixes
 
-- Workday recurrences no longer start on a weekend selected from the add-task menu (#9404).
-- Plugin `addTask` and `updateTask` behavior now matches the local REST API (#9490).
-- Restored macOS release builds (#9487).
-- Improved monitoring report accuracy and capped report scope and database usage.
-
-### Notices
-
-- Added a warning that User Profiles will be removed in the next release (#9491).
+- **header:** stop the sync state badge covering the sync icon
+- **styles:** replace phantom CSS variable references and guard against regressions (#9304)
+- **op-log:** compact at startup when the op-log grows large (#9580)
+- **release:** strip emoji from the App Store "What's New" text (#9608)
