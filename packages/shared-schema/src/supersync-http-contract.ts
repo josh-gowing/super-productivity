@@ -76,6 +76,8 @@ export const SuperSyncOperationSchema = z.object({
   vectorClock: SuperSyncVectorClockSchema,
   timestamp: z.number(),
   schemaVersion: z.number().int().min(1).max(100),
+  /** Optional (absent on old clients) — readers must sniff the payload type
+   * instead of relying on it (android `SuperSyncBackgroundProvider` does). */
   isPayloadEncrypted: z.boolean().optional(),
   syncImportReason: z.enum(SUPER_SYNC_IMPORT_REASONS).optional(),
   /** Server cursor proven to be included in a causally accepted REPAIR snapshot. */
@@ -212,6 +214,33 @@ export const SuperSyncStatusResponseSchema = z
   })
   .passthrough();
 
+export const SuperSyncDeviceSchema = z
+  .object({
+    clientId: SuperSyncClientIdSchema,
+    /** Unix ms of the device's last sync activity (upload or download). */
+    lastSeenAt: z.number(),
+  })
+  .passthrough();
+
+export const SuperSyncDevicesResponseSchema = z
+  .object({
+    devices: z.array(SuperSyncDeviceSchema),
+  })
+  .passthrough();
+
+/**
+ * Response of `POST /api/replace-token`: a fresh JWT for the calling client.
+ * Issuing it bumps the account's `tokenVersion`, signing out every other device.
+ */
+// Only `token` is validated: it is the only field the client consumes, and
+// requiring more would turn a benign server-side response change into a
+// hard sign-out failure.
+export const SuperSyncReplaceTokenResponseSchema = z
+  .object({
+    token: z.string().min(1),
+  })
+  .passthrough();
+
 export const SuperSyncRestorePointSchema = z
   .object({
     serverSeq: z.number(),
@@ -258,6 +287,11 @@ export type SuperSyncSnapshotUploadResponse = z.infer<
   typeof SuperSyncSnapshotUploadResponseSchema
 >;
 export type SuperSyncStatusResponse = z.infer<typeof SuperSyncStatusResponseSchema>;
+export type SuperSyncDevice = z.infer<typeof SuperSyncDeviceSchema>;
+export type SuperSyncDevicesResponse = z.infer<typeof SuperSyncDevicesResponseSchema>;
+export type SuperSyncReplaceTokenResponse = z.infer<
+  typeof SuperSyncReplaceTokenResponseSchema
+>;
 export type SuperSyncRestorePoint = z.infer<typeof SuperSyncRestorePointSchema>;
 export type SuperSyncRestorePointsResponse = z.infer<
   typeof SuperSyncRestorePointsResponseSchema
