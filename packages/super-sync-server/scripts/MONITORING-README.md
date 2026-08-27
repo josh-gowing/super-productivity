@@ -193,6 +193,51 @@ npm run monitor:all:save
 npm run monitor:dev -- usage-history --tail 30
 ```
 
+### Workflow 6: Digging out of an ops backlog
+
+Retention failing silently (see the `Cleanup [old-ops]` warnings in the server
+log) leaves a prunable backlog that the steady-state budget cannot clear: the
+sweep runs **once per day**, so the 25k default clears 25k/day — a 4.4M-row backlog
+takes about six months, and a few million takes months.
+
+```bash
+npm run dry-run-old-ops-sweep     # read-only; predicts what would go
+```
+
+Run it **off-peak**: it is two full aggregate passes over `operations` and will evict the
+page cache the live site depends on. It also _over_-predicts slightly — it mirrors the
+sweep's skip reasons in SQL, but it cannot model a user the sweep skips on a database
+error, which is exactly the deep-prefix cohort you are digging out of. The
+`N user(s) threw before their drain` count below is that discrepancy.
+
+Size `OLD_OPS_CLEANUP_MAX_DELETED_PER_RUN` against that number so the backlog
+clears in a defined number of nights, then put it **back** to the default — a
+permanently high ceiling turns a future runaway into a bigger one. Raise in steps
+and watch three signals:
+
+- `N user(s) failed mid-drain` — the **delete** batch is hitting the database
+  `statement_timeout`. Lower `OLD_OPS_CLEANUP_DELETE_BATCH_SIZE` (on a host with slow
+  cold reads, try 500–1000 rather than the 5000 default); do not raise the timeout.
+- `N user(s) threw before their drain` — a **probe** timed out on a deep prefix, before
+  anything was deleted. Lowering the batch size does not help; this is the cohort that
+  needs a partial index covering the causal-boundary probe (see the operations
+  runbook for the outage analysis and index SQL).
+- the pool-busy health alert — the sweep is competing with real traffic.
+
+`Cleanup [old-ops]: abandoned the run after N consecutive candidate failures` means the
+fault is systemic (pool exhausted, cold cache, database down), not per-user; the sweep
+stopped on purpose rather than hammering the whole fleet at one timeout each.
+
+Two things surprise people afterwards. Deleting millions of rows leaves that many
+dead tuples, so expect autovacuum work. And the table does **not** shrink on
+disk — `DELETE` returns space to PostgreSQL for reuse, not to the OS; only
+`VACUUM FULL` or `pg_repack` does that, both needing a maintenance window. Dumps
+shrink immediately either way, since `pg_dump` writes live rows only.
+
+The daily sweep fires ~10s after the app starts and then every 24h, so the
+**restart time picks the hour it runs**. Restart at a quiet hour — and not during
+the backup window — if the sweep is heavy.
+
 ## Output Files
 
 - **Usage History**: `logs/usage-history.jsonl` - Appended by `monitor.ts usage`
@@ -296,7 +341,7 @@ address and the relay host — redact it before pasting into an issue.
 | 4     | `/health` endpoint                                    | HTTP != 200                                                                                                                                                                                                            |
 | 5     | Disk usage                                            | > 85%                                                                                                                                                                                                                  |
 | 6     | Long-running queries                                  | any query `active` > `MAX_QUERY_SECONDS` (default 120)                                                                                                                                                                 |
-| 7     | Pool busy                                             | connections concurrently busy ≥ `POOL_WARN_PCT`% (default 75) of `connection_limit`                                                                                                                                    |
+| 7     | Pool busy                                             | connections concurrently busy ≥ `POOL_WARN_PCT`% (default 75) of `connection_limit` in **two consecutive runs**                                                                                                        |
 | 8     | Invalid operations indexes                            | a non-building index is not valid/ready/live                                                                                                                                                                           |
 
 Check 2 runs outside the Docker gate on purpose: a host that just OOM-killed something
@@ -324,13 +369,28 @@ of magnitude below the pathological-query ceiling (pool size ÷ worst-case query
 duration), so the absolute margin is thin and a fixed threshold would not survive
 a pool resize.
 
+Check 7 is also the only one that pages on **persistence**: the crossing must be
+seen in two consecutive runs (~10 min). It samples an instantaneous gauge, and a
+single crossing is routinely a stampede that self-heals within one interval —
+the morning of 2026-08-27 produced three fail+recovery pairs that way
+(hourly-aligned client sync at 04:00Z/06:00Z, the reconnect herd after a deploy
+restart at 07:00Z). Sustained exhaustion still pages, one interval later. The
+pending marker (`.health-alert/pool-busy-pending`) ages out after three
+intervals, so a gap of three or more intervals cannot weld two unrelated spikes
+into a "sustained" condition (a shorter blind gap — a probe failure between two
+spikes — still can, costing one bounded false pair).
+
 Check 8 matters more than it looks. An interrupted `CREATE INDEX CONCURRENTLY`
 leaves an index that is **unusable for reads but still maintained on every
 insert**. If `operations_entity_ids_gin` were the invalid one, the conflict
 lookup would silently degrade to a sequential scan on every upload, permanently,
 and nothing else in the codebase would report it.
 
-The known migrator is excluded from the long-query check. Indexes currently
+The known migrator and the nightly backup (`backup.sh`, which tags its `pg_dump`
+sessions `supersync-backup`) are excluded from the long-query check — a full dump
+legitimately runs for hours, and an alert that fires on a timetable teaches you to
+ignore the channel. Both still count toward check 7, so a dump that genuinely
+starves the pool is still caught. Indexes currently
 listed in `pg_stat_progress_create_index`, and invalid indexes carrying the
 exact DDL lock held by an active migrator, are excluded from check 8. The latter
 also covers `DROP INDEX CONCURRENTLY`, which has no progress-view entry, without
@@ -338,9 +398,35 @@ hiding unrelated invalid indexes. Each migration run has a unique database
 application id; its finite database/client timeouts and targeted backend cleanup
 bound interrupted DDL without generating incident/recovery noise.
 
-Repeat alerts for the same problem are suppressed by a content hash, so counts
-and durations are normalised out — you get one mail per distinct problem, plus a
-recovery mail when it clears.
+### Alert damping
+
+Repeat alerts for the same problem are suppressed by a content hash, so counts,
+durations and the probe's exit status are normalised out — you get one mail per
+distinct problem, plus a recovery mail when it clears.
+
+On top of that, two rules bound how loud a single incident can get. They exist
+because one incident is routinely reported as several different problems: a long
+query saturates the pool, the health probe then times out behind it, and the
+status it dies with alternates run to run (124 timeout, 143 SIGTERM, 128 exec
+failure). Every one of those is a different hash, and a single-slot state file
+re-mailed on every flip.
+
+| Rule                                                               | Tunable                           |
+| ------------------------------------------------------------------ | --------------------------------- |
+| A problem already mailed in the current incident never mails again | —                                 |
+| Recovery needs this many consecutive healthy runs                  | `RECOVERY_CLEAN_RUNS` (default 2) |
+
+There is deliberately **no** minimum gap between alert mails: normalisation
+already collapses every volatile field, so a hash that is genuinely new means a
+symptom nobody has been told about yet, and a blanket rate cap would hold a
+disk-95% or OOM alert for half an hour because an unrelated minor problem mailed
+first. `RECOVERY_CLEAN_RUNS` falls back to its default on a bad value rather than
+joining `CONFIG_PROBLEMS`: that string is the alert body _and_ the dedupe input,
+so a typo there would keep `PROBLEMS` permanently non-empty and disable the
+recovery mail — the same trap as the OOM marker.
+
+State lives in `.health-alert/`: `state` (one hash per line: the problems already
+mailed in this incident) and `clean-runs`.
 
 ## Automation
 

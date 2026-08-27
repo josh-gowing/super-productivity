@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,10 @@ import { embeddedProbe, HEALTH_ALERT_SCRIPT } from './health-probe.helper';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const DEPLOY_SCRIPT = join(currentDir, '../scripts/deploy.sh');
+const BACKUP_SCRIPT = join(currentDir, '../scripts/backup.sh');
+// Shared by backup.sh (sets it) and health-alert.sh (exempts it); both are asserted
+// against this one literal so the exemption cannot silently drift apart.
+const BACKUP_APPLICATION_NAME = 'supersync-backup';
 
 const FAKE_DOCKER = `#!/bin/sh
 set -u
@@ -172,6 +177,9 @@ const writeStateFile = (name: string, contents: string): void => {
 // The env pair that makes PROBLEMS non-empty, i.e. that gets a send attempted at all.
 const FAILING_PROBE = { FAKE_LONG_Q: '1', FAKE_LONGEST: '130' };
 
+const countAlerts = (log: string): number =>
+  log.match(/SuperSync health check failed/g)?.length ?? 0;
+
 // spawnSync hands the child an already-closed stdin, so a descriptor that never reaches
 // EOF is the only way to reproduce what an interactive shell gives the script. A FIFO
 // opened read-write keeps a writer around for as long as the fd is held.
@@ -193,7 +201,7 @@ const writeExecutable = (name: string, contents: string): void => {
   chmodSync(path, 0o755);
 };
 
-const run = (env: Record<string, string> = {}, stdin?: number): RunResult => {
+const run = (env: Record<string, string | undefined> = {}, stdin?: number): RunResult => {
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
@@ -209,7 +217,6 @@ const run = (env: Record<string, string> = {}, stdin?: number): RunResult => {
       delete childEnv[name];
     }
   }
-
   const result = spawnSync('bash', [HEALTH_ALERT_SCRIPT], {
     encoding: 'utf8',
     env: childEnv,
@@ -529,6 +536,9 @@ describe('health-alert.sh service and database monitoring', () => {
   it.each(['', 'not-a-number', '0'])(
     'alerts when the running DATABASE_URL connection_limit is %j',
     (poolLimit) => {
+      // Two runs: an invalid limit skips the pool check entirely, so even a sustained
+      // busy count must never surface a pool line -- only the config problem.
+      run({ FAKE_POOL_IN_USE: '120', FAKE_POOL_LIMIT: poolLimit });
       const result = run({ FAKE_POOL_IN_USE: '120', FAKE_POOL_LIMIT: poolLimit });
 
       expect(result.mailLog).toContain('DATABASE_URL has no valid connection_limit');
@@ -538,12 +548,14 @@ describe('health-alert.sh service and database monitoring', () => {
     },
   );
 
-  it('alerts when concurrently busy connections reach the configured percentage', () => {
-    const result = run({
+  it('alerts when concurrently busy connections stay at the configured percentage', () => {
+    const busy = {
       FAKE_POOL_IN_USE: '45',
       FAKE_POOL_LIMIT: '60',
       POOL_WARN_PCT: '75',
-    });
+    };
+    run(busy);
+    const result = run(busy);
 
     // "busy", not "saturated": the probe counts only active / in-transaction sessions,
     // never the idle ones Prisma keeps pooled, so this is a concurrency number and an
@@ -585,6 +597,32 @@ describe('health-alert.sh service and database monitoring', () => {
     expect(result.dockerLog).toContain('l.relation = i.indexrelid');
     expect(result.dockerLog).toContain("l.mode = 'ShareUpdateExclusiveLock'");
     expect(result.dockerLog).toContain("application_name LIKE 'supersync-migrator-%'");
+  });
+
+  it('exempts the nightly backup from the long-query check, but not from pool-busy', () => {
+    // A full pg_dump legitimately runs for hours (measured: ~112 min on the hosted
+    // server), so without this it pages on a timetable every single night, which is
+    // how an alert channel gets ignored. Both ends are asserted against the same
+    // literal: the exemption is worthless if they drift, and the drift is silent
+    // in both directions.
+    const backupScript = readFileSync(BACKUP_SCRIPT, 'utf8');
+    expect(backupScript).toContain(
+      `BACKUP_APPLICATION_NAME="${BACKUP_APPLICATION_NAME}"`,
+    );
+    // Set on the dump's own session, not the wrapper -- pg_dump runs inside the
+    // postgres container, so the env has to cross `docker exec`.
+    // One helper, so a new dump site cannot forget the stamp.
+    expect(backupScript).toContain('docker exec -e PGAPPNAME="$BACKUP_APPLICATION_NAME"');
+
+    const result = run();
+
+    expect(result.dockerLog).toContain(`application_name = '${BACKUP_APPLICATION_NAME}'`);
+    // Capped, not hidden: a dump still running after 6h is a wedge, and pages again.
+    expect(result.dockerLog).toContain("interval '6 hours'");
+    // The exemption rides the `pageable` flag, so the dump is still counted as the
+    // real backend it is: a dump that genuinely starves the pool still alerts.
+    expect(result.dockerLog).toContain('count(*)::integer AS "poolInUse"');
+    expect(result.dockerLog).toContain('WHERE pageable AND active_age >');
   });
 
   it('reports invalid operations indexes returned by the probe', () => {
@@ -641,6 +679,7 @@ describe('health-alert.sh kernel log OOM check', () => {
     run({ ...FAILING_PROBE, FAKE_JOURNAL_BLIND: '1' });
     expect(readStateFile('mail.log')).toContain('SuperSync health check failed');
 
+    run({ FAKE_JOURNAL_BLIND: '1' });
     const result = run({ FAKE_JOURNAL_BLIND: '1' });
 
     expect(result.mailLog).toContain('SuperSync health check recovered');
@@ -743,6 +782,162 @@ describe('health-alert.sh kernel log OOM check', () => {
   });
 });
 
+describe('health-alert.sh alert damping', () => {
+  it('treats a changed probe exit status as the same problem', () => {
+    // The 2026-08-25 storm: one long query made the probe time out, and the status it
+    // died with alternated (124 timeout, 143 SIGTERM, 128 exec failure). The code stays
+    // in the mail because it names the fault, but it must not reopen the alert.
+    const first = run({ FAKE_DB_EXIT: '124' });
+    const second = run({ FAKE_DB_EXIT: '143' });
+
+    expect(first.mailLog).toContain('Database monitoring checks failed (exit 124)');
+    expect(countAlerts(second.mailLog)).toBe(1);
+  });
+
+  it('does not re-alert a problem already mailed in this incident', () => {
+    // Flapping between two symptoms of one incident. The single-hash state file used to
+    // be overwritten on every flip, so each flip back looked new and mailed again.
+    run(FAILING_PROBE);
+    run({ FAKE_DB_EXIT: '124' });
+    const flipBack = run(FAILING_PROBE);
+    const flipAgain = run({ FAKE_DB_EXIT: '124' });
+
+    expect(countAlerts(flipBack.mailLog)).toBe(2);
+    expect(countAlerts(flipAgain.mailLog)).toBe(2);
+  });
+
+  it('keeps reporting a symptom that returns while another problem never clears', () => {
+    // The set state file is cleared only by a recovery mail, and recovery needs PROBLEMS
+    // entirely empty — so one never-clearing check (disk stuck above the threshold) would
+    // otherwise hold the incident open forever and permanently mute every symptom already
+    // mailed inside it. Verified against the pre-fix script: the third run sent nothing.
+    const stuck = { FAKE_DISK_PCT: '90' };
+    run({ ...stuck, ...FAILING_PROBE });
+    const cleared = run(stuck);
+    const returned = run({ ...stuck, ...FAILING_PROBE });
+
+    expect(countAlerts(cleared.mailLog)).toBe(1);
+    expect(countAlerts(returned.mailLog)).toBe(1);
+
+    // ...but it does re-report once the incident ages out.
+    const old = Date.now() / 1000 - 2 * 24 * 3600;
+    utimesSync(stateFile('state'), old, old);
+    const later = run({ ...stuck, ...FAILING_PROBE });
+
+    expect(countAlerts(later.mailLog)).toBe(2);
+  });
+
+  it('does not re-mail a subset of an already-reported problem set', () => {
+    // Hashing the whole set keys on its POWER set: "A", "A+B" and "B" would be three
+    // independent entries, so a flapping incident across k symptoms costs up to 2^k-1
+    // mails -- the same storm class, one level up. Keyed per line it is k.
+    const both = { FAKE_DISK_PCT: '90', ...FAILING_PROBE };
+    run(both);
+    const subset = run({ FAKE_DISK_PCT: '90' });
+
+    expect(countAlerts(subset.mailLog)).toBe(1);
+  });
+
+  it('normalizes a rotating container exit code, not just the probe one', () => {
+    // Both emitters carry a code that rotates under load; only the probe's was normalized,
+    // so a crash-looping container alternating 137 (OOM) / 143 (SIGTERM) mailed each flip.
+    run({ FAKE_STOPPED_SVC: 'supersync', FAKE_EXIT_CODE: '137' });
+    const other = run({ FAKE_STOPPED_SVC: 'supersync', FAKE_EXIT_CODE: '143' });
+
+    expect(countAlerts(other.mailLog)).toBe(1);
+  });
+
+  it('starts a fresh incident after recovery', () => {
+    run(FAILING_PROBE);
+    run();
+    run();
+    const returned = run(FAILING_PROBE);
+
+    expect(countAlerts(returned.mailLog)).toBe(2);
+    expect(returned.mailLog).toContain('All checks passing.');
+  });
+
+  it('waits for consecutive healthy runs before declaring recovery', () => {
+    run(FAILING_PROBE);
+    const firstClean = run();
+    expect(firstClean.mailLog).not.toContain('All checks passing.');
+
+    const secondClean = run();
+    expect(secondClean.mailLog).toContain('All checks passing.');
+  });
+
+  it('restarts the healthy-run count when the problem comes back', () => {
+    run(FAILING_PROBE);
+    run();
+    run(FAILING_PROBE);
+    const clean = run();
+
+    expect(clean.mailLog).not.toContain('All checks passing.');
+  });
+});
+
+describe('health-alert.sh pool-busy persistence gate', () => {
+  // Pool-busy is the one check that reads an instantaneous gauge, so a single crossing
+  // is routinely a stampede that self-heals within one interval. The morning of
+  // 2026-08-27 was three fail+recovery pairs for exactly that: hourly-aligned client
+  // sync at 04:00Z/06:00Z and the reconnect herd after a deploy restart at 07:00Z,
+  // each gone by the next run. It pages only when the pressure survives to the next run.
+  it('stays quiet on a pool spike seen in a single run, recovery included', () => {
+    const spike = run({ FAKE_POOL_IN_USE: '45' });
+    expect(spike.mailLog).toBe('');
+
+    // Nothing was mailed, so the following clean runs owe no recovery either.
+    run();
+    const clean = run();
+    expect(clean.mailLog).toBe('');
+  });
+
+  it('pages a pool condition that survives to the next run, with current numbers', () => {
+    run({ FAKE_POOL_IN_USE: '45' });
+    const second = run({ FAKE_POOL_IN_USE: '60' });
+
+    expect(second.mailLog).toContain(
+      'Connection pool 100% busy (60 of 60 running a query or in a transaction)',
+    );
+  });
+
+  it('resets the pending marker on a pool-healthy run', () => {
+    run({ FAKE_POOL_IN_USE: '45' });
+    run();
+    const again = run({ FAKE_POOL_IN_USE: '45' });
+
+    expect(again.mailLog).toBe('');
+  });
+
+  it('still confirms across a realistically late second run', () => {
+    // The FLOOR of the freshness window, which the back-to-back runs everywhere else in
+    // this file cannot exercise: at the real 5-minute cadence the marker is ~5-7 minutes
+    // old at the confirming run (cron jitter included). A window tighter than that would
+    // silently un-page pool-busy forever — mutation-tested: with the window at
+    // `-mmin -1`, every other test in this file still passes.
+    run({ FAKE_POOL_IN_USE: '45' });
+    const old = Date.now() / 1000 - 7 * 60;
+    utimesSync(stateFile('pool-busy-pending'), old, old);
+    const second = run({ FAKE_POOL_IN_USE: '45' });
+
+    expect(second.mailLog).toContain('Connection pool 75% busy (45 of 60');
+  });
+
+  it('does not weld two spikes separated by a monitoring gap into one condition', () => {
+    // A crashed or lock-skipped stretch of runs must not make two unrelated spikes 20
+    // minutes apart look consecutive; the marker ages out after three intervals.
+    run({ FAKE_POOL_IN_USE: '45' });
+    const old = Date.now() / 1000 - 20 * 60;
+    utimesSync(stateFile('pool-busy-pending'), old, old);
+    const later = run({ FAKE_POOL_IN_USE: '45' });
+    expect(later.mailLog).toBe('');
+
+    // ...but the stale spike re-arms the marker, so the NEXT run still confirms.
+    const confirmed = run({ FAKE_POOL_IN_USE: '45' });
+    expect(confirmed.mailLog).toContain('Connection pool 75% busy (45 of 60');
+  });
+});
+
 describe('health-alert.sh state handling', () => {
   it('deduplicates volatile long-query counts and durations', () => {
     run(FAILING_PROBE);
@@ -754,12 +949,14 @@ describe('health-alert.sh state handling', () => {
 
   it('deduplicates volatile busy-connection counts', () => {
     // Pins the HASH_INPUT sed rule to the message wording: drift is silent, and its only
-    // symptom is the alert re-mailing every five minutes.
+    // symptom is the alert re-mailing every five minutes. First run only arms the
+    // persistence gate; the second mails; the third, with a different count, must not.
     run({ FAKE_POOL_IN_USE: '45' });
-    const second = run({ FAKE_POOL_IN_USE: '52' });
+    run({ FAKE_POOL_IN_USE: '45' });
+    const third = run({ FAKE_POOL_IN_USE: '52' });
 
-    expect(second.mailLog.match(/SuperSync health check failed/g)).toHaveLength(1);
-    expect(second.mailLog).toContain('75% busy (45 of 60');
+    expect(third.mailLog.match(/SuperSync health check failed/g)).toHaveLength(1);
+    expect(third.mailLog).toContain('75% busy (45 of 60');
   });
 
   it('sends recovery after mail failure and clears the sticky marker', () => {
@@ -770,6 +967,7 @@ describe('health-alert.sh state handling', () => {
     expect(failed.output).toContain('Failed to send alert email');
     expect(existsSync(stateFile('mail-failed'))).toBe(true);
 
+    run();
     const recovered = run();
     expect(recovered.mailLog).toContain('All checks passing.');
     expect(existsSync(stateFile('mail-failed'))).toBe(false);
@@ -818,6 +1016,8 @@ describe('health-alert.sh state handling', () => {
     expect(alertMarker.split('\n')[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(alertMarker).toContain('550 relay access denied');
 
+    // Second healthy run: recovery needs two consecutive clean runs.
+    run({ FAKE_MAIL_EXIT: '1', FAKE_MAIL_STDERR: 'smtp: 535 authentication failed' });
     const recovery = run({
       FAKE_MAIL_EXIT: '1',
       FAKE_MAIL_STDERR: 'smtp: 535 authentication failed',
@@ -948,4 +1148,199 @@ describe('health-alert.sh state handling', () => {
     expect(output).toContain('550 2Kdenied here');
     expect(output).toContain('[1;31m OWNED');
   });
+});
+
+/**
+ * REPLAY OF THE NIGHT OF 2026-08-25/26 on the production VPS — the incident that motivated the
+ * dedupe rewrite. The operator received 16 mails (13 alerts + 3 recoveries) between
+ * 23:05 and 07:45 UTC and asked how to stop it happening every night.
+ *
+ * THE TIMELINE IS NOT RECONSTRUCTED FROM MEMORY. Every mail below is one the operator
+ * actually received, quoted from its subject line. The state on the RUNS THAT SENT NO
+ * MAIL is then FORCED, not guessed, because the shipped script's rule was "mail iff the
+ * normalized problem-set hash differs from the stored one":
+ *
+ *   - a silent run cannot have been healthy (that would have sent a recovery, and the
+ *     shipped script sent one on the FIRST clean run), so it was still failing;
+ *   - and it must have hashed identically to the previous mail, or it would have mailed.
+ *
+ * That pins 23:40 to the same `exit 124` as 23:35, the 00:15–00:45 stretch to the same
+ * long query as 00:10, and 07:05–07:40 to the same pool-busy as 07:00. The 01:00–05:55
+ * stretch is quiet by the same argument (state was cleared by the 00:55 recovery, and
+ * nothing mailed for five hours); it is replayed at reduced cadence because after the
+ * second clean run those runs are behaviourally identical, and 60 more spawns buy
+ * nothing.
+ *
+ * THE DUMP'S OWN SESSION. The four long-query alerts between 23:05 and 00:45 report
+ * durations of 295s / 2740s / 4201s against a `pg_dump` that started at 23:00:12 and ran
+ * ~112 minutes — they ARE the dump, matched to the second. They are replayed as absent
+ * because the probe now excludes `application_name = 'supersync-backup'` at the SQL
+ * level, which is not something these shell fakes can evaluate; that exclusion has its
+ * own real-PostgreSQL coverage in health-alert-db-probe.integration.spec.ts. The 07:45
+ * long query is NOT the dump (it ended ~00:52) and must still be reported.
+ *
+ * MEASURED: the shipped script replays this timeline at 16 mails (13 alerts, 3
+ * recoveries); the current one at 8 (5 alerts, 3 recoveries). The point of the test is
+ * not the number — it is that the number cannot regress without someone noticing, and
+ * that every DISTINCT problem still reaches the operator, including one that recurs
+ * after its incident already recovered.
+ */
+/** `// MAILED` marks a run the SHIPPED script sent a mail on — i.e. a real observation. */
+type Run =
+  | { at: string; state: 'ok' }
+  | { at: string; state: 'probe'; exit: string }
+  | { at: string; state: 'longQuery'; seconds: string; isBackupSession: boolean }
+  | { at: string; state: 'poolBusy'; inUse: string };
+
+const NIGHT_OF_2026_08_25: Run[] = [
+  // The dump starts 23:00:12. Every long query below until 00:45 is its own session.
+  { at: '23:05', state: 'longQuery', seconds: '295', isBackupSession: true }, // MAILED
+  { at: '23:10', state: 'longQuery', seconds: '600', isBackupSession: true },
+  { at: '23:15', state: 'longQuery', seconds: '900', isBackupSession: true },
+  { at: '23:20', state: 'longQuery', seconds: '1200', isBackupSession: true },
+  { at: '23:25', state: 'longQuery', seconds: '1500', isBackupSession: true },
+  { at: '23:30', state: 'longQuery', seconds: '1800', isBackupSession: true },
+  // Under the dump's load the probe itself starts dying, with a rotating exit status:
+  // 124 (outer `timeout`), 143 (128+SIGTERM on the inner one), 128 (exec failure).
+  { at: '23:35', state: 'probe', exit: '124' }, // MAILED
+  { at: '23:40', state: 'probe', exit: '124' },
+  { at: '23:45', state: 'longQuery', seconds: '2740', isBackupSession: true }, // MAILED
+  { at: '23:50', state: 'probe', exit: '143' }, // MAILED
+  { at: '23:55', state: 'probe', exit: '124' }, // MAILED
+  { at: '00:00', state: 'probe', exit: '128' }, // MAILED
+  { at: '00:05', state: 'probe', exit: '143' }, // MAILED
+  { at: '00:10', state: 'longQuery', seconds: '4201', isBackupSession: true }, // MAILED
+  { at: '00:15', state: 'longQuery', seconds: '4500', isBackupSession: true },
+  { at: '00:20', state: 'longQuery', seconds: '4800', isBackupSession: true },
+  { at: '00:25', state: 'longQuery', seconds: '5100', isBackupSession: true },
+  { at: '00:30', state: 'longQuery', seconds: '5400', isBackupSession: true },
+  { at: '00:35', state: 'longQuery', seconds: '5700', isBackupSession: true },
+  { at: '00:40', state: 'longQuery', seconds: '6000', isBackupSession: true },
+  { at: '00:45', state: 'longQuery', seconds: '6300', isBackupSession: true },
+  { at: '00:50', state: 'probe', exit: '124' }, // MAILED
+  { at: '00:55', state: 'ok' }, // MAILED (recovery)
+  // Five quiet hours, replayed at reduced cadence — see the header.
+  { at: '01:00', state: 'ok' },
+  { at: '03:00', state: 'ok' },
+  { at: '05:55', state: 'ok' },
+  { at: '06:00', state: 'poolBusy', inUse: '48' }, // MAILED
+  { at: '06:05', state: 'ok' }, // MAILED (recovery)
+  { at: '06:10', state: 'ok' },
+  { at: '06:15', state: 'ok' },
+  { at: '06:20', state: 'ok' },
+  { at: '06:25', state: 'probe', exit: '124' }, // MAILED
+  { at: '06:30', state: 'ok' }, // MAILED (recovery)
+  { at: '06:35', state: 'ok' },
+  { at: '06:40', state: 'ok' },
+  { at: '06:45', state: 'ok' },
+  { at: '06:50', state: 'ok' },
+  { at: '06:55', state: 'ok' },
+  { at: '07:00', state: 'poolBusy', inUse: '60' }, // MAILED
+  { at: '07:05', state: 'poolBusy', inUse: '60' },
+  { at: '07:10', state: 'poolBusy', inUse: '60' },
+  { at: '07:15', state: 'poolBusy', inUse: '60' },
+  { at: '07:20', state: 'poolBusy', inUse: '60' },
+  { at: '07:25', state: 'poolBusy', inUse: '60' },
+  { at: '07:30', state: 'poolBusy', inUse: '60' },
+  { at: '07:35', state: 'poolBusy', inUse: '60' },
+  { at: '07:40', state: 'poolBusy', inUse: '60' },
+  // The dump ended ~00:52, so this one is a REAL query and must still be reported.
+  { at: '07:45', state: 'longQuery', seconds: '233', isBackupSession: false },
+];
+
+const envForRun = (run: Run): Record<string, string> => {
+  switch (run.state) {
+    case 'ok':
+      return {};
+    case 'probe':
+      return { FAKE_DB_EXIT: run.exit };
+    case 'longQuery':
+      // The dump's own session is filtered inside the probe SQL, which these fakes do not
+      // evaluate — so an exempt session simply reports no long query, exactly as the real
+      // probe now does. Covered for real in health-alert-db-probe.integration.spec.ts.
+      return run.isBackupSession ? {} : { FAKE_LONG_Q: '1', FAKE_LONGEST: run.seconds };
+    case 'poolBusy':
+      return { FAKE_POOL_IN_USE: run.inUse, FAKE_POOL_LIMIT: '60' };
+  }
+};
+
+describe('health-alert.sh replaying the night of 2026-08-25', () => {
+  // Each replay spawns the script ~40 times; a single spawn may take up to 10s
+  // (spawnSync timeout above), so vitest's 5s default flakes on slow CI runners.
+  const REPLAY_TIMEOUT_MS = 60_000;
+
+  const replay = (): { alerts: string[]; recoveries: number } => {
+    const alerts: string[] = [];
+    let recoveries = 0;
+    let seenMails = 0;
+
+    for (const entry of NIGHT_OF_2026_08_25) {
+      run(envForRun(entry));
+      const log = readStateFile('mail.log');
+      const mails = log.split('---MAIL---').slice(1);
+      for (const mail of mails.slice(seenMails)) {
+        if (mail.includes('recovered at')) {
+          recoveries++;
+        } else {
+          // Keep the body, not just a count: an assertion on the number alone cannot tell
+          // "damped the storm" from "stopped reporting".
+          alerts.push(
+            `${entry.at} ${mail
+              .replace(/\s+/g, ' ')
+              .replace(/.*Problems found: /, '')
+              .replace(/ (Note|Server):.*/, '')}`,
+          );
+        }
+      }
+      seenMails = mails.length;
+    }
+    return { alerts, recoveries };
+  };
+
+  it(
+    'reports every distinct problem exactly once instead of storming',
+    () => {
+      const { alerts, recoveries } = replay();
+
+      // Five mails for five genuinely separate events, where the shipped script sent
+      // thirteen. The rotating 143/128 exit codes are folded into the 124 that opened the
+      // incident. The 06:00 pool spike lasted a single run and self-healed, so the
+      // persistence gate sends nothing for it; the 07:00 saturation is sustained and
+      // pages one interval later, at 07:05, with the repeat runs to 07:40 folded into it.
+      //
+      // 00:50 is NOT a duplicate of 23:35 and must stay: with the dump's own session
+      // exempted, 00:10-00:45 are healthy runs, so that incident CLOSED (recovery below)
+      // and 00:50 opened a new one. Folding a failure into an incident that already
+      // recovered is how a monitor goes quiet on a recurring fault.
+      expect(alerts).toEqual([
+        '23:35 Database monitoring checks failed (exit 124)',
+        '00:50 Database monitoring checks failed (exit 124)',
+        '06:25 Database monitoring checks failed (exit 124)',
+        '07:05 Connection pool 100% busy (60 of 60 running a query or in a transaction)',
+        '07:45 1 query(s) active longer than 120s (longest: 233s)',
+      ]);
+      // One per incident that actually cleared, and never on a single-run blip. The
+      // 06:00 spike never opened an incident, so it gets none; the 07:00 incident is
+      // still open at 07:45, so it correctly gets none either.
+      expect(recoveries).toBe(3);
+      // 16 mails on the shipped script, 8 here. Four of those eight are the 23:00-01:00
+      // cluster, which exists only because the dump was still taking ~112 minutes; that
+      // window goes quiet once the retention sweep runs and the dump shrinks again.
+      expect(alerts.length + recoveries).toBeLessThanOrEqual(8);
+    },
+    REPLAY_TIMEOUT_MS,
+  );
+
+  it(
+    'still reports a genuinely new problem while an old one is unresolved',
+    () => {
+      // The failure mode a naive rate-limit introduces: 07:45's long query arrives while
+      // the pool has been busy since 07:00 and the incident is still open. Suppressing it
+      // would be a silent monitoring outage, which is worse than the storm.
+      const { alerts } = replay();
+
+      expect(alerts.at(-1)).toContain('1 query(s) active longer than 120s');
+    },
+    REPLAY_TIMEOUT_MS,
+  );
 });
