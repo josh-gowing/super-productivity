@@ -325,7 +325,7 @@ export const createServer = (
   stop: () => Promise<void>;
 } => {
   const fullConfig = loadConfigFromEnv(config);
-  initSyncService({ batchUpload: fullConfig.batchUpload });
+  initSyncService();
 
   // Ensure data directory exists
   if (!fs.existsSync(fullConfig.dataDir)) {
@@ -428,26 +428,14 @@ export const createServer = (
       });
 
       // WebSocket support for real-time sync notifications
-      // maxPayload: only app-level pong messages expected from clients (~20 bytes)
+      // maxPayload: clients send app-level pongs (~20 bytes) and presence
+      // messages (encrypted envelope + JSON wrapper, typically <1 KB). Must
+      // stay >= MAX_PRESENCE_PAYLOAD_BYTES in websocket-connection.service.ts —
+      // an undersized frame limit errors the WHOLE socket (sync included)
+      // instead of just dropping the presence message.
       await fastifyServer.register(websocket, {
-        options: { maxPayload: 1024 },
+        options: { maxPayload: 8192 },
       });
-
-      // Backfill self-check: paired with the env-flag enforcement in
-      // loadConfigFromEnv. The env flag (SUPERSYNC_PAYLOAD_BYTES_BACKFILL_COMPLETE)
-      // is operator-set; if it is flipped to true before the migrate-payload-bytes
-      // script finishes, batch-upload deltas are still correct but the SUM-based
-      // reconcile in calculateStorageUsage would mix exact bytes with the
-      // CASE-WHEN fallback for legacy rows. One indexed probe at startup closes
-      // the trust hole: refuse to boot if any row still has payload_bytes = 0.
-      if (fullConfig.batchUpload) {
-        try {
-          await getSyncService().assertPayloadBytesBackfillComplete();
-        } catch (err) {
-          Logger.error('Startup self-check failed', err);
-          throw err;
-        }
-      }
 
       // Health Check - verifies database connectivity
       // Exempt from rate limiting (Kubernetes probes hit this every 5-15s)
@@ -502,8 +490,11 @@ export const createServer = (
       // Start cleanup jobs
       startCleanupJobs();
 
-      // Start WebSocket heartbeat
-      getWsConnectionService().startHeartbeat();
+      // Start WebSocket heartbeat. It also refreshes the device row of every live
+      // socket, so a long-lived read-only connection is not pruned as stale.
+      getWsConnectionService().startHeartbeat((userId, clientId) =>
+        getSyncService().touchDevice(userId, clientId),
+      );
 
       try {
         const address = await fastifyServer.listen(createListenOptions(fullConfig));

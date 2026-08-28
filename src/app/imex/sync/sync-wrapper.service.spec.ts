@@ -22,6 +22,8 @@ import { UserInputWaitStateService } from './user-input-wait-state.service';
 import { SuperSyncStatusService } from '../../op-log/sync/super-sync-status.service';
 import { SuperSyncWebSocketService } from '../../op-log/sync/super-sync-websocket.service';
 import { WsTriggeredDownloadService } from '../../op-log/sync/ws-triggered-download.service';
+import { TrackingPresenceService } from '../../features/tracking-presence/tracking-presence.service';
+import { RemoteTrackingAndroidNotifierService } from '../../features/tracking-presence/remote-tracking-android-notifier.service';
 import {
   AuthFailSPError,
   DecryptNoPasswordError,
@@ -38,6 +40,7 @@ import {
   LocalDataConflictError,
   LockAcquisitionTimeoutError,
   MissingRefreshTokenAPIError,
+  InvalidFilePrefixError,
   JsonParseError,
   SyncDataCorruptedError,
   UploadRevToMatchMismatchAPIError,
@@ -243,6 +246,17 @@ describe('SyncWrapperService', () => {
         { provide: SuperSyncStatusService, useValue: mockSuperSyncStatusService },
         { provide: SuperSyncWebSocketService, useValue: mockSuperSyncWsService },
         { provide: WsTriggeredDownloadService, useValue: mockWsDownloadService },
+        {
+          provide: TrackingPresenceService,
+          useValue: jasmine.createSpyObj('TrackingPresenceService', ['start', 'stop']),
+        },
+        {
+          provide: RemoteTrackingAndroidNotifierService,
+          useValue: jasmine.createSpyObj('RemoteTrackingAndroidNotifierService', [
+            'start',
+            'stop',
+          ]),
+        },
       ],
     });
 
@@ -713,6 +727,57 @@ describe('SyncWrapperService', () => {
 
       expect(mockSuperSyncWsService.connect).not.toHaveBeenCalled();
     });
+
+    // The gate must run on EVERY sync cycle, not only inside connectWebSocket():
+    // the socket stays connected for days, so gating there would make toggling
+    // the setting silently do nothing until a reconnect (a failed opt-out).
+    it('should start tracking presence on sync when opted in, even with WS already connected', async () => {
+      mockSuperSyncWsService.isConnected.set(true);
+      // The opt-in is a per-device flag in the provider's private config
+      // (never the synced global config), so the gate reads it from there.
+      mockProviderManager.getProviderById.and.resolveTo({
+        privateCfg: {
+          load: jasmine.createSpy('load').and.resolveTo({
+            isTrackingPresenceEnabled: true,
+          }),
+        },
+      } as any);
+      const presence = TestBed.inject(
+        TrackingPresenceService,
+      ) as jasmine.SpyObj<TrackingPresenceService>;
+
+      await service.sync();
+      // Gate is fire-and-forget with two async hops (getProviderById +
+      // privateCfg.load); drain enough microtasks for start()/stop() to run.
+      for (let i = 0; i < 5; i++) {
+        await Promise.resolve();
+      }
+
+      expect(presence.start).toHaveBeenCalled();
+      expect(presence.stop).not.toHaveBeenCalled();
+    });
+
+    it('should stop tracking presence on sync when not opted in, even with WS already connected', async () => {
+      mockSuperSyncWsService.isConnected.set(true);
+      mockProviderManager.getProviderById.and.resolveTo({
+        privateCfg: {
+          load: jasmine.createSpy('load').and.resolveTo({
+            isTrackingPresenceEnabled: false,
+          }),
+        },
+      } as any);
+      const presence = TestBed.inject(
+        TrackingPresenceService,
+      ) as jasmine.SpyObj<TrackingPresenceService>;
+
+      await service.sync();
+      for (let i = 0; i < 5; i++) {
+        await Promise.resolve();
+      }
+
+      expect(presence.stop).toHaveBeenCalled();
+      expect(presence.start).not.toHaveBeenCalled();
+    });
   });
 
   describe('_sync() - Provider handling', () => {
@@ -1181,6 +1246,29 @@ describe('SyncWrapperService', () => {
 
       expect(result).toBe('HANDLED_ERROR');
       expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
+      expect(mockProviderManager.setSyncStatus).not.toHaveBeenCalledWith('IN_SYNC');
+    });
+
+    it('should set ERROR and return HANDLED_ERROR when upload has PAYLOAD_TOO_LARGE errorCode', async () => {
+      mockSyncService.uploadPendingOps.and.returnValue(
+        Promise.resolve({
+          kind: 'completed' as const,
+          uploadedCount: 0,
+          piggybackedOpsCount: 0,
+          localWinOpsCreated: 0,
+          permanentRejectionCount: 1,
+          hasMorePiggyback: false,
+          rejectedOps: [{ opId: 'test-op', errorCode: 'PAYLOAD_TOO_LARGE' }],
+        }),
+      );
+
+      const result = await service.sync();
+
+      expect(result).toBe('HANDLED_ERROR');
+      expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
+      expect(mockTranslateService.instant).toHaveBeenCalledWith(
+        T.F.SYNC.S.ERROR_PAYLOAD_TOO_LARGE,
+      );
       expect(mockProviderManager.setSyncStatus).not.toHaveBeenCalledWith('IN_SYNC');
     });
 
@@ -1908,6 +1996,48 @@ describe('SyncWrapperService', () => {
           actionStr: jasmine.any(String),
         }),
       );
+    });
+
+    it('should handle InvalidFilePrefixError with force-overwrite action and corrupted-data message (#9627)', async () => {
+      // The remote file's head is not `pf_...__`, so it is rejected before the
+      // decrypt/decompress/JSON stages its siblings cover. Same user-facing
+      // situation as JsonParseError and EmptyRemoteBodySPError — remote is
+      // unreadable, local data is intact — so it gets the same actionable snack
+      // instead of falling through to the generic handler, which surfaced the
+      // raw internal message that became this issue's title.
+      mockSyncService.downloadRemoteOps.and.returnValue(
+        Promise.reject(
+          new InvalidFilePrefixError({
+            expectedPrefix: 'pf_',
+            endSeparator: '__',
+            inputLength: 294912,
+            prefixAt: -1,
+            headShape: 'base64',
+          }),
+        ),
+      );
+
+      const result = await service.sync();
+
+      expect(result).toBe('HANDLED_ERROR');
+      expect(mockProviderManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
+      expect(mockSnackService.open).toHaveBeenCalledWith(
+        jasmine.objectContaining({
+          msg: T.F.SYNC.S.ERROR_REMOTE_FILE_CORRUPTED,
+          type: 'ERROR',
+          actionFn: jasmine.any(Function),
+          actionStr: jasmine.any(String),
+        }),
+      );
+
+      // The branch is shared with JsonParseError, so the trigger label is the
+      // only thing distinguishing the two in the log. Invoke the action rather
+      // than asserting `jasmine.any(Function)` — otherwise a label regression
+      // (both reporting 'JsonParseError') passes silently.
+      const forceUploadSpy = spyOn(service, 'forceUpload').and.resolveTo(undefined);
+      const openedSnack = mockSnackService.open.calls.mostRecent().args[0] as SnackParams;
+      await (openedSnack.actionFn as (() => Promise<void>) | undefined)?.();
+      expect(forceUploadSpy).toHaveBeenCalledWith('InvalidFilePrefixError');
     });
 
     it('should handle SyncDataCorruptedError with version-mismatch message (no force-overwrite)', async () => {
@@ -2901,6 +3031,17 @@ describe('SyncWrapperService', () => {
           { provide: ReminderService, useValue: mockReminderService },
           { provide: UserInputWaitStateService, useValue: mockUserInputWaitState },
           { provide: SuperSyncStatusService, useValue: signalMockSuperSyncStatusService },
+          {
+            provide: TrackingPresenceService,
+            useValue: jasmine.createSpyObj('TrackingPresenceService', ['start', 'stop']),
+          },
+          {
+            provide: RemoteTrackingAndroidNotifierService,
+            useValue: jasmine.createSpyObj('RemoteTrackingAndroidNotifierService', [
+              'start',
+              'stop',
+            ]),
+          },
         ],
       });
 
@@ -3029,6 +3170,17 @@ describe('SyncWrapperService', () => {
           { provide: ReminderService, useValue: mockReminderService },
           { provide: UserInputWaitStateService, useValue: mockUserInputWaitState },
           { provide: SuperSyncStatusService, useValue: signalMockSuperSyncStatusService },
+          {
+            provide: TrackingPresenceService,
+            useValue: jasmine.createSpyObj('TrackingPresenceService', ['start', 'stop']),
+          },
+          {
+            provide: RemoteTrackingAndroidNotifierService,
+            useValue: jasmine.createSpyObj('RemoteTrackingAndroidNotifierService', [
+              'start',
+              'stop',
+            ]),
+          },
         ],
       });
 

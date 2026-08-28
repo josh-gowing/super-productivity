@@ -22,6 +22,7 @@ import com.superproductivity.superproductivity.service.BackgroundSyncCredentialS
 import com.superproductivity.superproductivity.service.FocusModeForegroundService
 import com.superproductivity.superproductivity.service.FocusModeNotificationHelper
 import com.superproductivity.superproductivity.service.ForegroundServiceFailure
+import com.superproductivity.superproductivity.service.RemoteTrackingNotificationHelper
 import com.superproductivity.superproductivity.service.SyncReminderScheduler
 import com.superproductivity.superproductivity.service.TrackingForegroundService
 import com.superproductivity.superproductivity.util.printWebViewVersion
@@ -386,6 +387,12 @@ class CapacitorMainActivity : BridgeActivity() {
                 callJSInterfaceFunctionIfExists("next", "onMarkTaskDone$")
                 return
             }
+            // Stop tracking on ANOTHER device (remote tracking presence notification)
+            RemoteTrackingNotificationHelper.ACTION_REMOTE_STOP -> {
+                Log.d("SP_TRACKING", "Remote stop action received from notification")
+                callJSInterfaceFunctionIfExists("next", "onRemoteTrackingStop$")
+                return
+            }
             // Handle focus mode notification actions
             FocusModeForegroundService.ACTION_PAUSE -> {
                 Log.d("SP_FOCUS", "Pause action received from focus mode notification")
@@ -504,8 +511,7 @@ class CapacitorMainActivity : BridgeActivity() {
      * reverted #8295 fallback). The target (`rect.bottom − webViewTop`) is read
      * from `getWindowVisibleDisplayFrame` (reliable on API 28) and does not
      * depend on the WebView's own height, so it is stable across passes — no
-     * feedback loop. See docs/android-edge-to-edge-keyboard.md and
-     * docs/plans/2026-06-22-android-systembars-migration-corrected.md.
+     * feedback loop. See docs/android-edge-to-edge-keyboard.md.
      *
      * API >= 30 and WebView >= 140 are strict no-ops.
      */
