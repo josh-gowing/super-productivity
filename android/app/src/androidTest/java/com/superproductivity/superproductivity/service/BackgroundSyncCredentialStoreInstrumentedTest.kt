@@ -50,15 +50,7 @@ class BackgroundSyncCredentialStoreInstrumentedTest {
     private fun wipe() {
         BackgroundSyncCredentialStore.clear(context)
         context.deleteSharedPreferences(PREFS_NAME)
-        forgetCachedPrefs()
-    }
-
-    /** Drops the process-lifetime `prefs` cache so the next call re-opens the store. */
-    private fun forgetCachedPrefs() {
-        BackgroundSyncCredentialStore::class.java.getDeclaredField("prefs").apply {
-            isAccessible = true
-            set(BackgroundSyncCredentialStore, null)
-        }
+        BackgroundSyncCredentialStore.forgetCachedPrefsForTest()
     }
 
     /**
@@ -69,7 +61,7 @@ class BackgroundSyncCredentialStoreInstrumentedTest {
     private fun simulateDeviceMigration() {
         KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
-        forgetCachedPrefs()
+        BackgroundSyncCredentialStore.forgetCachedPrefsForTest()
     }
 
     @Test
