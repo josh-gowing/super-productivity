@@ -394,10 +394,10 @@ export class IssueService {
 
     for (const pKey of Object.keys(tasksIssueIdsByIssueProviderKey)) {
       const providerKey = pKey as IssueProviderKey;
-      IssueLog.log(
-        'POLLING CHANGES FOR ' + providerKey,
-        tasksIssueIdsByIssueProviderKey[providerKey],
-      );
+      IssueLog.log('POLLING CHANGES FOR ' + providerKey, {
+        taskCount: tasksIssueIdsByIssueProviderKey[providerKey].length,
+        taskIds: tasksIssueIdsByIssueProviderKey[providerKey].map((t) => t.id),
+      });
       const pollingLabelParams = {
         issueProviderName: this._getProviderName(providerKey),
         issuesStr: this._translateService.instant(
@@ -537,7 +537,7 @@ export class IssueService {
       ...additionalFromProviderIssueService
     } = this._getAddTaskData(issueProviderKey, issueDataReduced, providerCfg);
     IssueLog.log({
-      related_to,
+      hasRelatedTo: !!related_to,
       additionalKeys: Object.keys(additionalFromProviderIssueService),
     });
 
