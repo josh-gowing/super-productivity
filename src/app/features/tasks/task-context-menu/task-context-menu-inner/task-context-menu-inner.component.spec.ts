@@ -27,6 +27,7 @@ import { DEFAULT_TASK, Task, TaskWithSubTasks } from '../../task.model';
 import { By } from '@angular/platform-browser';
 import { MatMenu } from '@angular/material/menu';
 import { TaskDuplicateService } from '../../task-duplicate.service';
+import { TaskMultiSelectService } from '../../task-multi-select.service';
 
 const projectInTreeOrder = (id: string, title: string): Project =>
   ({
@@ -58,7 +59,10 @@ describe('TaskContextMenuInnerComponent', () => {
   beforeEach(async () => {
     taskService = jasmine.createSpyObj('TaskService', [
       'currentTaskId',
+      'selectedTaskId',
+      'setSelectedId',
       'moveToProject',
+      'remove',
       'getTasksWithSubTasksByRepeatCfgId$',
       'getArchiveTasksForRepeatCfgId',
     ]);
@@ -157,6 +161,26 @@ describe('TaskContextMenuInnerComponent', () => {
     store.resetSelectors();
   });
 
+  describe('enterSelectionMode()', () => {
+    it('enters touch selection mode with the task selected', () => {
+      const multiSelect = TestBed.inject(TaskMultiSelectService);
+      taskService.selectedTaskId.and.returnValue(null);
+      component.enterSelectionMode();
+      expect(multiSelect.isTouchSelectionMode()).toBeTrue();
+      expect(multiSelect.has('task-default')).toBeTrue();
+      expect(taskService.setSelectedId).not.toHaveBeenCalled();
+      multiSelect.clear();
+    });
+
+    it('closes an open detail panel first', () => {
+      const multiSelect = TestBed.inject(TaskMultiSelectService);
+      taskService.selectedTaskId.and.returnValue('other-task');
+      component.enterSelectionMode();
+      expect(taskService.setSelectedId).toHaveBeenCalledWith(null);
+      multiSelect.clear();
+    });
+  });
+
   describe('tree ordered dropdown data', () => {
     it('should expose move projects in the order provided by ProjectService', (done) => {
       component.taskSet = {
@@ -233,6 +257,27 @@ describe('TaskContextMenuInnerComponent', () => {
       expect(taskDuplicateService.duplicate).toHaveBeenCalledOnceWith(
         mockTaskWithSubTasks,
       );
+    }));
+  });
+
+  describe('deleteTask()', () => {
+    // #9946: the selector returns undefined for a task that is gone from the
+    // store; removing an id-less stub used to wipe every top-level task.
+    it('removes nothing when the task is gone from the store', fakeAsync(() => {
+      component.task = {
+        ...DEFAULT_TASK,
+        id: 'GONE_ID',
+        projectId: 'P1',
+        subTaskIds: [],
+      };
+      store.overrideSelector(selectTaskByIdWithSubTaskData, undefined);
+
+      void (
+        component as unknown as { _performDelete: () => Promise<void> }
+      )._performDelete();
+      tick(50); // for the delay(50) in _getTaskWithSubtasks
+
+      expect(taskService.remove).not.toHaveBeenCalled();
     }));
   });
 

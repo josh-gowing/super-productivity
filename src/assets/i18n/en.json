@@ -56,6 +56,7 @@
     "RESTORE_FILE_BACKUP_ANDROID": "There seems to be NO DATA, but there is a backup available. Do you want to load it?",
     "RESTORE_FILE_BACKUP_MOBILE": "No data was found on this device, but a backup is available to restore (tasks: {{tasks}}, projects: {{projects}}). Restore it?",
     "RESTORE_FILE_BACKUP_MOBILE_FROM_SETTINGS": "Restore the latest automatic backup (tasks: {{tasks}}, projects: {{projects}})? This replaces all current data on this device and, if you use sync, overwrites your other devices on the next sync.",
+    "RESTORE_FILE_BACKUP_WITH_COUNTS": "There seems to be NO DATA, but there are backups available at \"{{dir}}\". Do you want to restore the latest backup from {{from}} (tasks: {{tasks}}, projects: {{projects}})?",
     "RESTORE_STRAY_BACKUP": "During the last sync, there may have been an error. Do you want to restore the last backup?"
   },
   "DATETIME_SCHEDULE": {
@@ -991,6 +992,10 @@
       "D_DELETE": {
         "MSG": "Are you sure you want to delete the project \"{{title}}\"?"
       },
+      "D_RENAME": {
+        "LABEL": "Project name",
+        "PLACEHOLDER": "Enter project name"
+      },
       "COMPLETE": {
         "COMPLETED_ON": "Completed {{date}}",
         "REOPEN": "Reopen",
@@ -1763,6 +1768,10 @@
       "D_DELETE": {
         "CONFIRM_MSG": "Do you really want to delete the tag \"{{tagName}}\"? It will be removed from all tasks. This cannot be undone!"
       },
+      "D_RENAME": {
+        "LABEL": "Tag name",
+        "PLACEHOLDER": "Enter tag name"
+      },
       "D_EDIT": {
         "ADD": "Add tags for \"{{title}}\"",
         "EDIT": "Edit tags for \"{{title}}\"",
@@ -1836,7 +1845,6 @@
       },
       "ADDITIONAL_INFO": {
         "ADD_ATTACHMENT": "Links & Files",
-        "ADD_CHECKLIST_ITEM": "Add checklist item",
         "CHECKLIST_ACTIONS": "Checklist actions",
         "CHECK_ALL": "Check all",
         "CLEAR_COMPLETED": "Clear completed",
@@ -1865,7 +1873,8 @@
         "SUB_TASKS": "Subtasks ({{nr}})",
         "SUB_TASKS_EMPTY": "Subtasks",
         "TIME": "Duration",
-        "TITLE_PLACEHOLDER": "Enter a title"
+        "TITLE_PLACEHOLDER": "Enter a title",
+        "OPEN_IN_FULLSCREEN": "Open in fullscreen"
       },
       "B": {
         "ADD_ALL_TO_TODAY": "Add all to today",
@@ -2015,6 +2024,73 @@
         "HELP": "Examples:<br> 30m => 30 minutes<br> 2h => 2 hours<br> 2h 30m => 2 hours and 30 minutes<br> 1.5h => 1 hour and 30 minutes<br> 03:15 => 3 hours and 15 minutes",
         "TINE_SPENT": "Time Spent",
         "TITLE": "Add for Day"
+      },
+      "MULTI_SELECT": {
+        "ACTIONS": "Actions",
+        "CLEAR": "Clear selection",
+        "D_CONFIRM_DELETE": {
+          "MSG": {
+            "ONE": "Delete <strong>{{count}}</strong> task? Its subtasks are deleted too.",
+            "OTHER": "Delete <strong>{{count}}</strong> tasks? Subtasks are deleted too."
+          },
+          "OK": "Delete"
+        },
+        "S": {
+          "DEADLINE_REMOVED": {
+            "ONE": "Removed the deadline from {{count}} task",
+            "OTHER": "Removed the deadline from {{count}} tasks"
+          },
+          "DEADLINE_SET": {
+            "ONE": "Set the deadline of {{count}} task to {{date}}",
+            "OTHER": "Set the deadline of {{count}} tasks to {{date}}"
+          },
+          "DONE": {
+            "ONE": "Marked {{count}} task as done",
+            "OTHER": "Marked {{count}} tasks as done"
+          },
+          "ESTIMATE_CLEARED": {
+            "ONE": "Cleared the estimate of {{count}} task",
+            "OTHER": "Cleared the estimate of {{count}} tasks"
+          },
+          "ESTIMATE_SET": {
+            "ONE": "Estimated {{count}} task at {{estimate}}",
+            "OTHER": "Estimated {{count}} tasks at {{estimate}}"
+          },
+          "MOVED_TO_BACKLOG": {
+            "ONE": "Moved {{count}} task to the backlog",
+            "OTHER": "Moved {{count}} tasks to the backlog",
+            "PARTIAL": "Moved {{count}} of {{total}} tasks to the backlog (subtasks follow their parent)"
+          },
+          "MOVED_TO_PROJECT": {
+            "ONE": "Moved {{count}} task to \"{{projectTitle}}\"",
+            "OTHER": "Moved {{count}} tasks to \"{{projectTitle}}\"",
+            "PARTIAL": "Moved {{count}} of {{total}} tasks to \"{{projectTitle}}\" (subtasks follow their parent)"
+          },
+          "MOVED_TO_REGULAR": {
+            "ONE": "Moved {{count}} task to the regular list",
+            "OTHER": "Moved {{count}} tasks to the regular list",
+            "PARTIAL": "Moved {{count}} of {{total}} tasks to the regular list (subtasks follow their parent)"
+          },
+          "NOTHING_TO_DO": "Nothing to change for the selected tasks",
+          "SCHEDULED": {
+            "ONE": "Scheduled {{count}} task for {{date}}",
+            "OTHER": "Scheduled {{count}} tasks for {{date}}"
+          },
+          "UNDONE": {
+            "ONE": "Marked {{count}} task as not done",
+            "OTHER": "Marked {{count}} tasks as not done"
+          },
+          "UNSCHEDULED": {
+            "ONE": "Unscheduled {{count}} task",
+            "OTHER": "Unscheduled {{count}} tasks"
+          }
+        },
+        "SELECTED_COUNT": "{{count}} selected",
+        "SELECT_ENTRY": "Select several tasks…",
+        "TASKS_TITLE": {
+          "ONE": "{{count}} task",
+          "OTHER": "{{count}} tasks"
+        }
       },
       "N": {
         "ESTIMATE_EXCEEDED": "Time estimate exceeded!",
@@ -2431,6 +2507,7 @@
     "PASSWORD_STRENGTH_WEAK": "Weak",
     "PROCESSING": "Processing",
     "REMOVE": "Remove",
+    "RENAME": "Rename",
     "SAVE": "Save",
     "SHARE": "Share",
     "SUBMIT": "Submit",
@@ -2633,6 +2710,7 @@
       "TASK_OPEN_NOTES_PANEL": "Open note/checklist in task panel",
       "TASK_OPEN_NOTES_FULLSCREEN": "Open note/checklist in fullscreen",
       "TASK_TOGGLE_DONE": "Toggle task completed status",
+      "TASK_TOGGLE_SELECT": "Toggle task in multi-selection",
       "TASK_UNSCHEDULE": "Unschedule task",
       "TITLE": "Keyboard Shortcuts",
       "TOGGLE_BACKLOG": "Show/hide project backlog",
@@ -2675,7 +2753,7 @@
       "TIME_LOCALE_AUTO": "System default",
       "TIME_LOCALE_CS_CZ": "Czech: 24-hour, DD. MM. YYYY",
       "TIME_LOCALE_DE_DE": "German: 24-hour, DD.MM.YYYY",
-      "TIME_LOCALE_DESCRIPTION": "Sets the date format and the 12/24-hour time format used across the app. \"System default\" follows your browser's language/region — to force 12- or 24-hour time, pick a specific locale. With ISO 8601, weekday labels in Schedule, Habits, and Planner follow the app language.",
+      "TIME_LOCALE_DESCRIPTION": "Sets how dates and times are displayed across the app. \"System default\" follows your browser's language/region — to force 12- or 24-hour display, pick a specific locale. Time entry fields (e.g. when scheduling a task) are drawn by your browser or OS and always follow its clock format. With ISO 8601, weekday labels in Schedule, Habits, and Planner follow the app language.",
       "TIME_LOCALE_EN_GB": "English (UK): 24-hour, DD/MM/YYYY",
       "TIME_LOCALE_EN_US": "English (US): 12-hour AM/PM, MM/DD/YYYY",
       "TIME_LOCALE_ES_ES": "Spanish: 24-hour, DD/MM/YYYY",
@@ -2701,6 +2779,7 @@
       "ZH_TW": "中文(繁體)"
     },
     "MISC": {
+      "APPEARANCE": "Appearance",
       "DARK_MODE": "Dark Mode",
       "DARK_MODE_ARIA_LABEL": "Dark mode selection",
       "DARK_MODE_DARK": "Dark",
@@ -2733,7 +2812,7 @@
       "START_OF_NEXT_DAY_HINT": "The time when your day starts (Format: HH:mm, e.g. 02:30)",
       "THEME": "Theme",
       "THEME_EXPERIMENTAL": "Theme (experimental)",
-      "THEME_INSTALL_BUTTON": "Install theme…",
+      "THEME_INSTALL_BUTTON": "Install theme",
       "THEME_INSTALL_TOOLTIP": "Upload a CSS theme file. Themes only change visuals — never run code — but they can still affect how your data is rendered. Only install themes from sources you trust.",
       "THEME_INSTALLED_WITH_WARNINGS": "Theme installed. Missing tokens: {{tokens}}",
       "THEME_INVALID_CSS_FILE": "Could not install theme: invalid or unsafe CSS file.",
@@ -2742,7 +2821,7 @@
       "THEME_SELECT_LABEL": "Select Theme",
       "TITLE": "Misc Settings",
       "WALLPAPER": "Wallpaper",
-      "WALLPAPER_BUTTON": "Set wallpaper…",
+      "WALLPAPER_BUTTON": "Set wallpaper",
       "WALLPAPER_DIALOG_TITLE": "Global wallpaper",
       "WALLPAPER_HINT": "Shown on pages without their own background (Planner, Schedule, Boards, Settings…). Tags and projects with their own image override it."
     },
@@ -2776,7 +2855,8 @@
       "LUNCH_BREAK_START_END_DESCRIPTION": "e.g. 13:00",
       "MONTH": "Month",
       "TITLE": "Schedule",
-      "WORK_START_END_DESCRIPTION": "e.g. 17:00"
+      "WORK_END_DESCRIPTION": "e.g. 17:00",
+      "WORK_START_DESCRIPTION": "e.g. 9:00"
     },
     "SHORT_SYNTAX": {
       "HELP": "<p>Here you can control short syntax options when creating a task</p>",
@@ -3095,6 +3175,8 @@
     "SHARE_SUCCESS": "Project shared on Plainspace. Tasks assigned to you will import automatically.",
     "SPACE_PICKER": {
       "CREATE_NEW": "Create new space",
+      "DISCONNECT": "Disconnect account",
+      "DISCONNECT_HINT": "Disconnecting removes the saved account from this device. Existing project integrations keep syncing. To stop them, open each relevant Plainspace integration in the issue provider panel and choose its gear icon → Delete.",
       "ERROR": "Couldn't reach Plainspace. Check your connection and that your token is still valid, then try again.",
       "INTRO": "Link an existing space to import the tasks assigned to you, or create a new one.",
       "LINK": "Link space",
