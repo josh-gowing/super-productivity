@@ -993,7 +993,6 @@
         "MSG": "Are you sure you want to delete the project \"{{title}}\"?"
       },
       "D_RENAME": {
-        "LABEL": "Project name",
         "PLACEHOLDER": "Enter project name"
       },
       "COMPLETE": {
@@ -1769,7 +1768,6 @@
         "CONFIRM_MSG": "Do you really want to delete the tag \"{{tagName}}\"? It will be removed from all tasks. This cannot be undone!"
       },
       "D_RENAME": {
-        "LABEL": "Tag name",
         "PLACEHOLDER": "Enter tag name"
       },
       "D_EDIT": {
@@ -1940,10 +1938,6 @@
       },
       "D_DEADLINE": {
         "ADD_TIME": "Add time",
-        "QA_NEXT_MONTH": "Next month",
-        "QA_NEXT_WEEK": "Next week",
-        "QA_TODAY": "Today",
-        "QA_TOMORROW": "Tomorrow",
         "REMIND_AT": "Remind at",
         "REMOVE_DEADLINE": "Remove deadline",
         "RO_1H": "1 hour before",
@@ -2497,6 +2491,8 @@
     "MOVE_BACKWARD": "Move backward",
     "MOVE_FORWARD": "Move forward",
     "NEXT": "Next",
+    "NEXT_MONTH": "Next month",
+    "NEXT_WEEK": "Next week",
     "NO_CON": "You are currently offline. Please reconnect to the internet.",
     "NONE": "None",
     "OK": "Ok",
@@ -2512,8 +2508,10 @@
     "SHARE": "Share",
     "SUBMIT": "Submit",
     "TITLE": "Title",
+    "TODAY": "Today",
     "TODAY_TAG_TITLE": "Today",
     "TOGGLE_PASSWORD_VISIBILITY": "Toggle password visibility",
+    "TOMORROW": "Tomorrow",
     "UNDO": "Undo",
     "WITHOUT_PROJECT": "Without Project",
     "YESTERDAY": "Yesterday"
@@ -3144,12 +3142,13 @@
       "CONNECT": "Connect",
       "CONNECTING": "Connecting…",
       "INTRO": "Collaborate on projects with others. Tasks assigned to you import automatically and stay in sync.",
-      "INVALID": "That token didn't work. Make sure you copied the whole token (it starts with \"pat_\") and try again.",
+      "INVALID": "Plainspace rejected that token. It may be expired or revoked — create a new one and paste it again.",
       "OPEN_LINK": "Open Plainspace",
       "TITLE": "Connect to Plainspace",
       "TOKEN_HELP": "Create an API token on Plainspace, then paste it below.",
       "TOKEN_LABEL": "API token",
-      "TOKEN_PLACEHOLDER": "pat_…"
+      "TOKEN_PLACEHOLDER": "pat_…",
+      "UNREACHABLE": "Couldn't reach Plainspace. Check your internet connection and the host, then try again."
     },
     "FORM": {
       "HOST": "Plainspace host",
