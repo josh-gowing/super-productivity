@@ -1,5 +1,8 @@
 import { fakeAsync, flush, TestBed, tick } from '@angular/core/testing';
-import { OperationLogDownloadService } from './operation-log-download.service';
+import {
+  OperationLogDownloadService,
+  RemoteOpsDownloadOptions,
+} from './operation-log-download.service';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { LockService } from './lock.service';
 import { SnackService } from '../../core/snack/snack.service';
@@ -10,7 +13,12 @@ import {
 } from '../sync-providers/provider.interface';
 import { SyncProviderId } from '../sync-providers/provider.const';
 import { ActionType, OpType } from '../core/operation.types';
-import { CLOCK_DRIFT_THRESHOLD_MS } from '../core/operation-log.const';
+import {
+  CLOCK_DRIFT_THRESHOLD_MS,
+  DOWNLOAD_PAGE_SIZE,
+  MAX_DOWNLOAD_ITERATIONS,
+  MAX_DOWNLOAD_OPS_IN_MEMORY,
+} from '../core/operation-log.const';
 import { OpLog } from '../../core/log';
 import { T } from '../../t.const';
 import {
@@ -151,6 +159,156 @@ describe('OperationLogDownloadService', () => {
         // The download layer never advances the cursor; that decision belongs
         // to the caller after RemoteOpsProcessingService reports the block.
         expect(mockApiProvider.setLastServerSeq).not.toHaveBeenCalled();
+      });
+
+      describe('backlog larger than one download pass (#8763)', () => {
+        const pageOfOps = (
+          sinceSeq: number,
+          pageSize: number,
+        ): { serverSeq: number; receivedAt: number; op: SyncOperation }[] =>
+          Array.from({ length: pageSize }, (_, i) => ({
+            serverSeq: sinceSeq + i + 1,
+            receivedAt: 0,
+            op: {
+              id: `op-${sinceSeq + i + 1}`,
+              clientId: 'other-client',
+              actionType: '[Task] Update' as ActionType,
+              opType: OpType.Update,
+              entityType: 'TASK',
+              entityId: 'task-1',
+              payload: {},
+              vectorClock: { otherClient: sinceSeq + i + 1 },
+              timestamp: 0,
+              schemaVersion: 1,
+            },
+          }));
+
+        const serveEndlessBacklog = (pageSize: number): void => {
+          mockApiProvider.downloadOps.and.callFake(async (sinceSeq: number) => ({
+            ops: pageOfOps(sinceSeq, pageSize),
+            hasMore: true,
+            latestSeq: Number.MAX_SAFE_INTEGER,
+          }));
+        };
+
+        it('returns the downloaded prefix with a checkpoint cursor once the memory cap is reached', async () => {
+          serveEndlessBacklog(DOWNLOAD_PAGE_SIZE);
+
+          const result = await service.downloadRemoteOps(mockApiProvider);
+
+          expect(result.success).toBeTrue();
+          expect(result.newOps.length).toBe(MAX_DOWNLOAD_OPS_IN_MEMORY);
+          expect(result.newOps[result.newOps.length - 1].id).toBe(
+            `op-${MAX_DOWNLOAD_OPS_IN_MEMORY}`,
+          );
+          // The cursor must stop at the last op handed to the caller, not at the
+          // server's head, so the next sync resumes where this one stopped.
+          expect(result.latestServerSeq).toBe(MAX_DOWNLOAD_OPS_IN_MEMORY);
+          expect(mockApiProvider.downloadOps).toHaveBeenCalledTimes(
+            MAX_DOWNLOAD_OPS_IN_MEMORY / DOWNLOAD_PAGE_SIZE,
+          );
+          // More remains on the server, so the remote was not fully checked.
+          expect(mockSuperSyncStatusService.markRemoteChecked).not.toHaveBeenCalled();
+          expect(service.hasUnseenRemoteOps()).toBeTrue();
+        });
+
+        it('clears the unseen-backlog flag once a pass reaches the head', async () => {
+          serveEndlessBacklog(1);
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(service.hasUnseenRemoteOps()).toBeTrue();
+
+          mockApiProvider.downloadOps.and.resolveTo({
+            ops: [],
+            hasMore: false,
+            latestSeq: MAX_DOWNLOAD_ITERATIONS,
+          });
+          await service.downloadRemoteOps(mockApiProvider);
+
+          expect(service.hasUnseenRemoteOps()).toBeFalse();
+        });
+
+        it('announces each new checkpoint once, so a stalled pass cannot loop', async () => {
+          let announcements = 0;
+          const sub = service.remoteBacklogRemains$.subscribe(() => announcements++);
+          serveEndlessBacklog(1);
+
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(announcements).toBe(1);
+
+          // Cursor did not advance (e.g. the apply failed): same checkpoint again.
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(announcements).toBe(1);
+
+          mockApiProvider.getLastServerSeq.and.resolveTo(MAX_DOWNLOAD_ITERATIONS);
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(announcements).toBe(2);
+          sub.unsubscribe();
+        });
+
+        it('does not announce a pass that reaches the head', async () => {
+          let announcements = 0;
+          const sub = service.remoteBacklogRemains$.subscribe(() => announcements++);
+          mockApiProvider.downloadOps.and.resolveTo({
+            ops: pageOfOps(0, 3),
+            hasMore: false,
+            latestSeq: 3,
+          });
+
+          await service.downloadRemoteOps(mockApiProvider);
+
+          expect(announcements).toBe(0);
+          sub.unsubscribe();
+        });
+
+        it('announces a lower checkpoint after a server reset without retrying a stalled apply', async () => {
+          let announcements = 0;
+          const sub = service.remoteBacklogRemains$.subscribe(() => announcements++);
+          mockApiProvider.getLastServerSeq.and.resolveTo(MAX_DOWNLOAD_ITERATIONS);
+          serveEndlessBacklog(1);
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(announcements).toBe(1);
+
+          const oldCursor = 2 * MAX_DOWNLOAD_ITERATIONS;
+          mockApiProvider.getLastServerSeq.and.resolveTo(oldCursor);
+          mockApiProvider.downloadOps.and.callFake(async (sinceSeq: number) => ({
+            ops: sinceSeq === oldCursor ? [] : pageOfOps(sinceSeq, 1),
+            gapDetected: sinceSeq === oldCursor,
+            hasMore: true,
+            latestSeq: MAX_DOWNLOAD_ITERATIONS + 100,
+          }));
+
+          const result = await service.downloadRemoteOps(mockApiProvider);
+          expect(result.latestServerSeq).toBe(MAX_DOWNLOAD_ITERATIONS - 1);
+          expect(announcements).toBe(2);
+
+          // A failed apply leaves the old cursor behind: the same gap and
+          // checkpoint must not schedule another automatic retry forever.
+          await service.downloadRemoteOps(mockApiProvider);
+          expect(announcements).toBe(2);
+          sub.unsubscribe();
+        });
+
+        it('returns the downloaded prefix once the page-iteration cap is reached', async () => {
+          serveEndlessBacklog(1);
+
+          const result = await service.downloadRemoteOps(mockApiProvider);
+
+          expect(result.success).toBeTrue();
+          expect(result.newOps.length).toBe(MAX_DOWNLOAD_ITERATIONS);
+          expect(result.latestServerSeq).toBe(MAX_DOWNLOAD_ITERATIONS);
+        });
+
+        it('still fails a forced seq-0 download instead of returning a partial history', async () => {
+          serveEndlessBacklog(DOWNLOAD_PAGE_SIZE);
+          spyOn(OpLog, 'error');
+
+          const result = await service.downloadRemoteOps(mockApiProvider, {
+            forceFromSeq0: true,
+          });
+
+          expect(result.success).toBeFalse();
+          expect(result.newOps).toEqual([]);
+        });
       });
 
       describe('encrypted ops with no key — log severity (Fix B)', () => {
@@ -486,6 +644,180 @@ describe('OperationLogDownloadService', () => {
           }),
           jasmine.objectContaining({ opId: 'op-after-gap' }),
         );
+      });
+
+      // #9256: a fresh install decrypted ~30.5k ops, then one page failed and
+      // the whole run was discarded, leaving the device with nothing.
+      describe('keepDecryptedPrefix', () => {
+        const encryptedServerOp = (
+          serverSeq: number,
+          id: string,
+        ): { serverSeq: number; receivedAt: number; op: SyncOperation } => ({
+          serverSeq,
+          receivedAt: Date.now(),
+          op: {
+            id,
+            clientId: 'c1',
+            actionType: '[Task] Add' as ActionType,
+            opType: OpType.Create,
+            entityType: 'TASK',
+            payload: `ciphertext-${id}`,
+            isPayloadEncrypted: true,
+            vectorClock: {},
+            timestamp: Date.now(),
+            schemaVersion: 1,
+          },
+        });
+        const decryptError = (opId: string): OperationDecryptionError =>
+          new OperationDecryptionError({
+            encryptedOperationCount: 1,
+            decryptedCount: 0,
+            parsedCount: 0,
+            passwordEvidence: 'no-operation-decrypted',
+            failures: [{ operationId: opId, encryptedBatchIndex: 0, stage: 'decrypt' }],
+          });
+        // Page 1 (seq 1-2) decrypts; page 2 (seq 3, 'op-bad') does not.
+        const serveGoodPageThenBadPage = (): OperationDecryptionError => {
+          const error = decryptError('op-bad');
+          mockApiProvider.getEncryptKey = jasmine
+            .createSpy('getEncryptKey')
+            .and.returnValue(Promise.resolve('key'));
+          mockApiProvider.getLastServerSeq.and.returnValue(Promise.resolve(0));
+          mockApiProvider.downloadOps.and.returnValues(
+            Promise.resolve({
+              ops: [encryptedServerOp(1, 'op-a'), encryptedServerOp(2, 'op-b')],
+              hasMore: true,
+              latestSeq: 3,
+            }),
+            Promise.resolve({
+              ops: [encryptedServerOp(3, 'op-bad')],
+              hasMore: false,
+              latestSeq: 3,
+            }),
+          );
+          mockEncryptionService.decryptOperations.and.callFake(async (ops) => {
+            if (ops.some((op) => op.id === 'op-bad')) {
+              throw error;
+            }
+            return ops.map((op) => ({ ...op, payload: {}, isPayloadEncrypted: false }));
+          });
+          return error;
+        };
+
+        it('keeps the decrypted pages and stops the cursor before the failing page', async () => {
+          const errorSpy = spyOn(OpLog, 'error');
+          const error = serveGoodPageThenBadPage();
+
+          const result = await service.downloadRemoteOps(mockApiProvider, {
+            keepDecryptedPrefix: true,
+          });
+
+          expect(result.success).toBeTrue();
+          expect(result.newOps.map((op) => op.id)).toEqual(['op-a', 'op-b']);
+          // The caller persists this as the cursor, so the next download starts
+          // at the failing page and raises the decrypt error there.
+          expect(result.success && result.latestServerSeq).toBe(2);
+          // Handed to the caller, which throws it after applying the prefix.
+          expect(result.success && result.decryptErrorAfterKeptPrefix).toBe(error);
+          // Stopped short of the server head, so not a completed remote check.
+          expect(mockSuperSyncStatusService.markRemoteChecked).not.toHaveBeenCalled();
+          expect(errorSpy).toHaveBeenCalledWith(
+            'OperationLogDownloadService: Encrypted operation batch could not be processed.',
+            jasmine.objectContaining({ decryptedOpsInEarlierBatches: 2 }),
+            jasmine.objectContaining({ opId: 'op-bad' }),
+          );
+        });
+
+        it('still throws when the failing page is the first page of the run', async () => {
+          const error = decryptError('op-bad');
+          mockApiProvider.getEncryptKey = jasmine
+            .createSpy('getEncryptKey')
+            .and.returnValue(Promise.resolve('key'));
+          mockApiProvider.getLastServerSeq.and.returnValue(Promise.resolve(2));
+          mockApiProvider.downloadOps.and.returnValue(
+            Promise.resolve({
+              ops: [encryptedServerOp(3, 'op-bad')],
+              hasMore: false,
+              latestSeq: 3,
+            }),
+          );
+          mockEncryptionService.decryptOperations.and.rejectWith(error);
+
+          await expectAsync(
+            service.downloadRemoteOps(mockApiProvider, { keepDecryptedPrefix: true }),
+          ).toBeRejectedWith(error);
+        });
+
+        // Each of these either replaces local state wholesale or resolves a
+        // conflict the server detected against its full head, so a prefix
+        // would be applied as if it were the whole server history.
+        const cases: { name: string; options: RemoteOpsDownloadOptions }[] = [
+          { name: 'without the opt-in', options: {} },
+          {
+            name: 'on a forced seq-0 download',
+            options: { keepDecryptedPrefix: true, forceFromSeq0: true },
+          },
+          {
+            name: 'on a re-delivery retry',
+            options: { keepDecryptedPrefix: true, isReDeliveryRetry: true },
+          },
+          {
+            name: 'on a raw rebuild',
+            options: { keepDecryptedPrefix: true, includeOwnAndAppliedOps: true },
+          },
+        ];
+        for (const { name, options } of cases) {
+          it(`discards the run and throws ${name}`, async () => {
+            spyOn(OpLog, 'error');
+            const error = serveGoodPageThenBadPage();
+
+            await expectAsync(
+              service.downloadRemoteOps(mockApiProvider, options),
+            ).toBeRejectedWith(error);
+          });
+        }
+
+        it('discards the run and throws for file-based providers', async () => {
+          spyOn(OpLog, 'error');
+          const error = serveGoodPageThenBadPage();
+          mockApiProvider.providerMode = 'fileSnapshotOps';
+
+          await expectAsync(
+            service.downloadRemoteOps(mockApiProvider, { keepDecryptedPrefix: true }),
+          ).toBeRejectedWith(error);
+        });
+
+        it('discards the run and throws after a gap reset', async () => {
+          spyOn(OpLog, 'error');
+          const error = decryptError('op-bad');
+          mockApiProvider.getEncryptKey = jasmine
+            .createSpy('getEncryptKey')
+            .and.returnValue(Promise.resolve('key'));
+          mockApiProvider.getLastServerSeq.and.returnValue(Promise.resolve(100));
+          mockApiProvider.downloadOps.and.returnValues(
+            Promise.resolve({ ops: [], hasMore: false, latestSeq: 3, gapDetected: true }),
+            Promise.resolve({
+              ops: [encryptedServerOp(1, 'op-a'), encryptedServerOp(2, 'op-b')],
+              hasMore: true,
+              latestSeq: 3,
+            }),
+            Promise.resolve({
+              ops: [encryptedServerOp(3, 'op-bad')],
+              hasMore: false,
+              latestSeq: 3,
+            }),
+          );
+          mockEncryptionService.decryptOperations.and.callFake(async (ops) => {
+            if (ops.some((op) => op.id === 'op-bad')) {
+              throw error;
+            }
+            return ops.map((op) => ({ ...op, payload: {}, isPayloadEncrypted: false }));
+          });
+
+          await expectAsync(
+            service.downloadRemoteOps(mockApiProvider, { keepDecryptedPrefix: true }),
+          ).toBeRejectedWith(error);
+        });
       });
 
       // GHSA-8pxh-mgc7-gp3g: reject an inbound plaintext op when SuperSync

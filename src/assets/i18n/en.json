@@ -1258,8 +1258,7 @@
       "BTN_SHOW_DEVICES": "Show Connected Devices",
       "BTN_SYNC_NOW": "Sync Now",
       "C": {
-        "FORCE_UPLOAD": "This will REPLACE all data on the server and on every other device with this device's local copy. Any unsynced changes on those devices will be permanently lost. Continue?",
-        "DECRYPT_OVERWRITE": "This will REPLACE the encrypted data on the server with this device's local copy and re-encrypt it with the new password. All other devices will need to re-enter the password and download the replaced data. Any unsynced changes on those devices will be permanently lost. Continue?"
+        "FORCE_UPLOAD": "This will REPLACE all data on the server and on every other device with this device's local copy. Any unsynced changes on those devices will be permanently lost. Continue?"
       },
       "CONFLICT_REVIEW": {
         "PAGE_TITLE": "Sync Conflicts",
@@ -1359,11 +1358,10 @@
         "UNKNOWN_ERROR": "Unknown Sync Error: {{err}}"
       },
       "D_DECRYPT_ERROR": {
-        "BTN_OVER_WRITE_REMOTE": "Overwrite Server & Other Devices",
         "CHANGE_PW_AND_DECRYPT": "Retry Decrypt",
         "P1": "Your remote data is encrypted and decryption failed.",
         "P2_FORGOT_PW": "If you <strong>forgot your password</strong>, enter the correct password and click \"Retry Decrypt\".",
-        "P3_PW_CHANGED": "If you <strong>changed your password on another device</strong>, enter your new password and click <strong>Overwrite Server & Other Devices</strong>. ⚠️ This is destructive: it replaces ALL data on the server and on your other devices with this device's local copy. Any unsynced changes on those devices will be lost.",
+        "P3_START_OVER": "If you cannot recover the password, leave the sync server as it is \u2014 your data there stays intact. To erase it and start over from this device, close this window and use <strong>Force Overwrite</strong> in Settings \u2192 Sync & Backup \u2192 Sync.",
         "PASSWORD": "Password",
         "TITLE": "Decryption Failed"
       },
@@ -1673,6 +1671,7 @@
         "DECRYPTION_FAILED": "Failed to decrypt synced data. Please check your encryption password.",
         "DEFERRED_ACTION_FAILED": "Some changes made during sync could not be saved yet. The next sync will retry; keep the app open.",
         "DEFERRED_ACTION_PERMANENT_FAILED": "A change could not be saved and sync is paused. Reload to restore the last saved state.",
+        "DEFERRED_ACTIONS_STUCK": "Sync seems stuck. Your recent changes are waiting and have not been saved yet. Reloading the app recovers sync but discards them.",
         "DISABLE_ENCRYPTION_FAILED": "Failed to disable encryption: {{message}}",
         "ENABLE_ENCRYPTION_FAILED": "Failed to enable encryption: {{message}}",
         "ENCRYPTION_PASSWORD_REQUIRED": "Encrypted data received but no encryption password is configured. Please set your encryption password in sync settings.",
@@ -1734,7 +1733,6 @@
         "SYNC_DATA_RECOVERED_FROM_BACKUP": "Recovered sync data from backup after the main file could not be read.",
         "SYNC_VALIDATION_FAILED": "State validation failed after sync. Some data may be inconsistent.",
         "TIMEOUT_ERROR": "Sync operation timed out. {{suggestion}}",
-        "TOO_MANY_OPS_TO_DOWNLOAD": "Too many sync operations to download. Some changes may be missing.",
         "UNKNOWN_ERROR": "Unknown Sync Error: {{err}}",
         "UNSUPPORTED_MULTI_ENTITY_CONFLICT": "Sync stopped because some changes cannot be merged safely. Choose Resolve… or sync manually to choose which version to keep. This replaces all data on one side. Please report this code: {{details}}",
         "UPLOAD_ERROR": "Unknown Upload Error (Settings correct?): {{err}}",
@@ -2482,6 +2480,7 @@
     "PRIVACY_EXPORT_DESCRIPTION": "Export anonymized data (to send to contact@super-productivity.com for debugging)",
     "S_BACKUP_DOWNLOADED": "Backup exported",
     "S_ERR_IMPORT_FAILED": "Importing data failed",
+    "S_ERR_IMPORT_UNREPAIRABLE": "Import failed: this backup contains data that can't be repaired. Please try an older backup, and export your logs and report the issue.",
     "S_ERR_INVALID_DATA": "Import failed: Invalid JSON",
     "S_ERR_INVALID_URL": "Import failed: Invalid URL provided",
     "S_ERR_NETWORK": "Import failed: Network error while fetching data from URL",
@@ -3261,6 +3260,12 @@
     "MENU_ENTRY_ICON_STRING": "Menu entry icon must be a string",
     "MENU_ENTRY_LABEL_REQUIRED": "Menu entry label is required",
     "MENU_ENTRY_ONCLICK_REQUIRED": "Menu entry onClick handler is required",
+    "TASK_CONTEXT_MENU_ACTIONS": "Plugin actions",
+    "TASK_CONTEXT_MENU_ENTRY_ID_INVALID": "Task context menu entry ID must match [a-z0-9][a-z0-9_-]{0,63}",
+    "TASK_CONTEXT_MENU_ENTRY_LABEL_INVALID": "Task context menu entry label must be 1-{{maxLength}} characters",
+    "TASK_CONTEXT_MENU_ENTRY_ICON_INVALID": "Task context menu entry icon must be a Material icon name",
+    "TASK_CONTEXT_MENU_ENTRY_ONCLICK_REQUIRED": "Task context menu entry onClick handler is required",
+    "TASK_CONTEXT_MENU_ENTRY_TARGET_INVALID": "Task context menu entry showFor must contain TASK or SUBTASK",
     "MIN_VERSION": "Min. Version:",
     "NO_ADDITIONAL_INFO": "No additional information available",
     "NO_CONTENT_PROVIDED": "No content provided",
