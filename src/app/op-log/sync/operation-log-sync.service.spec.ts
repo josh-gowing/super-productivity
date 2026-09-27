@@ -2,7 +2,6 @@ import { TestBed } from '@angular/core/testing';
 import { TabSeqFrontierService } from '../persistence/tab-seq-frontier.service';
 import { OperationLogSyncService } from './operation-log-sync.service';
 import { SyncLocalStateService } from './sync-local-state.service';
-import { FILE_BASED_SYNC_CONSTANTS } from '../sync-providers/file-based/file-based-sync.types';
 import { SchemaMigrationService } from '../persistence/schema-migration.service';
 import { OperationLogHydratorService } from '../persistence/operation-log-hydrator.service';
 import { SnackService } from '../../core/snack/snack.service';
@@ -33,7 +32,6 @@ import { SyncImportFilterService } from './sync-import-filter.service';
 import { ServerMigrationService } from './server-migration.service';
 import { SupersededOperationResolverService } from './superseded-operation-resolver.service';
 import { RemoteOpsProcessingService } from './remote-ops-processing.service';
-import { ConflictJournalService } from './conflict-journal.service';
 import { LocalDraftService } from '../../core/draft/local-draft.service';
 import { RejectedOpsHandlerService } from './rejected-ops-handler.service';
 import { OperationWriteFlushService } from './operation-write-flush.service';
@@ -98,7 +96,6 @@ describe('OperationLogSyncService', () => {
   let opLogStoreSpy: jasmine.SpyObj<OperationLogStoreService>;
   let serverMigrationServiceSpy: jasmine.SpyObj<ServerMigrationService>;
   let remoteOpsProcessingServiceSpy: jasmine.SpyObj<RemoteOpsProcessingService>;
-  let conflictJournalServiceSpy: jasmine.SpyObj<ConflictJournalService>;
   let localDraftServiceSpy: jasmine.SpyObj<LocalDraftService>;
   let rejectedOpsHandlerServiceSpy: jasmine.SpyObj<RejectedOpsHandlerService>;
   let writeFlushServiceSpy: jasmine.SpyObj<OperationWriteFlushService>;
@@ -152,7 +149,6 @@ describe('OperationLogSyncService', () => {
       'markSynced',
       'markRejected',
       'setVectorClock',
-      'clearFullStateOps',
       'getVectorClock',
       'appendBatchSkipDuplicates',
       'appendSnapshotIncludedOps',
@@ -180,7 +176,6 @@ describe('OperationLogSyncService', () => {
     opLogStoreSpy.getFailedRemoteOps.and.resolveTo([]);
     opLogStoreSpy.markSynced.and.resolveTo();
     opLogStoreSpy.setVectorClock.and.resolveTo();
-    opLogStoreSpy.clearFullStateOps.and.resolveTo();
     opLogStoreSpy.getVectorClock.and.resolveTo(null);
     opLogStoreSpy.appendBatchSkipDuplicates.and.resolveTo({
       seqs: [],
@@ -262,10 +257,6 @@ describe('OperationLogSyncService', () => {
       'validateAfterSync',
     ]);
     remoteOpsProcessingServiceSpy.validateAfterSync.and.resolveTo(true);
-    conflictJournalServiceSpy = jasmine.createSpyObj('ConflictJournalService', [
-      'clearAll',
-    ]);
-    conflictJournalServiceSpy.clearAll.and.resolveTo();
     localDraftServiceSpy = jasmine.createSpyObj('LocalDraftService', ['deleteAllDrafts']);
     remoteOpsProcessingServiceSpy.processRemoteOps.and.resolveTo({
       localWinOpsCreated: 0,
@@ -401,10 +392,6 @@ describe('OperationLogSyncService', () => {
           ]),
         },
         { provide: RemoteOpsProcessingService, useValue: remoteOpsProcessingServiceSpy },
-        {
-          provide: ConflictJournalService,
-          useValue: conflictJournalServiceSpy,
-        },
         { provide: LocalDraftService, useValue: localDraftServiceSpy },
         { provide: RejectedOpsHandlerService, useValue: rejectedOpsHandlerServiceSpy },
         { provide: OperationWriteFlushService, useValue: writeFlushServiceSpy },
@@ -4646,25 +4633,9 @@ describe('OperationLogSyncService', () => {
             schemaVersion: 1,
           });
 
-          const withAutoMergeEnabled = async (fn: () => Promise<void>): Promise<void> => {
-            const prev = FILE_BASED_SYNC_CONSTANTS.AUTO_MERGE_CONCURRENT_SNAPSHOT;
-            (
-              FILE_BASED_SYNC_CONSTANTS as { AUTO_MERGE_CONCURRENT_SNAPSHOT: boolean }
-            ).AUTO_MERGE_CONCURRENT_SNAPSHOT = true;
-            try {
-              await fn();
-            } finally {
-              (
-                FILE_BASED_SYNC_CONSTANTS as { AUTO_MERGE_CONCURRENT_SNAPSHOT: boolean }
-              ).AUTO_MERGE_CONCURRENT_SNAPSHOT = prev;
-            }
-          };
-
-          it('(c) CONCURRENT snapshot with meaningful local data falls back to the dialog when auto-merge is disabled (the default)', async () => {
-            // Review follow-up: auto-merge defaults OFF, so a CONCURRENT seq-0
-            // snapshot with meaningful local data must surface the user-recoverable
-            // conflict dialog rather than silently merging.
-            expect(FILE_BASED_SYNC_CONSTANTS.AUTO_MERGE_CONCURRENT_SNAPSHOT).toBe(false);
+          it('(c) CONCURRENT snapshot with meaningful local data shows the conflict dialog', async () => {
+            // A CONCURRENT seq-0 snapshot with meaningful local data must
+            // surface the user-recoverable conflict dialog.
             opLogStoreSpy.getUnsynced.and.returnValue(
               Promise.resolve([meaningfulLocalOp({ clientA: 5 })]),
             );
@@ -4698,98 +4669,44 @@ describe('OperationLogSyncService', () => {
             expect(remoteOpsProcessingServiceSpy.processRemoteOps).not.toHaveBeenCalled();
           });
 
-          it('(d) auto-merges via LWW when enabled AND retained ops bridge the full gap', async () => {
-            // Local {clientA:5}, snapshot {clientB:3} — CONCURRENT. The retained op
-            // clocks reconstruct the snapshot on top of local
-            // (local ⊔ {clientB:3} = {clientA:5,clientB:3} ⊒ {clientB:3}), so the
-            // merge is provably lossless and runs instead of the dialog.
-            await withAutoMergeEnabled(async () => {
-              opLogStoreSpy.getUnsynced.and.returnValue(
-                Promise.resolve([meaningfulLocalOp({ clientA: 5 })]),
-              );
-              opLogStoreSpy.getVectorClock.and.resolveTo({ clientA: 5 });
-
-              const syncHydrationServiceSpy = TestBed.inject(
-                SyncHydrationService,
-              ) as jasmine.SpyObj<SyncHydrationService>;
-              syncHydrationServiceSpy.hydrateFromRemoteSync.and.resolveTo();
-
-              const remoteOp = remoteOpWithClock({ clientB: 3 });
-              downloadServiceSpy.downloadRemoteOps.and.returnValue(
-                Promise.resolve({
-                  newOps: [remoteOp],
-                  allOpClocks: [{ clientB: 3 }],
-                  hasMore: false,
-                  latestSeq: 1,
-                  needsFullStateUpload: false,
-                  success: true,
-                  providerMode: 'fileSnapshotOps',
-                  failedFileCount: 0,
-                  snapshotState: { tasks: [{ id: 'remote-task' }] },
-                  snapshotVectorClock: { clientB: 3 },
-                  latestServerSeq: 1,
-                }),
-              );
-
-              const mockProvider = {
-                isReady: () => Promise.resolve(true),
-                supportsOperationSync: true,
-                setLastServerSeq: jasmine.createSpy('setLastServerSeq').and.resolveTo(),
-              } as any;
-
-              const result = await service.downloadRemoteOps(mockProvider);
-              expect(remoteOpsProcessingServiceSpy.processRemoteOps).toHaveBeenCalledWith(
-                [remoteOp],
-              );
-              expect(
-                syncHydrationServiceSpy.hydrateFromRemoteSync,
-              ).not.toHaveBeenCalled();
-              expect(result.kind).toBe('ops_processed');
-            });
-          });
-
-          it('(e) refuses to auto-merge and falls back to the dialog when the snapshot base holds compacted ops the client never saw', async () => {
+          it('(d) shows the dialog when the snapshot base holds compacted ops the client never saw', async () => {
             // The data-loss case: snapshot clock {clientB:3, clientC:2} but only
             // clientB:3 survives as a retained op — clientC:2 was compacted into the
             // snapshot base. Replaying recentOps on top of local {clientA:5} yields
             // {clientA:5, clientB:3}, which is CONCURRENT with the snapshot (missing
             // clientC:2). Merging only recentOps would silently drop clientC's
-            // entities, so the guard must refuse and surface the dialog.
-            await withAutoMergeEnabled(async () => {
-              opLogStoreSpy.getUnsynced.and.returnValue(
-                Promise.resolve([meaningfulLocalOp({ clientA: 5 })]),
-              );
-              opLogStoreSpy.getVectorClock.and.resolveTo({ clientA: 5 });
+            // entities, so the conflict must surface the dialog.
+            opLogStoreSpy.getUnsynced.and.returnValue(
+              Promise.resolve([meaningfulLocalOp({ clientA: 5 })]),
+            );
+            opLogStoreSpy.getVectorClock.and.resolveTo({ clientA: 5 });
 
-              downloadServiceSpy.downloadRemoteOps.and.returnValue(
-                Promise.resolve({
-                  newOps: [remoteOpWithClock({ clientB: 3 })],
-                  allOpClocks: [{ clientB: 3 }],
-                  hasMore: false,
-                  latestSeq: 1,
-                  needsFullStateUpload: false,
-                  success: true,
-                  providerMode: 'fileSnapshotOps',
-                  failedFileCount: 0,
-                  snapshotState: { tasks: [{ id: 'remote-task' }] },
-                  snapshotVectorClock: { clientB: 3, clientC: 2 },
-                  latestServerSeq: 1,
-                }),
-              );
+            downloadServiceSpy.downloadRemoteOps.and.returnValue(
+              Promise.resolve({
+                newOps: [remoteOpWithClock({ clientB: 3 })],
+                allOpClocks: [{ clientB: 3 }],
+                hasMore: false,
+                latestSeq: 1,
+                needsFullStateUpload: false,
+                success: true,
+                providerMode: 'fileSnapshotOps',
+                failedFileCount: 0,
+                snapshotState: { tasks: [{ id: 'remote-task' }] },
+                snapshotVectorClock: { clientB: 3, clientC: 2 },
+                latestServerSeq: 1,
+              }),
+            );
 
-              const mockProvider = {
-                isReady: () => Promise.resolve(true),
-                supportsOperationSync: true,
-                setLastServerSeq: jasmine.createSpy('setLastServerSeq').and.resolveTo(),
-              } as any;
+            const mockProvider = {
+              isReady: () => Promise.resolve(true),
+              supportsOperationSync: true,
+              setLastServerSeq: jasmine.createSpy('setLastServerSeq').and.resolveTo(),
+            } as any;
 
-              await expectAsync(service.downloadRemoteOps(mockProvider)).toBeRejectedWith(
-                jasmine.any(LocalDataConflictError),
-              );
-              expect(
-                remoteOpsProcessingServiceSpy.processRemoteOps,
-              ).not.toHaveBeenCalled();
-            });
+            await expectAsync(service.downloadRemoteOps(mockProvider)).toBeRejectedWith(
+              jasmine.any(LocalDataConflictError),
+            );
+            expect(remoteOpsProcessingServiceSpy.processRemoteOps).not.toHaveBeenCalled();
           });
         });
 

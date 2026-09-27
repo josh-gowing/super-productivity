@@ -23,7 +23,6 @@ import { LockService } from './lock.service';
 import { toEntityKey } from '../util/entity-key.util';
 import { LOCK_NAMES } from '../core/operation-log.const';
 import { SnackService } from '../../core/snack/snack.service';
-import { SyncConflictBannerService } from './sync-conflict-banner.service';
 import { T } from '../../t.const';
 import { CLIENT_ID_PROVIDER } from '../util/client-id.provider';
 import { uuidv7 } from '../../util/uuid-v7';
@@ -32,7 +31,6 @@ import {
   areCommutingSectionOperations,
   projectSectionReplayAgainstState,
   SectionReplayOrder,
-  SectionReplaySnapshot,
   SectionReplayStateCompensation,
 } from './section-conflict-commutativity.util';
 import { getOpEntityIds } from '../util/get-op-entity-ids.util';
@@ -43,6 +41,14 @@ import { SectionState } from '../../features/section/section.model';
 import { ProjectState } from '../../features/project/project.model';
 import { TagState } from '../../features/tag/tag.model';
 import { Task } from '../../features/tasks/task.model';
+import {
+  areCommutingReorderAndContentOperations,
+  isContentReorderOperation,
+  isReorderConflictOperation,
+  projectReorderConflictAgainstState,
+  ReorderReplaySnapshot,
+} from './reorder-conflict.util';
+import { UnsupportedMultiEntityConflictError } from '../core/errors/sync-errors';
 
 type SupersededOperation = {
   opId: string;
@@ -136,7 +142,6 @@ export class SupersededOperationResolverService {
   private conflictResolutionService = inject(ConflictResolutionService);
   private lockService = inject(LockService);
   private snackService = inject(SnackService);
-  private syncConflictBanner = inject(SyncConflictBannerService);
   private clientIdProvider = inject(CLIENT_ID_PROVIDER);
   private stateSnapshotService = inject(StateSnapshotService);
   private operationCapture = inject(OperationCaptureService);
@@ -207,7 +212,8 @@ export class SupersededOperationResolverService {
   ): SectionCausalReplayDecision {
     const existingClock = item.existingClock;
     if (
-      !CAUSALLY_REPLAYABLE_SECTION_ACTIONS.has(item.op.actionType) ||
+      (!CAUSALLY_REPLAYABLE_SECTION_ACTIONS.has(item.op.actionType) &&
+        !isReorderConflictOperation(item.op)) ||
       !existingClock ||
       compareVectorClocks(item.op.vectorClock, existingClock) !==
         VectorClockComparison.CONCURRENT
@@ -240,7 +246,8 @@ export class SupersededOperationResolverService {
       retainedConflictEntry.applicationStatus !== 'applied' ||
       retainedConflictEntry.rejectedAt !== undefined ||
       retainedConflictEntry.reducerRejectedAt !== undefined ||
-      !areCommutingSectionOperations(item.op, retainedConflictEntry.op)
+      (!areCommutingSectionOperations(item.op, retainedConflictEntry.op) &&
+        !areCommutingReorderAndContentOperations(item.op, retainedConflictEntry.op))
     ) {
       return 'fallback';
     }
@@ -254,7 +261,7 @@ export class SupersededOperationResolverService {
    * between them. Later user actions wait behind the operation-log lock for
    * persistence and therefore follow the compensation in durable order.
    */
-  private _getStableSectionReplaySnapshot(): SectionReplaySnapshot {
+  private _getStableSectionReplaySnapshot(): ReorderReplaySnapshot {
     const phantomRisk = getPhantomChangeRisk(this.operationCapture);
     if (phantomRisk) {
       throw new Error(`Cannot project SECTION conflict recovery while ${phantomRisk}.`);
@@ -264,6 +271,10 @@ export class SupersededOperationResolverService {
       section: snapshot.section as SectionState,
       project: snapshot.project as ProjectState,
       tag: snapshot.tag as TagState,
+      note: snapshot.note as ReorderReplaySnapshot['note'],
+      simpleCounter: snapshot.simpleCounter as ReorderReplaySnapshot['simpleCounter'],
+      boards: snapshot.boards as ReorderReplaySnapshot['boards'],
+      issueProvider: snapshot.issueProvider as ReorderReplaySnapshot['issueProvider'],
     };
   }
 
@@ -333,37 +344,48 @@ export class SupersededOperationResolverService {
       // entity snapshot cannot represent. Re-create one only when the exact
       // applied server row proves a commuting crossing. Project its payload
       // against one stable live-state frontier so anchors and every later local
-      // successor are represented without an action-family allowlist. Malformed
-      // or unrepresentable crossings retain the generic LWW fallback.
+      // successor are represented without an action-family allowlist. A recognized
+      // reorder without this proof must stay pending: entity LWW cannot carry it.
+      // Absolute habit counts are projected without the proof (see below).
       const regularSupersededOps: SupersededOperation[] = [];
       let sectionReplayContext: SectionCausalReplayContext | undefined;
-      let sectionReplaySnapshot: SectionReplaySnapshot | undefined;
+      let sectionReplaySnapshot: ReorderReplaySnapshot | undefined;
       for (const [itemIndex, item] of supersededOps.entries()) {
         let projectedSectionOp: Operation | undefined;
         let projectedWorkContextState: WorkContextStateProjection | undefined;
         let projectedOrder: SectionReplayOrder | undefined;
+        // An absolute dated count needs no causal proof: reissuing its
+        // current value is a local no-op and, unlike a whole-habit LWW snapshot,
+        // leaves every other field (and released receivers' SimpleCounter.type)
+        // alone. Stopping sync for it would block habit clicks.
+        const isCounterSet =
+          item.op.actionType === ActionType.COUNTER_SET_TODAY ||
+          item.op.actionType === ActionType.COUNTER_SET_FOR_DATE;
         if (
-          CAUSALLY_REPLAYABLE_SECTION_ACTIONS.has(item.op.actionType) &&
-          item.existingClock
+          isCounterSet ||
+          ((CAUSALLY_REPLAYABLE_SECTION_ACTIONS.has(item.op.actionType) ||
+            isReorderConflictOperation(item.op)) &&
+            item.existingClock)
         ) {
-          if (!sectionReplayContext) {
-            const retainedEntries = await this.opLogStore.getOpsAfterSeq(0);
-            sectionReplayContext = buildSectionCausalReplayContext(retainedEntries);
+          let replayDecision: SectionCausalReplayDecision = 'replay';
+          if (!isCounterSet) {
+            sectionReplayContext ??= buildSectionCausalReplayContext(
+              await this.opLogStore.getOpsAfterSeq(0),
+            );
+            replayDecision = this._getSectionCausalReplayDecision(
+              item,
+              sectionReplayContext,
+            );
           }
-          const replayDecision = this._getSectionCausalReplayDecision(
-            item,
-            sectionReplayContext,
-          );
           if (replayDecision === 'replay') {
             sectionReplaySnapshot ??= this._getStableSectionReplaySnapshot();
-            const projection = projectSectionReplayAgainstState(
-              item.op,
-              sectionReplaySnapshot,
-            );
+            const projection = isReorderConflictOperation(item.op)
+              ? projectReorderConflictAgainstState(item.op, sectionReplaySnapshot)
+              : projectSectionReplayAgainstState(item.op, sectionReplaySnapshot);
             if (projection.kind === 'superseded') {
               opsToReject.push(item.opId);
               OpLog.normal(
-                `SupersededOperationResolverService: SECTION intent ${item.opId} ` +
+                `SupersededOperationResolverService: Replayable intent ${item.opId} ` +
                   'was superseded by the current durable state.',
               );
               continue;
@@ -371,7 +393,7 @@ export class SupersededOperationResolverService {
             if (projection.kind === 'blocked') {
               OpLog.warn(
                 `SupersededOperationResolverService: Cannot safely project SECTION ` +
-                  `intent ${item.opId}: ${projection.reason}. Falling back to LWW.`,
+                  `intent ${item.opId}: ${projection.reason}.`,
               );
             } else if (projection.kind === 'work-context-state') {
               projectedWorkContextState = projection;
@@ -381,6 +403,20 @@ export class SupersededOperationResolverService {
               projectedWorkContextState = projection.stateCompensation;
             }
           }
+        }
+
+        // Compaction can remove the applied conflict row while retaining the
+        // unsynced reorder. Entity LWW cannot carry that list write: keep it pending.
+        if (
+          isContentReorderOperation(item.op) &&
+          !projectedSectionOp &&
+          !projectedWorkContextState
+        ) {
+          throw new UnsupportedMultiEntityConflictError(
+            'local',
+            item.op.actionType,
+            getOpEntityIds(item.op).length,
+          );
         }
 
         if (
@@ -636,12 +672,6 @@ export class SupersededOperationResolverService {
         OpLog.normal(
           `SupersededOperationResolverService: Marked ${opsToReject.length} superseded ops as rejected`,
         );
-      }
-
-      if (newOpsCreated.length > 0) {
-        // SPAP-15: surface via the journal-driven summary banner (with REVIEW)
-        // instead of a bare snack.
-        await this.syncConflictBanner.maybeShowSummaryBanner();
       }
 
       // Notify user if local changes were discarded because entities no longer exist

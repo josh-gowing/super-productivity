@@ -76,13 +76,13 @@ The Operation Log enables two types of synchronization:
 - **Resolution:** Semantic precedence and eligible disjoint-field merge run first;
   remaining conflicts resolve deterministically with LWW. Ordinary operation
   conflicts do not block on a winner dialog. Rejected rows are retained only until
-  compaction, and production conflict-journal emission is currently disabled.
+  compaction. The device-local conflict journal and review UI are retired.
 
 **B. File-provider operation transport**
 
-- The default v2 format stores a full state/archive baseline and a bounded recent-op
+- The v2 format stores a full state/archive baseline and a bounded recent-op
   buffer in one `sync-data.json`; each op-bearing upload rewrites that monolith.
-- The opt-in v3 split format makes `sync-ops.json` the hot commit point and rewrites
+- The v3 split format makes `sync-ops.json` the hot commit point and rewrites
   the snapshot/archive file only for bootstrap, compaction, migration, force-upload,
   or gap recovery.
 - Both formats feed the same client operation-log pipeline. See
@@ -112,7 +112,7 @@ The Operation Log serves **four distinct purposes**:
 | Purpose                    | Description                                       | Status       |
 | -------------------------- | ------------------------------------------------- | ------------ |
 | **A. Local Persistence**   | Fast writes, crash recovery, event sourcing       | Complete ✅  |
-| **B. File-Based Sync**     | Default v2 monolith or opt-in v3 split files      | Complete ✅  |
+| **B. File-Based Sync**     | Existing v2 monolith or v3 split files            | Complete ✅  |
 | **C. Server Sync**         | Upload/download individual operations (SuperSync) | Complete ✅¹ |
 | **D. Validation & Repair** | Prevent corruption, auto-repair invalid state     | Complete ✅  |
 
@@ -212,7 +212,7 @@ the application in
 those interfaces into design docs: both the envelope and row metadata evolve.
 
 Synced application-model recovery data lives in `SUP_OPS`. Provider credentials,
-conflict-journal records, plugin caches, and local UI/browser settings have
+plugin caches, and local UI/browser settings have
 separate owners; see the [user-data reference](../wiki/3.06-User-Data.md).
 
 ### Remote Apply Checkpoints
@@ -753,10 +753,10 @@ records only the durable format boundary and its owners.
 
 ## B.1 Two Current Wire Formats
 
-| Format                                      | Remote files                                                                                          | Normal op-bearing sync                                                                                                                                                      |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v2 monolith (default)**                   | `sync-data.json` plus recovery backup                                                                 | Downloads the changed monolith, merges its retained ops, rebuilds current state plus both archive partitions, and conditionally rewrites the complete monolith.             |
-| **v3 split files (opt-in “Surgical sync”)** | `sync-ops.json`, referenced snapshot generation, compatibility state/backup files, and a v2 tombstone | Conditionally rewrites the bounded ops commit point. A full state/archive snapshot is written only for initial bootstrap, compaction, migration, force-upload, or recovery. |
+| Format                                 | Remote files                                                                                          | Normal op-bearing sync                                                                                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v2 monolith (existing folders)**     | `sync-data.json` plus recovery backup                                                                 | Downloads the changed monolith, merges its retained ops, rebuilds current state plus both archive partitions, and conditionally rewrites the complete monolith.             |
+| **v3 split files (new empty folders)** | `sync-ops.json`, referenced snapshot generation, compatibility state/backup files, and a v2 tombstone | Conditionally rewrites the bounded ops commit point. A full state/archive snapshot is written only for initial bootstrap, compaction, migration, force-upload, or recovery. |
 
 Both formats carry a vector clock, schema version, synthetic `syncVersion`, and
 a bounded `recentOps` buffer. That common adapter and envelope do not themselves
@@ -778,6 +778,11 @@ fallbacks:
 Where the provider enforces CAS, a revision mismatch aborts the write and a
 later cycle downloads before retrying. The best-effort backends cannot broadly
 guarantee that every simultaneous write race will abort.
+
+With no saved format preference, discovery selects existing v2/v3 files and
+uses v3 only for an empty folder. Saved `isUseSplitSyncFiles: false` keeps v2
+behavior; `true` explicitly opts into migration. Provider errors never establish
+emptiness. Discovery is target-scoped, in memory, and does not persist a choice.
 
 The v3 migration is one-way for a sync folder. It leaves a v3 tombstone in the
 legacy `sync-data.json` location so clients that do not understand the split
@@ -801,21 +806,27 @@ IDs deduplicate ops still in the local log, while vector clocks carry causality.
    also skips an op when its `sv` is at or below the persisted cursor **and**
    the local vector clock covers its author counter (#10119). Otherwise an old
    create op still in the buffer would re-create an entity archived or deleted
-   here since. The clock half is needed because the cursor can run ahead of
-   applied ops: an upload merges into the freshly read file and sets the
-   cursor to the new version. Legacy ops without `sv` use the file's
+   here since. Keep both checks: older clients could advance their cursor past
+   unseen ops during upload, and a restored local log can lag its saved cursor.
+   Ordinary uploads now reject a cold read whose revision differs from the last
+   committed revision (#10239). The next cycle downloads/applies that baseline
+   before retrying; rejection does not acknowledge local ops, write the file, or
+   advance the cursor. Warm-cache uploads retain the conditional PUT check.
+   Legacy ops without `sv` use the file's
    `syncVersion` as a conservative upper bound. After local compaction prunes
    such an op's applied ID, a later file write advances this upper bound past
    the cursor, so the old op can be re-applied (reproduced for v2 and v3 with
    an archived task). Skipping it on clock coverage alone is unsafe: conflict
    resolution can merge a remote clock even when its op was not applied locally.
-   Seq-0 downloads and downloads after a gap reset do not use this filter. Other
-   known gaps: the guard assumes each author's counter never goes backwards (a
-   device that keeps its clientId but adopts a lower own clock, e.g. USE_REMOTE
-   after another device's USE_LOCAL, could have a new op skipped when the cursor
-   also ran ahead; reproduced by pending tests in the #10119 integration spec,
-   fix tracked in #10239); and a remote op whose apply failed is no longer
-   retried once compaction prunes it, matching SuperSync.
+   Seq-0 downloads and downloads after a gap reset do not use this filter. A
+   remote op whose apply failed is no longer retried once compaction prunes it,
+   matching SuperSync. Counter reuse remains a separate concern for snapshot
+   hydration: its local-clock-dominates shortcut assumes equal/covered counters
+   represent the same operations. A reset that violates that assumption needs
+   its own app-level reproduction. The #10239 browser replacement has an unseen
+   snapshot base and a file clock that dominates the last committed remote
+   clock, but is concurrent with the observer's pending local edit. This does
+   not establish safety when the local clock already covers the replacement.
 2. **Fresh client / forced seq-0:** return a full state/archive baseline. In v2,
    that baseline represents the monolith and its retained ops. In v3, the ops
    file points to a validated snapshot generation; retained ops newer than the
@@ -993,7 +1004,7 @@ Arrival-order behavior remains only where the client cannot construct a safe,
 deterministic local side: for example, its evidence was compacted into the
 snapshot frontier, an operation is multi-entity, or the retained side is a local
 delete/archive that needs compensation machinery. Those fallback cases do not
-create a conflict object or journal row. See
+create a conflict object. See
 [Composition residual (pre-existing class)](./conflict-journal-and-review.md#composition-residual-pre-existing-class)
 for the remaining composition and mixed-receiver limitations.
 
@@ -1007,8 +1018,8 @@ Conflicts first apply explicit semantic precedence and eligible disjoint-field m
 fall back to Last-Write-Wins (LWW) via
 `ConflictResolutionService.autoResolveConflictsLWW()`. For the current high-level policy, see
 the field guide's [causality section](./sync-architecture.html#causality); the focused
-[conflict journal and review contract](./conflict-journal-and-review.md) owns the more volatile
-merge and review details.
+[conflict merge contract](./conflict-journal-and-review.md) owns the more volatile
+merge and composition details.
 
 ### LWW Resolution Strategy
 
@@ -1018,11 +1029,10 @@ merge and review details.
    the maximum-timestamp operations chooses the winner, so either the local or remote side can
    win deterministically
 
-Winner selection and disjoint-field merging remain active in production. Conflict journaling is
-an observe-only capability and is not required for resolution: the production remote-processing
-path currently sets `disableConflictJournal: true`, so it does not emit journal entries. The
-journal store and review UI therefore remain dormant/incomplete rather than a complete record of
-resolved conflicts. See the focused contract above for current status and lifecycle details.
+Winner selection and disjoint-field merging remain active in production. The
+former journal was device-local observation only; its removal changes neither
+resolution nor the sync wire. See the focused contract above for retirement and
+composition limits.
 
 ### When Local Wins
 
@@ -1338,7 +1348,7 @@ during the periodic full young-to-old flush.
 Archive partitions can contain tens of thousands of tasks and worklogs. Treating
 them as an always-rewritten remote file makes a small archive transition pay for
 the whole historical dataset. The cost depends on the transport: default v2
-file sync still rewrites that full baseline, while SuperSync and the opt-in v3
+file sync still rewrites that full baseline, while SuperSync and v3
 file format can normally transfer the operation without rewriting a remote
 archive snapshot.
 
@@ -1355,7 +1365,7 @@ partitions.
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **SuperSync**         | The archive operation payload; no separate archive-file upload.                                                |
 | **File v2 (default)** | The operation buffer plus complete state, `archiveYoung`, and `archiveOld` in the rewritten monolith.          |
-| **File v3 (opt-in)**  | Normally the operation in `sync-ops.json`; complete archive partitions when a snapshot is created or replaced. |
+| **File v3**           | Normally the operation in `sync-ops.json`; complete archive partitions when a snapshot is created or replaced. |
 
 ### E.3 Workflow: moveToArchive
 
