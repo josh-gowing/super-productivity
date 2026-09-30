@@ -8,7 +8,10 @@ import {
 } from '../sync-providers/provider.interface';
 import { SyncProviderId } from '../sync-providers/provider.const';
 import { SyncProviderManager } from '../sync-providers/provider-manager.service';
-import { EncryptNoPasswordError } from '../core/errors/sync-errors';
+import {
+  ClientUpdateRequiredSPError,
+  EncryptNoPasswordError,
+} from '../core/errors/sync-errors';
 import { ActionType, OpType, OperationLogEntry } from '../core/operation.types';
 import { SnackService } from '../../core/snack/snack.service';
 import { provideMockStore } from '@ngrx/store/testing';
@@ -1287,6 +1290,22 @@ describe('OperationLogUploadService', () => {
         ]);
       });
 
+      it('keeps a full-state op pending when the server requires an app update', async () => {
+        const entry = createFullStateEntry(1, 'op-1', 'client-1', OpType.BackupImport);
+        mockOpLogStore.getUnsynced.and.returnValue(Promise.resolve([entry]));
+        mockApiProvider.uploadSnapshot.and.returnValue(
+          Promise.reject(new ClientUpdateRequiredSPError()),
+        );
+
+        // Thrown, not returned as a result: a result would classify the op as
+        // rejected, but the server refused this app version, not this op.
+        await expectAsync(
+          service.uploadPendingOps(mockApiProvider),
+        ).toBeRejectedWithError(ClientUpdateRequiredSPError);
+        expect(mockOpLogStore.markRejected).not.toHaveBeenCalled();
+        expect(mockOpLogStore.markSynced).not.toHaveBeenCalled();
+      });
+
       it('should NOT mark full-state ops as rejected when snapshot fails with transient error (transaction rolled back)', async () => {
         const entry = createFullStateEntry(1, 'op-1', 'client-1', OpType.BackupImport);
         mockOpLogStore.getUnsynced.and.returnValue(Promise.resolve([entry]));
@@ -1715,8 +1734,8 @@ describe('OperationLogUploadService', () => {
        * FIX VERIFIED: uploadSnapshot now receives op.id to prevent ID mismatch
        *
        * BACKGROUND: Previously uploadSnapshot() was called WITHOUT the client's op.id.
-       * The server would generate its own ID, causing filterNewOps() to not recognize
-       * the server's operation as the same one the client uploaded. This caused data
+       * The server would generate its own ID, causing the applied-op-ID filter to not
+       * recognize the server's operation as the same one the client uploaded. This caused data
        * loss when the old state was re-applied.
        *
        * FIX: op.id is now passed as the 7th argument to uploadSnapshot.
