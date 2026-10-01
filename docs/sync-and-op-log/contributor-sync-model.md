@@ -199,8 +199,8 @@ added (measured 2026-09 in
 §2.2; an upper bound, as the category also caught generic LWW fixes).
 
 1. **Prefer a generic resolution path.** Route a conflict fix through an
-   existing generic mechanism: the disjoint-field merge
-   (`conflict-disjoint-merge.util.ts`), derived membership, or an admission set
+   existing generic mechanism: the field patch
+   (`conflict-field-patch.util.ts`), derived membership, or an admission set
    that `_assertMultiEntityPlansAreSafe` checks, when the action meets the
    set's documented contract (e.g. `SCOPED_PLAN_MULTI_ACTIONS`). Per-action
    resolution logic (an `ActionType` branch, predicate or projection written
@@ -211,8 +211,23 @@ added (measured 2026-09 in
    and say in the PR why none fits. Whatever the path, prove convergence and
    content preservation in **both** conflict directions (the change pending
    locally against the remote edit, and the reverse) with an E2E, and check
-   both timestamp winners. Admitting an action or removing a safety stop
-   without that proof is not a fix (#10264). The `max-lines` cap on
+   both timestamp winners. Also run `npm run sync-fuzz:compare` and put its
+   output in the PR. A seed that newly shows a failure signature against the
+   base is a regression until its original seed shows otherwise: first
+   compare that seed's executed steps and final field values on both
+   revisions (the tool prints both for every newly failing seed). The values
+   cover one device's live tasks, notes and habits, not the other devices or
+   the archive: the same steps reaching the same values clears an entry only
+   when its signature is about those fields on that state. A divergence,
+   restart, time or archive entry still needs its original seed compared on
+   both revisions, and different values are the change's effect and need an
+   explanation. Use a shrunk trace
+   only to diagnose: shrinking can remove the interaction that made the seed
+   worse, so a shrunk trace that fails the same way on the base does not clear
+   the entry. The pinned traces miss a known failure that becomes more
+   frequent (#10398).
+   Admitting an action or removing a safety stop without that proof is not a
+   fix (#10264). The `max-lines` cap on
    `conflict-resolution.service.ts` in `eslint.config.js` only goes down, but
    its `*.util.ts` helpers are uncapped.
 2. **Don't add denormalized lists or undeclared cross-entity writes.** Store
@@ -304,8 +319,10 @@ Safe patterns, in order of preference:
 
 On the conflict-resolution side, `createLWWUpdateOp` never lists
 `clearedFields` unless the call site opts in via `listClearedFields` — today
-only the disjoint-merge delta does, re-declaring clears the conflicting ops
-themselves carried. (`asPatchSnapshotIfTypeShadowed` separately sends a whole
+only field patches do (conflict-field-patch.util.ts): the resolution patch
+re-declares clears the conflicting ops themselves carried, and the superseded
+and surviving-field patches read live state for exactly the fields the local
+ops wrote, so an absent one there is a clear those ops declared. (`asPatchSnapshotIfTypeShadowed` separately sends a whole
 habit snapshot as a patch, so released receivers keep their **own** `type`
 instead of dropping it; every optional field missing from a full snapshot is a
 real clear, so it lists them. v18.15.0–v18.21.1 ignore `clearedFields`.)

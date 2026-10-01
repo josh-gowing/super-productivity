@@ -94,11 +94,16 @@ import { OperationLogEffects } from '../../../capture/operation-log.effects';
 import { UnsupportedMultiEntityConflictError } from '../../../core/errors/sync-errors';
 import { MAX_LWW_REUPLOAD_RETRIES } from '../../../core/operation-log.const';
 import { PersistentAction } from '../../../core/persistent-action.interface';
-import { DB_VERSION } from '../../../persistence/db-keys.const';
+import {
+  DB_VERSION,
+  SINGLETON_KEY,
+  STORE_NAMES,
+} from '../../../persistence/db-keys.const';
 import { runDbUpgrade } from '../../../persistence/db-upgrade';
 import { IndexedDbOpLogAdapter } from '../../../persistence/indexed-db-op-log-adapter';
 import { OpLogDbAdapter } from '../../../persistence/op-log-db-adapter';
 import { OP_LOG_DB_ADAPTER_FACTORY } from '../../../persistence/op-log-db-adapter.token';
+import { BackupService } from '../../../backup/backup.service';
 import { OperationLogCompactionService } from '../../../persistence/operation-log-compaction.service';
 import { OperationLogHydratorService } from '../../../persistence/operation-log-hydrator.service';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
@@ -156,10 +161,21 @@ import {
  *   as one session that no sync interrupts. So it never needs
  *   autoAddTodayTagOnTracking, which re-plans a task that a remote change
  *   unplanned mid-session (once per task in a row, by its
- *   distinctUntilChanged memory).
+ *   distinctUntilChanged memory);
+ * - state replacements: the force upload and the backup import run the real
+ *   services, and a step answers the SYNC_IMPORT conflict dialog and the
+ *   whole-dataset conflict dialog after a stop (DialogSyncConflictComponent,
+ *   see _answerStopDialog; a stop left unanswered is its cancel). Not run:
+ *   cancelling the SYNC_IMPORT dialog as an answer, the
+ *   server-migration confirm (closed unanswered), encryption changes and
+ *   password changes (they need SyncWrapperService, the provider manager and
+ *   deleteAllData), and restoring a SuperSync restore point or a local
+ *   auto-backup.
  */
 
 const FUZZ_SET_STATE = '[SyncFuzz] Set device state';
+/** The real one, captured before any harness spies on it. */
+const getRandomValues = crypto.getRandomValues.bind(crypto);
 interface SetStateAction extends Action {
   state: object;
 }
@@ -290,7 +306,8 @@ const SHARED_FIELDS: Readonly<Record<string, Readonly<Record<string, string>>>> 
 /** App services whose whole in-memory state devices share on purpose, with the reason. */
 const SHARED_CLASSES: Readonly<Record<string, string>> = {
   SuperSyncStatusService: 'a UI indicator the sync path only writes to',
-  ImexViewService: 'the data-import flag; the fuzz never imports',
+  ImexViewService:
+    'the data-import flag, set only while a backup import runs in one step',
   UserInputWaitStateService: 'set while a dialog waits; recorded dialogs close at once',
   GlobalConfigService: 'derived from the global config, which the fuzz never edits',
   LanguageService: 'the UI language, which the fuzz never changes',
@@ -354,7 +371,13 @@ const fieldsOf = (instance: object): Record<string, unknown> =>
 
 export interface FuzzDevice {
   readonly name: string;
-  readonly clientId: string;
+  /**
+   * `fuzzDev<name>` until a backup import or clean slate rotates it: then
+   * the id OperationLogStoreService.runDestructiveStateReplacement wrote to
+   * the device's database, re-read after the store clears the id cache.
+   */
+  clientId: string;
+  clientIdStale?: boolean;
   readonly client: FakeSuperSyncClient;
   readonly db: IndexedDbOpLogAdapter;
   state: object;
@@ -365,11 +388,13 @@ export type FuzzEventKind =
   | 'stop' // UnsupportedMultiEntityConflictError (SYNC_MULTI_ENTITY_UNSUPPORTED)
   | 'sync-error'
   | 'sync-halted'
-  | 'full-state' // a SYNC_IMPORT / REPAIR / BACKUP_IMPORT reached the transport
+  | 'full-state' // a full-state upload was deferred, or needed an unmodeled transport
   | 'validation'
   | 'permanent-rejection'
   | 'lww-retries-exhausted'
   | 'dialog'
+  | 'import-dialog' // the SYNC_IMPORT conflict dialog, answered by the step (`k`)
+  | 'stop-dialog' // the whole-dataset dialog after a `stop`, answered by the step (`k`)
   | 'error-snack'
   | 'dev-error';
 
@@ -396,13 +421,21 @@ class FuzzClock {
   }
 }
 
-const recordingDialog = (onOpen: (name: string) => void): Partial<MatDialog> => ({
+/** A dialog stub: records every dialog and closes it with `onOpen`'s answer. */
+const recordingDialog = (onOpen: (name: string) => unknown): Partial<MatDialog> => ({
   open: ((component: { name?: string }) => {
-    onOpen(component?.name ?? 'dialog');
-    return { afterClosed: () => of(undefined), close: () => undefined };
+    const answer = onOpen(component?.name ?? 'dialog');
+    return { afterClosed: () => of(answer), close: () => undefined };
   }) as unknown as MatDialog['open'],
   openDialogs: [],
 });
+
+/**
+ * The replacing answers of DialogSyncImportConflictComponent
+ * (SyncImportConflictResolution) and of DialogSyncConflictComponent after a
+ * stop (ConflictResolutionResult); both dialogs use the same two.
+ */
+export type ImportDialogAnswer = 'USE_LOCAL' | 'USE_REMOTE';
 
 export class SyncFuzzHarness {
   /** Bumped by every new harness: an older one must no longer touch TestBed. */
@@ -411,6 +444,32 @@ export class SyncFuzzHarness {
   readonly server: FakeSuperSyncServer;
   readonly devices: FuzzDevice[] = [];
   readonly events: FuzzEvent[] = [];
+  /**
+   * Backup files the user exported (FileImexComponent.downloadBackup), by
+   * label; any device can import one.
+   */
+  readonly backups = new Map<
+    string,
+    Parameters<BackupService['importCompleteBackup']>[0]
+  >();
+  /**
+   * The user's answer to the SYNC_IMPORT conflict dialog while it is set.
+   * Unset, the dialog closes like any other: CANCEL, recorded as `dialog`.
+   */
+  importDialogAnswer?: ImportDialogAnswer;
+  /**
+   * The user's answer to the whole-dataset conflict dialog
+   * (DialogSyncConflictComponent) after a multi-entity stop, while it is set.
+   * Unset, the stop is all that happens, as before the dialog was modeled.
+   */
+  stopDialogAnswer?: ImportDialogAnswer;
+  /**
+   * The ops a USE_REMOTE answer discarded, in either dialog: the device's
+   * unsynced ops right before each successful rebuild
+   * (OperationLogSyncService.forceDownloadRemoteState), by client id and own
+   * vector-clock counter. The runner reads and clears it after every sync.
+   */
+  useRemoteDiscards?: { clientId: string; counter: number }[];
   step = 0;
   private _current?: FuzzDevice;
   private readonly _clock: FuzzClock;
@@ -429,6 +488,39 @@ export class SyncFuzzHarness {
       : spyOn(Date, 'now')
     ).and.callFake(() => this._clock.now());
     this.server = new FakeSuperSyncServer(() => Date.now());
+    (jasmine.isSpy(crypto.getRandomValues)
+      ? (crypto.getRandomValues as jasmine.Spy)
+      : spyOn(crypto, 'getRandomValues')
+    ).and.callFake((array: Uint8Array) => {
+      const random = this._seededRandom;
+      if (!random || !(array instanceof Uint8Array)) return getRandomValues(array);
+      for (let i = 0; i < array.length; i++) array[i] = Math.floor(random() * 256);
+      return array;
+    });
+  }
+
+  private _seededRandom?: () => number;
+
+  /**
+   * Runs `fn` with crypto.getRandomValues seeded from `seed`. A backup import
+   * mints the device's new client id from it (generateClientId), and conflict
+   * ties compare client ids, so a replayed trace must mint the same one.
+   */
+  async withSeededRandom<T>(seed: string, fn: () => Promise<T>): Promise<T> {
+    let hash = 0;
+    for (const char of seed) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) | 0;
+    let a = hash;
+    this._seededRandom = () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    try {
+      return await fn();
+    } finally {
+      this._seededRandom = undefined;
+    }
   }
 
   /** Restores the global confirm() default of src/test.ts. */
@@ -484,13 +576,31 @@ export class SyncFuzzHarness {
               return target[prop](...args);
             },
     });
-    const clientIds = {
-      loadClientId: async () => this._device().clientId,
-      getOrGenerateClientId: async () => this._device().clientId,
-      clearCache: () => undefined,
+    const clientId = async (): Promise<string> => {
+      const device = this._device();
+      if (device.clientIdStale) {
+        const stored = await device.db.get<string>(STORE_NAMES.CLIENT_ID, SINGLETON_KEY);
+        device.clientId = stored ?? device.clientId;
+        device.clientIdStale = false;
+      }
+      return device.clientId;
     };
-    const onDialog = (name: string): void =>
+    const clientIds = {
+      loadClientId: clientId,
+      getOrGenerateClientId: clientId,
+      clearCache: () => {
+        this._device().clientIdStale = true;
+      },
+    };
+    const onDialog = (name: string): unknown => {
+      const answer = this.importDialogAnswer;
+      if (name === 'DialogSyncImportConflictComponent' && answer) {
+        this.record(this._current, 'import-dialog', answer);
+        return answer;
+      }
       this.record(this._current, 'dialog', `MatDialog.open(${name})`);
+      return undefined;
+    };
     TestBed.configureTestingModule({
       imports: [
         StoreModule.forRoot(undefined, {
@@ -574,6 +684,7 @@ export class SyncFuzzHarness {
       TestBed.inject(OperationLogCompactionService),
       'compactIfBloated',
     );
+    this._recordUseRemoteDiscards();
     // Every device starts on the fuzz day, as setStartOfNextDayDiffOnLoad
     // sets it after loadAllData; the store's initial todayStr is the real
     // date when the bundle loaded.
@@ -734,6 +845,27 @@ export class SyncFuzzHarness {
     return firstValueFrom(TestBed.inject(Store)) as Promise<Record<string, unknown>>;
   }
 
+  /**
+   * Both dialogs' USE_REMOTE rebuild through forceDownloadRemoteState, which
+   * drops every unsynced op of the device (the non-resume path keeps none):
+   * record them once the rebuild succeeds.
+   */
+  private _recordUseRemoteDiscards(): void {
+    const syncService = TestBed.inject(OperationLogSyncService);
+    const original = syncService.forceDownloadRemoteState.bind(syncService);
+    syncService.forceDownloadRemoteState = async (...args) => {
+      const unsynced = await TestBed.inject(OperationLogStoreService).getUnsynced();
+      await original(...args);
+      this.useRemoteDiscards = [
+        ...(this.useRemoteDiscards ?? []),
+        ...unsynced.map(({ op }) => ({
+          clientId: op.clientId,
+          counter: op.vectorClock[op.clientId] ?? 0,
+        })),
+      ];
+    };
+  }
+
   private readonly _inFlight = new Set<Promise<unknown>>();
 
   private _trackInFlight<T extends object>(instance: T, method: keyof T & string): void {
@@ -790,91 +922,136 @@ export class SyncFuzzHarness {
     await this.as(device, async () => {
       const syncService = TestBed.inject(OperationLogSyncService);
       const session = TestBed.inject(SyncSessionValidationService);
-      try {
-        await session.withSession(async () => {
-          const isNeverSynced = !(await syncService.hasSyncedOps());
-          const down = await syncService.downloadRemoteOps(device.client, {
-            isNeverSynced,
-            keepDecryptedPrefix: true,
-          });
-          const halt = (phase: string, kind: string): void =>
-            this.record(device, 'sync-halted', `${phase} ${kind}`);
-          if (
-            down.kind === 'cancelled' ||
-            down.kind === 'server_migration_skipped' ||
-            down.kind === 'blocked_incompatible'
-          ) {
-            halt('download', down.kind);
-            return;
+      await session.withSession(async () => {
+        try {
+          await this._syncBody(device, syncService, session);
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          if (e instanceof UnsupportedMultiEntityConflictError) {
+            this.record(device, 'stop', message);
+            await this._answerStopDialog(device, syncService, session);
+          } else if (e instanceof FuzzUnsupportedTransportError) {
+            this.record(device, 'full-state', message);
+          } else {
+            this.record(device, 'sync-error', `${(e as Error)?.name}: ${message}`);
           }
-          let up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
-          if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
-            halt('upload', up.kind);
-            return;
-          }
-          if (up.kind === 'completed' && up.encryptionRequiredKeyMissing) {
-            halt('upload', 'encryptionRequiredKeyMissing');
-            return;
-          }
-          const completed: Extract<typeof up, { kind: 'completed' }>[] = [];
-          const permanent = (): void => {
-            if (up.kind !== 'completed') return;
-            completed.push(up);
-            if (up.permanentRejectionCount > 0) {
-              this.record(
-                device,
-                'permanent-rejection',
-                `${up.permanentRejectionCount} op(s): ` +
-                  up.rejectedOps.map((r) => r.errorCode).join(','),
-              );
-            }
-          };
-          permanent();
-          let pending =
-            (down.kind === 'ops_processed' ? down.localWinOpsCreated : 0) +
-            (up.kind === 'completed'
-              ? up.localWinOpsCreated + countTransientRejections(up)
-              : 0);
-          for (let retry = 0; pending > 0 && retry < MAX_LWW_REUPLOAD_RETRIES; retry++) {
-            up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
-            if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
-              halt('re-upload', up.kind);
-              return;
-            }
-            permanent();
-            pending =
-              up.kind === 'completed'
-                ? up.localWinOpsCreated + countTransientRejections(up)
-                : 0;
-          }
-          if (completed.some((result) => result.blockedByRejectedFullState)) {
-            halt('upload', 'blockedByRejectedFullState');
-          }
-          if (pending > 0) {
-            this.record(
-              device,
-              'lww-retries-exhausted',
-              `${pending} op(s) still pending`,
-            );
-          }
-          if (completed.some((result) => result.fullStateUploadDeferred)) {
-            this.record(device, 'full-state', 'full-state upload deferred');
-          }
-          if (session.hasFailed())
-            this.record(device, 'validation', 'state invalid after sync');
-        });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        if (e instanceof UnsupportedMultiEntityConflictError) {
-          this.record(device, 'stop', message);
-        } else if (e instanceof FuzzUnsupportedTransportError) {
-          this.record(device, 'full-state', message);
-        } else {
-          this.record(device, 'sync-error', `${(e as Error)?.name}: ${message}`);
         }
-      }
+      });
     });
     return this.events.length === before;
+  }
+
+  private async _syncBody(
+    device: FuzzDevice,
+    syncService: OperationLogSyncService,
+    session: SyncSessionValidationService,
+  ): Promise<void> {
+    const isNeverSynced = !(await syncService.hasSyncedOps());
+    const down = await syncService.downloadRemoteOps(device.client, {
+      isNeverSynced,
+      keepDecryptedPrefix: true,
+    });
+    const halt = (phase: string, kind: string): void =>
+      this.record(device, 'sync-halted', `${phase} ${kind}`);
+    if (
+      down.kind === 'cancelled' ||
+      down.kind === 'server_migration_skipped' ||
+      down.kind === 'blocked_incompatible'
+    ) {
+      halt('download', down.kind);
+      return;
+    }
+    let up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
+    if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
+      halt('upload', up.kind);
+      return;
+    }
+    if (up.kind === 'completed' && up.encryptionRequiredKeyMissing) {
+      halt('upload', 'encryptionRequiredKeyMissing');
+      return;
+    }
+    const completed: Extract<typeof up, { kind: 'completed' }>[] = [];
+    const permanent = (): void => {
+      if (up.kind !== 'completed') return;
+      completed.push(up);
+      if (up.permanentRejectionCount > 0) {
+        this.record(
+          device,
+          'permanent-rejection',
+          `${up.permanentRejectionCount} op(s): ` +
+            up.rejectedOps.map((r) => r.errorCode).join(','),
+        );
+      }
+    };
+    permanent();
+    let pending =
+      (down.kind === 'ops_processed' ? down.localWinOpsCreated : 0) +
+      (up.kind === 'completed'
+        ? up.localWinOpsCreated + countTransientRejections(up)
+        : 0);
+    for (let retry = 0; pending > 0 && retry < MAX_LWW_REUPLOAD_RETRIES; retry++) {
+      up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
+      if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
+        halt('re-upload', up.kind);
+        return;
+      }
+      permanent();
+      pending =
+        up.kind === 'completed'
+          ? up.localWinOpsCreated + countTransientRejections(up)
+          : 0;
+    }
+    if (completed.some((result) => result.blockedByRejectedFullState)) {
+      halt('upload', 'blockedByRejectedFullState');
+    }
+    if (pending > 0) {
+      this.record(device, 'lww-retries-exhausted', `${pending} op(s) still pending`);
+    }
+    if (completed.some((result) => result.fullStateUploadDeferred)) {
+      this.record(device, 'full-state', 'full-state upload deferred');
+    }
+    if (session.hasFailed())
+      this.record(device, 'validation', 'state invalid after sync');
+  }
+
+  /**
+   * The whole-dataset conflict dialog after a multi-entity stop, answered
+   * with `stopDialogAnswer` as SyncWrapperService._handleDataConflict acts on
+   * it, inside the same sync session. A background sync only offers the
+   * dialog through a snack whose button runs a user-triggered sync, which
+   * opens the dialog if it stops again; the harness answers at the first
+   * stop, so it never sees another device upload in between. Unset, the
+   * dialog stays unanswered: the device keeps its stop.
+   */
+  private async _answerStopDialog(
+    device: FuzzDevice,
+    syncService: OperationLogSyncService,
+    session: SyncSessionValidationService,
+  ): Promise<void> {
+    const answer = this.stopDialogAnswer;
+    if (!answer) return;
+    this.record(device, 'stop-dialog', answer);
+    try {
+      if (answer === 'USE_LOCAL') {
+        // The app reports UNKNOWN_OR_CHANGED and leaves the rejected ops
+        // pending for the next sync; the pending oracle sees any left over.
+        await syncService.forceUploadLocalState(device.client);
+      } else {
+        session.reset();
+        await syncService.forceDownloadRemoteState(device.client);
+        if (session.hasFailed()) {
+          this.record(device, 'validation', 'state invalid after use-remote');
+        }
+      }
+    } catch (e) {
+      // The app shows an error snack (FORCE_UPLOAD_FAILED for a force upload).
+      const message = e instanceof Error ? e.message : String(e);
+      this.record(
+        device,
+        'sync-error',
+        `stop-dialog ${answer} ${(e as Error)?.name}: ${message}`,
+      );
+    }
   }
 
   /** Synced state (the snapshot sync ships, archives included). */
