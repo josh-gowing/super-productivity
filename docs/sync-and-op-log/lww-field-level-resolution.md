@@ -48,8 +48,8 @@ unless noted.
      `planTasksForToday`), a noise-only side, or a field both sides wrote;
    - a whole-entity-win plan, or missing entity state or clientId.
 3. A merge emits one `lwwUpdateMode: 'patch'` op whose delta comes only from
-   the two sides' ops (`synthesizeMergedChanges`). This is why both resolvers
-   build the same bytes. Both originals are rejected; the patch is applied
+   the two sides' ops (`synthesizeMergedChanges`, removed by #10422). This is
+   why both resolvers build the same bytes. Both originals are rejected; the patch is applied
    locally and uploaded.
 4. Otherwise a local win runs `_createLocalWinUpdateOp`:
    - It reads the store and emits a `'replace'` op. SIMPLE_COUNTER goes out as
@@ -298,9 +298,36 @@ Decided by @johannesjo on 2026-09-30 ([#10393](https://github.com/super-producti
 3. **Clears:** accepted, with a sunset. When A starts, weigh keeping
    `'replace'` for resolutions that clear `reminderId` or `dueWithTime`.
 4. **NOTE:** not admitted until v19.1.0 has left the fleet.
-5. **Resolution ops as input:** no; the no-re-merge contract stays.
+5. **Resolution ops as input:** no; the no-re-merge contract stays. Narrowed
+   by decisions 5a and 5a extended below: a conflict may read a row's keys,
+   never its values.
 6. **Opaque ops:** stay on whole-entity LWW.
-7. **Time on a remote win:** local-win direction only, for now.
+7. **Time on a remote win:** ~~local-win direction only, for now.~~ Replaced
+   on 2026-10-01 ([#10393](https://github.com/super-productivity/super-productivity/issues/10393#issuecomment-5936659621)):
+   a pending time delta survives a remote win whose winner writes no time
+   (per-field winners rebase it unchanged, see below). Winners that write
+   time, including a winning replace snapshot (open above), and #10378 stay
+   open.
+
+**Decision 5a (2026-10-01, #10421).** Asked whether rule 1 below stays within
+decision 5, @johannesjo answered: "Ponder in sub agent and act according to
+recommendation". As recommended:
+
+- A conflict may read **which** top-level keys a single-task LWW `'patch'`
+  row writes or clears (`actionPayload`, `clearedFields`), and only to decide
+  that a pending side of `syncTimeSpent` deltas commutes with it.
+- The row's values are never read, no op is built from it, and rows never
+  merge with each other. The no-re-merge contract of decision 5 stays.
+- `'replace'`, unreadable, legacy, multi-entity and time-writing rows keep
+  whole-entity LWW. Any other use of a row's keys needs a new decision.
+
+**Decision 5a extended (2026-10-01, #10422).** @johannesjo: the per-field
+rule may read which fields a remote `'patch'` row writes or clears (the keys
+of `actionPayload` and `clearedFields`) to decide per-field winners. Never
+values, never merge rows, never build an op from a row. Scope: every entity
+type the rule handles (TASK, PROJECT, TAG, SIMPLE_COUNTER), on condition that
+`sync-fuzz:compare` shows no newly failing non-task entry other than the
+known habit trade (`noReorder:20725006`); otherwise TASK only.
 
 ## Implementation (PR 1)
 
@@ -308,10 +335,10 @@ Decided by @johannesjo on 2026-09-30 ([#10393](https://github.com/super-producti
 holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
 
 - **Overlap:** every update-vs-update conflict of a TASK, PROJECT, TAG or
-  SIMPLE_COUNTER whose ops are readable resolves as one `'patch'`. A field
-  both sides wrote takes the planner's winner's value, noise fields included
-  (`synthesizeMergedChanges`); the old `(timestamp, localOps[0].clientId)`
-  noise tiebreak is gone.
+  SIMPLE_COUNTER whose ops are readable resolves per field (#10422, see
+  below). A field both sides wrote goes to the side whose latest write of it
+  is newer (timestamp, then clientId), noise fields included; the old
+  `(timestamp, localOps[0].clientId)` noise tiebreak is gone.
 - **Flat snapshots:** an overlapping patch, and a superseded patch, admit
   only ops whose payload is an `{ id, changes }` update. `moveToOtherProject`
   carries the full pre-move task, which would write the old `projectId` back.
@@ -329,20 +356,22 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   group of readable single-entity edits as a `'patch'` of the fields they
   wrote, read from current state, with `doneOn` beside `isDone`. LWW rows,
   deltas, opaque ops and reminder clears keep the whole-entity snapshot.
-- **No echo:** a remote win emits no patch when the local side wrote nothing
-  the remote side did not (unless it keeps a delta), and a no-pending crossing
+- **No echo:** a resolution emits no patch when no local field won (unless
+  it keeps a delta), and a no-pending crossing
   (#9073) that the remote side won emits nothing; the winner's device
   patches. An echo is a new opaque row that can beat another device's pending
   edit.
 - **Done toggles:** a patch carries the `doneOn` the task reducer derives
   (the op's timestamp, or a clear when undone), as the op converter does for
   replay; otherwise live state and a restart differ.
-- **A later round:** when pending readable edits lose to a remote LWW row (a
-  patch or snapshot another device resolved), the local fields that still
-  hold their values after the row applied are re-emitted as a patch, in the
-  same transaction as their rejection (`survivingLocalFields`). The row's
-  payload is not read (decision 5); a replace row used to hide this case by
-  overwriting the fields everywhere.
+- **A later round:** since #10422 a remote LWW row beside pending readable
+  edits takes the per-field path. Where that path refuses (e.g. a local
+  reminder clear, or a local time delta beside a row that writes time) and the
+  row wins, the local fields that still hold their values after the row
+  applied are re-emitted as a patch, in the same transaction as their
+  rejection (`survivingLocalFields`). That path reads no part of the row (decision
+  5); a replace row used to hide this case by overwriting the fields
+  everywhere.
 - **Content banner:** a patch reports a content field only where both sides
   wrote it (`findPatchContentConflicts`).
 
@@ -359,12 +388,20 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
 - **Derived fields:** apart from `doneOn`, a patch sets fields, not their
   reducer side effects (e.g. a subtask estimate's parent total). This
   predates PR 1 for disjoint merges and now covers overlapping ones.
-- **A time delta that loses to a resolution row** is rejected, as on master
-  (only a field patch keeps such deltas, `keptLocalTimeDeltas`). A replace row
-  wiped the device's time too; a patch row leaves it there, so the time is
-  still lost for the other devices but the losing device diverges. Follow-up:
-  keep the delta when the row writes no time key (#10408). The notes
-  divergence in the same pinned trace is older than PR 1 (#10423).
+- **A time delta beside a resolution row:** a pending side of only
+  `syncTimeSpent` deltas does not conflict with a single-task LWW `'patch'`
+  row whose payload and `clearedFields` hold no `timeSpent`/`timeSpentOnDay`
+  key (`isCommutingTimeDeltaCrossing`, #10408, #10421). The delta stays
+  pending and is rebased after one server rejection, like a delta beside a
+  rename; no snapshot is built. Only the row's keys are read, never its
+  values, and rows still never merge (decision 5a). A `'replace'` row, which
+  `setOne` applies to every field, or a row that writes or clears a time
+  field still wins whole-entity, as on master.
+- **That rule is one-directional:** it covers a pending delta meeting an
+  incoming row. A pending row meeting an incoming delta, and the no-pending
+  path (`_buildNoPendingConcurrentConflict`, #9073), still resolve as before.
+  The WebDAV E2E converges in both directions without it, so no guard is
+  added (no evidence of harm).
 - **Opaque ops, NOTE, deletes and archives** keep whole-entity LWW, so the
   habit, note and task-tracking pins of #10379 and #10260 stay.
 - **Released resolvers:** a v19.1.0 device that resolves still emits replace
@@ -377,26 +414,37 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   both-devices-resolve proof is unit-level only.
 - **Surviving-field echoes:** a field the winning row wrote with the same
   value as the local op counts as surviving and is re-emitted.
-- **Side-level winner on a remote win:** a field both sides wrote takes the
-  winning side's value, and the patch carries the winning side's timestamp.
-  So a remote win re-sends the loser's own older fields at the winner's time,
-  and they beat a third device's newer edit of such a field (pinned in
-  `field-patch-timestamp.integration.spec.ts`). Stamping the patch with the
-  loser's time instead lets that third device beat the opaque row and win
-  whole-entity with a stale snapshot: the renames are lost on two devices and
-  the third diverges. A fix needs #10421 first, then a readable re-send with
-  a per-field winner (#10422); disjoint merges have had the same property.
-- **Stale local-win snapshot:** kept deltas upload on their own, so a third
-  device's local-win replace folds them more often. The fold hoists an
-  incoming non-plain edit (a done toggle) ahead of the snapshot, which was read
-  before the batch, so replay and the other devices revert it (#10421).
+- **Side-level winner (fixed by #10422):** a field both sides wrote used to
+  take the winning side's value, and the patch carried the newest timestamp of
+  both sides, so a resolver re-sent the other side's older fields at a time
+  they were never written, and they beat a third device's newer edit, in both
+  conflict directions. See "Per-field winners" below.
+- **Stale local-win snapshot:** a local side that is not readable (an opaque
+  op such as `planTasksForToday` from tracking or a habit count, a delete, a
+  multi-entity op, or a delta beside a time write) still wins whole-entity
+  with a snapshot read before the batch (#10421, open for those sides). A
+  readable local side against a row resolves per field since #10422, which
+  also fixes the accepted `tasks:20725028` trade (pinned as a regression).
+- **Server order of remote winners (#10423):** an incoming nonconflicting op
+  that a remote winner of the same entity causally dominates reached the
+  server first, so it is persisted and applied before that winner
+  (`orderIncomingPrefix`). A winner beside a local win of its entity keeps
+  its place after the local win, which it must override on replay.
 - **A winner that also tracks time:** a remote `syncTimeSpent` refuses the
-  patch, so #10260 stays for a task renamed while another device times it.
+  patch only where it reaches the conflict. Beside a readable local side it is
+  disjoint, so detection drops it (`isCommutingTimeDeltaCrossing`) and the
+  remote rename resolves per field: a task renamed while another device times
+  it keeps the newer title (fuzz trace, checked 2026-10-02, #10458).
 - **Undone toggles:** the `doneOn` clear beside `isDone: false` travels in
   `clearedFields`, which v18.15.0–v18.21.x ignore (stale `doneOn` there).
-- **Pinned:** the delta-versus-patch-row divergence, the stale-snapshot
-  restart change and the tracked-winner shape are pinned as failing traces
-  (sync-fuzz-pinned-traces.json; refs #10408, #10421, #10260).
+- **Pinned:** the delta-versus-patch-row divergence and the stale-snapshot
+  restart change are regression pins; since #10422 the latter's trace no
+  longer shows `older-write-won:task.notes` either (a later time delta no
+  longer makes an older notes edit win, #10437's class). A failing trace (ref
+  #10421) pins a remote rename applied after a local-win snapshot of its task,
+  which diverges the same way on master; it also guards the local-win
+  exception of the server-order rule (without it, the title changes on
+  restart).
 
 **Residual decisions (2026-10-01).** @johannesjo, after the residuals were
 put to him: "Double check decisions in sub agents then do everything as
@@ -407,3 +455,78 @@ recommended (and file the follow up of it makes sense)". So:
 - `survivingLocalFields` stays, since it reads no row payload (decision 5);
 - the remote win's timestamp is accepted as pinned, with follow-up #10422,
   which waits on #10421.
+
+## Per-field winners (#10422)
+
+**The rule.** An update-vs-update conflict whose local side is readable
+`{ id, changes }` field updates, and whose remote side is readable ops or LWW
+rows of the same single entity, resolves per field:
+
+1. The remote ops apply as themselves, in server order (like remote winners,
+   #10423).
+2. Each local field whose latest local write is newer than every remote write
+   of the same field (timestamp, then clientId) is re-sent as a `'patch'`
+   row, at the timestamp of the op that wrote it (`localWinningFieldGroups`,
+   one row per such op, oldest first). The original local ops are rejected; a
+   local time delta stays pending and is rebased (unchanged).
+3. A remote readable op writes the fields of its change; a remote `'patch'`
+   row writes its keys (`actionPayload`, `clearedFields`); a `'replace'` row
+   writes every field.
+
+So no field ever travels at a time it was not written, and every resolver,
+from either side, assigns each field to the same side. It replaces the
+side-level winner (`synthesizeMergedChanges`, `isRemoteWinEcho`) and covers
+the readable half of #10421 (a readable local edit against a row no longer
+builds a replace snapshot read before the batch). No per-action exception, no
+new wire key, action type or schema bump.
+
+**Reading row keys (decision 5a extended).** Step 3 reads which keys a
+remote `'patch'` row writes, to decide which local fields it beats. Values are
+never read, no op is built from a row, and rows never merge with each other: a
+pending local row keeps whole-entity LWW. A `'replace'` row counts as writing
+every field, and a row that writes time keeps whole-entity LWW beside a pending
+local time delta.
+
+What the key read buys (measured on the 120 compare seeds of master
+`00a8aaf`, 2026-10-01): seeds with `older-write-won` drop from 18 to 5 with
+it, and to 10 with every row counted as writing every field; without it, 5
+more seeds also lose time and the pin "a done toggle beside a rename crossing
+a device that also tracked the task" fails. #10422's own three-device shape
+converges either way, so the read is justified by #10421's remaining class,
+not by #10422.
+
+**One transaction.** The re-sends are written in the atomic batch that holds
+the remote winners (`buildTimeAwareResolutionBatches`, `resendOps`), after
+every incoming op of the download, so a crash cannot persist the remote values
+without the local fields that beat them, and hydration replays the live order.
+
+**Released clients (v18.15.0, v19.1.0).** The rows are ordinary `'patch'`
+rows that every released client applies via `updateOne`. A released client
+reads them as opaque and resolves against them whole-entity, as it does
+against any row; it now meets rows stamped at their fields' own, older times.
+
+**What it leaves (residuals):**
+
+- **Whole-entity snapshots of unreadable sides** (opaque, delete,
+  multi-entity, or a delta beside a time write) still erase other devices'
+  fields. A resolver re-sending its fields at the other side's newer time
+  used to mask some of them; `sync-fuzz:compare` shows them in seeds where
+  the old over-stamped re-send carried the erased value back by accident
+  (`field-unwritten:task.title`, `field-reverted:task.notes`,
+  `field-reverted:habit.countOnDay`), next to the known Today list-position
+  divergence (#10381). Each was judged on its original seed: the shrunk
+  traces fail the same way on master, and the full seeds trade those losses
+  for kept done toggles, notes and time.
+- **Superseded re-emits** (`SupersededOperationResolverService`) still stamp
+  a group with the latest timestamp of its own ops, and surviving-field
+  re-emits (`_reemitSurvivingLocalFields`) the latest local timestamp. The
+  fuzz latest-write oracle, which decides each field by its own latest write
+  on each side, reports an older value one of their rows carried as
+  `older-write-won:`, like any other; no seed, pin or trace shows one yet
+  (decided on #10393: no separate signature until a real case exists).
+- **Pending local rows** keep whole-entity LWW, so a re-send that is still
+  pending when another device's row arrives loses or wins as a whole.
+- **Failed re-send fallback:** when a re-send's reducer fails, the remote
+  side has already applied, so the whole-entity fallback re-resolves over
+  that state; a local-win snapshot then carries the remote values of the
+  shared fields. Before #10422 the remote ops stayed unapplied for it.

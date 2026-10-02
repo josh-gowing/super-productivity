@@ -146,6 +146,41 @@ lists are `project.noteIds`, `note.todayOrder` and `simpleCounter.ids`:
   before; on a file-based provider receivers that already hold the remote op
   skip it as superseded, so the holding device keeps its own order.
 
+A pending note or habit order that commutes with a concurrent remote op stays
+out of a conflict over the entity's other pending ops (`nonCommutingPendingOps`,
+#10420). The edit conflict resolves as it would without the order, and neither
+winner rejects the order. Like a kept time delta, the order then moves in place
+past the remote clocks of the conflicts it crosses, together with every later
+pending op of the device on an entity it lists (`keptCommutingReorders`,
+`rebaseKeptReorders`), so the server accepts it after either winner. Its
+payload does not change. A crash before the move leaves the old clock: SuperSync
+rejects the order into the paths above, and without causal proof (the remote
+row lost) that keeps the stop. A file-based provider uploads it with the old
+clock; no E2E covers that crash window. Board, section and issue-provider
+orders stay in the conflict and keep the stop.
+An order that crosses an order or note delete (`isReissuedReorderCrossing`)
+does not move when that op applies, whether the op is the conflict's remote
+op or applies beside it in the same batch: the reissue above runs only while
+the order is concurrent with it, and a moved order would upload its stale
+list. A conflict's remote clock can dominate such an op (the other device
+deleted a listed note, then edited the conflicting one). A released receiver
+writes a deleted note's id as given and its notes panel crashes (the v19.1.0
+E2E below).
+
+A remote LWW resolution row of a habit commutes with a habit order that lists
+an existing habit: the LWW meta-reducer writes that habit only, and no habit field is
+list-routed, so neither the row's mode nor its keys are read (decision 5). A
+note row keeps the stop, since a note snapshot carries `projectId` and
+`isPinnedToToday`; so do board, section and issue-provider orders.
+
+A pending local delete of the entity keeps the order in the conflict, and
+sync stops as before #10420. When the remote side wins that conflict, this
+device recreates the entity at the end of its list (the LWW meta-reducer's
+recreate appends the id), while a kept order would place it elsewhere on
+every other device: a SuperSync probe showed that permanent order difference
+for a habit renamed on the other device (measured 2026-10). The note
+recreate is #10380's.
+
 A habit delete keeps the stop: a habit order fills the slots of the habits it
 lists, so a delete shifts them around an unlisted (disabled) habit and the two
 application orders differ. Boards, sections and issue providers keep the stop
@@ -252,6 +287,13 @@ The #10377 reissues are ordinary `updateNoteOrder` and
 as the reissues above, with a clock that dominates the remote op, so released
 receivers apply them after it in any arrival order. A released client that
 holds the pending side still stops, as before.
+
+The #10420 E2E (`supersync-reorder-beside-conflict.spec.ts`) checks against
+v19.1.0 assets that a released device consumes a habit order moved past its own
+rename, and an order the current device reissues after the released device's
+whole-habit resolution row. Its note case has the released device delete a
+note that the current device edited beside its pending order, or delete
+another listed note and then edit that one.
 
 ## Verification
 
