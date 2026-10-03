@@ -120,6 +120,7 @@ import {
   fieldPatchGroups,
   keptLocalTimeDeltas,
   rebaseKeptTimeDeltas,
+  timeDeltasSurvivingRemoteWins,
   buildSurvivingFieldPatches,
 } from './conflict-field-patch.util';
 import { RECREATE_FALLBACK } from '../core/recreate-fallback.const';
@@ -1029,10 +1030,16 @@ export class ConflictResolutionService {
       ...additionalLocalIntentOps,
     ]);
     const { remoteWinnerAffectedEntityKeys } = lwwPartitions;
-    const localOpsToReject = [...new Set(lwwPartitions.localOpsToReject)];
+    // A patched conflict's local time deltas stay pending (rebased in STEP 3b),
+    // and so do those beside a remote winner that writes no time (#10378).
+    const keptDeltas = keptLocalTimeDeltas([
+      ...mergedResolutions.map((m) => m.conflict),
+      ...timeDeltasSurvivingRemoteWins(resolutions, this._resolvePayloadKey('TASK')),
+    ]);
+    const localOpsToReject = [...new Set(lwwPartitions.localOpsToReject)].filter(
+      (opId) => !keptDeltas.opIds.has(opId),
+    );
     const localOpsToRejectSet = new Set(localOpsToReject);
-    // A patched conflict's local time deltas stay pending (rebased in STEP 3b).
-    const keptDeltas = keptLocalTimeDeltas(mergedResolutions.map((m) => m.conflict));
     const protectedLocalResolutionOpIds = new Set<string>(keptDeltas.opIds);
     const pending = await this.opLogStore.getUnsyncedByEntity();
     const keptReorders = keptCommutingReorders(conflicts, pending, nonConflictingOps);
@@ -1622,7 +1629,7 @@ export class ConflictResolutionService {
         }
       }
     }
-    if (mergedResolutions.length > 0) {
+    if (keptDeltas.opIds.size > 0) {
       await rebaseKeptTimeDeltas(this.opLogStore, keptDeltas, writtenResendIds);
     }
 
@@ -4352,14 +4359,11 @@ export class ConflictResolutionService {
     // convergent, while a whole-entity LWW winner would discard the loser's
     // fields fleet-wide. An overlapping crossing is forwarded: the device
     // whose side wins resolves it with a field patch (`_tryCreateFieldPatch`).
-    if (
-      isDisjointMergeEligible({
-        localOps,
-        remoteOps: [remoteOp],
-        payloadKey,
-        entityId,
-      })
-    ) {
+    // Time deltas commute as on the pending path, also beside the auto-plan
+    // that tracking an unscheduled task emits: a local win here would emit a
+    // snapshot whose clock claims the remote delta without its time.
+    const sides = { localOps, remoteOps: [remoteOp], payloadKey, entityId };
+    if (isDisjointMergeEligible(sides) || isCommutingTimeDeltaCrossing(sides)) {
       return null;
     }
 

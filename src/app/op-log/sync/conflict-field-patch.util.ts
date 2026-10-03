@@ -18,7 +18,11 @@ import { ActionType, isLwwUpdatePayload, OpType } from '../core/operation.types'
 import type { EntityConflict, Operation, VectorClock } from '../core/operation.types';
 import type { EntityType } from '../core/operation.types';
 import { RECREATE_FALLBACK } from '../core/recreate-fallback.const';
-import { mergeVectorClocks } from '../../core/util/vector-clock';
+import {
+  compareVectorClocks,
+  mergeVectorClocks,
+  VectorClockComparison,
+} from '../../core/util/vector-clock';
 import { isMultiEntityOperation } from '../util/get-op-entity-ids.util';
 import {
   isAdditiveTimeOp,
@@ -28,6 +32,7 @@ import {
   NOISE_FIELDS,
   sideNonNoiseKeys,
   SYNC_TIME_SPENT_FIELDS,
+  writesNoTaskTime,
 } from './conflict-disjoint-merge.util';
 
 /**
@@ -320,6 +325,49 @@ export const keptLocalTimeDeltas = (
   }
   return { opIds, clockToDominate };
 };
+
+/**
+ * Remote-win conflicts whose local time deltas survive the win, each narrowed
+ * to those deltas for `keptLocalTimeDeltas` (decision 7, D10, #10378). Every
+ * op of a TASK conflict is a `syncTimeSpent` delta or writes no time field
+ * (`writesNoTaskTime`), so the winner leaves the deltas' time as it is: they
+ * stay pending and move past the winner, while the side's other ops lose as
+ * before. A delta a remote op's clock covers loses too: the remote device
+ * had seen it, so it was delivered and counts once already (a lost upload
+ * response; keeping it would re-send it with a rebased clock, which the
+ * server rejects as INVALID_OP_ID with a sync error). A clock can also cover
+ * a delta by inherited knowledge only (D10 refined, case 3); no trace has
+ * shown that losing time, since a concurrent op of the same crossing keeps
+ * the delta (time-delta-kept-beside-timeless-winner.integration.spec.ts).
+ * Rows and other time writers keep whole-entity LWW.
+ */
+export const timeDeltasSurvivingRemoteWins = (
+  resolutions: { conflict: EntityConflict; winner: 'local' | 'remote' }[],
+  payloadKey: string,
+): EntityConflict[] =>
+  resolutions.flatMap(({ conflict, winner }) => {
+    const { entityId, localOps, remoteOps } = conflict;
+    const isTimeless = (op: Operation): boolean =>
+      isSyncTimeSpentOp(op) || writesNoTaskTime(op, payloadKey, entityId);
+    if (
+      winner !== 'remote' ||
+      conflict.entityType !== 'TASK' ||
+      remoteOps.length === 0 ||
+      ![...localOps, ...remoteOps].every(isTimeless)
+    ) {
+      return [];
+    }
+    const deltas = localOps.filter(
+      (op) =>
+        isSyncTimeSpentOp(op) &&
+        remoteOps.every(
+          (remote) =>
+            compareVectorClocks(op.vectorClock, remote.vectorClock) ===
+            VectorClockComparison.CONCURRENT,
+        ),
+    );
+    return deltas.length > 0 ? [{ ...conflict, localOps: deltas }] : [];
+  });
 
 /**
  * Moves the pending kept deltas past the remote sides' clocks in place (id,
