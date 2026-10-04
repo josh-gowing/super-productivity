@@ -12,6 +12,7 @@ import { OperationLogStoreService } from '../persistence/operation-log-store.ser
 import { SnackService } from '../../core/snack/snack.service';
 import { BannerService } from '../../core/banner/banner.service';
 import { BannerId } from '../../core/banner/banner.model';
+import { T } from '../../t.const';
 import { ValidateStateService } from '../validation/validate-state.service';
 import { of } from 'rxjs';
 import {
@@ -679,13 +680,17 @@ describe('ConflictResolutionService', () => {
         return openBannerSpy;
       };
 
-      it('preserves the content-loss warning without a review action', async () => {
+      it('preserves the content-loss warning with only a confirming OK button', async () => {
         const openBannerSpy = await openContentBanner();
 
         const banner = openBannerSpy.calls.mostRecent().args[0];
         expect(banner.id).toBe(BannerId.SyncConflictContentResolved);
-        // Message + built-in dismiss = exactly the released v18.14.0 banner.
-        expect(banner.action).toBeUndefined();
+        // #10481: the shared G.DISMISS label reads as "reject" in some locales,
+        // so the banner shows a single "OK" that only closes it.
+        expect(banner.isHideDismissBtn).toBe(true);
+        expect(banner.action?.label).toBe(T.G.OK);
+        expect(banner.action2).toBeUndefined();
+        expect(banner.isKeepVisibleAfterAction).toBeFalsy();
       });
     });
 

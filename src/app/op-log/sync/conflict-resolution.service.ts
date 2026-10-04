@@ -1946,8 +1946,11 @@ export class ConflictResolutionService {
 
   /**
    * Shows a dismissible banner naming the tasks whose edits diverged and were
-   * auto-resolved by keeping the most recent version. Uses the banner's built-in
-   * dismiss button — no custom action needed.
+   * auto-resolved by keeping the most recent version. The only button is a
+   * confirming "OK" instead of the built-in dismiss: the shared `G.DISMISS`
+   * label reads as "reject" in some locales (e.g. ru "Отклонить"), suggesting
+   * the click undoes the resolution (#10481). Clicking only closes the banner;
+   * the resolved data stays as is.
    *
    * Titles are user content escaped before display: the banner renders via
    * `[innerHTML]` and titles come from synced remote data, so Angular's own
@@ -1972,6 +1975,12 @@ export class ConflictResolutionService {
       ico: 'sync_problem',
       msg: T.F.SYNC.B.CONTENT_CONFLICT_RESOLVED,
       translateParams: { taskList },
+      isHideDismissBtn: true,
+      action: {
+        label: T.G.OK,
+        // The banner component dismisses before calling fn; nothing else to do.
+        fn: () => {},
+      },
     });
   }
 
