@@ -82,6 +82,7 @@ import {
 } from './operation-log-store-rows';
 import { LockService } from '../sync/lock.service';
 import { rebaseLocalClockOnDurable } from './operation-log-clock.util';
+import { acknowledgeOperations } from './acknowledge-operations.util';
 
 export interface MixedSourceOperationBatch {
   ops: readonly Operation[];
@@ -1297,9 +1298,9 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
   /**
    * Moves pending local ops past `clockToDominate` IN PLACE, in seq order: id, seq
-   * and payload stay, so an additive `syncTimeSpent` replays once. Only for ops the
-   * server never stored; caller holds OPERATION_LOG. Rebases nothing if a row is no
-   * longer a pending op of this client (e.g. another tab synced it).
+   * and payload stay, so an additive `syncTimeSpent` replays once. Only for unstored
+   * ops or receipt-recoverable SuperSync deltas; caller holds OPERATION_LOG. No-op if
+   * any row is no longer pending for this client (e.g. another tab synced it).
    */
   async rebasePendingLocalOps(
     opIds: readonly string[],
@@ -1805,18 +1806,14 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
     return new Set(this._appliedOpIdsCache);
   }
 
-  async markSynced(seqs: number[]): Promise<void> {
+  async markSynced(
+    seqs: number[],
+    originals?: ReadonlyMap<string, Operation>,
+  ): Promise<void> {
     await this._ensureInit();
-    const now = Date.now();
-    await this._adapter.transaction([STORE_NAMES.OPS], 'readwrite', async (tx) => {
-      for (const seq of seqs) {
-        const entry = await tx.get<StoredOperationLogEntry>(STORE_NAMES.OPS, seq);
-        if (entry) {
-          entry.syncedAt = now;
-          await tx.put(STORE_NAMES.OPS, entry);
-        }
-      }
-    });
+    await this._adapter.transaction([STORE_NAMES.OPS], 'readwrite', (tx) =>
+      acknowledgeOperations(tx, seqs, originals),
+    );
     this._invalidateUnsyncedCache();
   }
 

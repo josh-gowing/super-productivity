@@ -3,10 +3,11 @@ import {
   buildSurvivingFieldPatches,
   isFieldPatchEligible,
   keptLocalTimeDeltas,
-  localWinningFieldGroups,
   rebaseKeptTimeDeltas,
+  localWinningFieldGroups,
   supersededPatchFields,
   survivingLocalFields,
+  timeDeltasSurvivingLww,
   timeDeltasSurvivingRemoteWins,
 } from './conflict-field-patch.util';
 import {
@@ -324,7 +325,7 @@ describe('conflict-field-patch.util', () => {
     });
   });
 
-  describe('keptLocalTimeDeltas / rebaseKeptTimeDeltas', () => {
+  describe('keptLocalTimeDeltas', () => {
     const conflict: EntityConflict = {
       entityType: 'TASK' as EntityType,
       entityId: 'task-1',
@@ -336,43 +337,86 @@ describe('conflict-field-patch.util', () => {
       suggestedResolution: 'manual',
     };
 
-    it('keeps only the local deltas and dominates every remote op', () => {
+    it('keeps only the local deltas', () => {
       const kept = keptLocalTimeDeltas([conflict]);
       expect([...kept.opIds]).toEqual(['d']);
       expect(kept.clockToDominate).toEqual({ B: 2, C: 1 });
     });
+  });
 
-    it('rebases the pending deltas with the patches after them', async () => {
-      const store = {
-        getOpById: jasmine
-          .createSpy('getOpById')
-          .and.resolveTo({ source: 'local' } as { source: string }),
-        rebasePendingLocalOps: jasmine.createSpy('rebase').and.resolveTo([]),
-      };
-      await rebaseKeptTimeDeltas(store, keptLocalTimeDeltas([conflict]), ['patch']);
-      expect(store.rebasePendingLocalOps).toHaveBeenCalledWith(['d', 'patch'], {
-        B: 2,
-        C: 1,
-      });
+  describe('rebaseKeptTimeDeltas', () => {
+    const kept = {
+      opIds: new Set(['pending', 'synced', 'remote', 'rejected', 'failed', 'missing']),
+      clockToDominate: { B: 2 },
+    };
+    const store = (): jasmine.SpyObj<Parameters<typeof rebaseKeptTimeDeltas>[0]> => ({
+      getOpById: jasmine.createSpy('getOpById').and.callFake(async (id: string) => {
+        const entries: Record<
+          string,
+          {
+            source: string;
+            syncedAt?: number;
+            rejectedAt?: number;
+            reducerRejectedAt?: number;
+          }
+        > = {
+          pending: { source: 'local' },
+          synced: { source: 'local', syncedAt: 0 },
+          remote: { source: 'remote' },
+          rejected: { source: 'local', rejectedAt: 0 },
+          failed: { source: 'local', reducerRejectedAt: 0 },
+        };
+        return entries[id];
+      }),
+      rebasePendingLocalOps: jasmine.createSpy('rebasePendingLocalOps').and.resolveTo([]),
     });
 
-    it('leaves an already-uploaded delta and the patches alone', async () => {
-      const store = {
-        getOpById: jasmine.createSpy('getOpById').and.resolveTo({
-          source: 'local',
-          syncedAt: 1,
-        } as {
-          source: string;
-          syncedAt?: number;
+    it('rebases only active local deltas with fresh successors and returns durable rows', async () => {
+      const persistence = store();
+      const written = [
+        delta({ id: 'pending', vectorClock: { A: 3, B: 2 } }),
+        op({ id: 'successor', vectorClock: { A: 4, B: 2 } }),
+      ];
+      persistence.rebasePendingLocalOps.and.resolveTo(written);
+      const fence = jasmine.createSpy('assertFence').and.callFake(() => {
+        expect(persistence.getOpById).toHaveBeenCalledTimes(6);
+        expect(persistence.rebasePendingLocalOps).not.toHaveBeenCalled();
+      });
+      expect(await rebaseKeptTimeDeltas(persistence, kept, ['successor'], fence)).toBe(
+        written,
+      );
+      expect(persistence.rebasePendingLocalOps).toHaveBeenCalledOnceWith(
+        ['pending', 'successor'],
+        { B: 2 },
+      );
+      expect(fence).toHaveBeenCalledOnceWith('kept time delta rebase');
+    });
+
+    it('does not move successors when no kept delta is pending', async () => {
+      const persistence = store();
+      await rebaseKeptTimeDeltas(
+        persistence,
+        {
+          ...kept,
+          opIds: new Set(['synced', 'remote', 'rejected', 'failed', 'missing']),
+        },
+        ['successor'],
+      );
+      expect(persistence.rebasePendingLocalOps).not.toHaveBeenCalled();
+    });
+
+    it('does not write after the epoch changes during pending reads', async () => {
+      const persistence = store();
+      await expectAsync(
+        rebaseKeptTimeDeltas(persistence, kept, ['successor'], () => {
+          throw new Error('epoch changed');
         }),
-        rebasePendingLocalOps: jasmine.createSpy('rebase').and.resolveTo([]),
-      };
-      await rebaseKeptTimeDeltas(store, keptLocalTimeDeltas([conflict]), ['patch']);
-      expect(store.rebasePendingLocalOps).not.toHaveBeenCalled();
+      ).toBeRejectedWithError('epoch changed');
+      expect(persistence.rebasePendingLocalOps).not.toHaveBeenCalled();
     });
   });
 
-  describe('timeDeltasSurvivingRemoteWins (#10378)', () => {
+  describe('timeDeltasSurvivingLww (#10378)', () => {
     const plan = (over: Partial<Operation> = {}): Operation =>
       op({
         actionType: ActionType.TASK_SHARED_PLAN_FOR_TODAY,
@@ -397,18 +441,58 @@ describe('conflict-field-patch.util', () => {
     ];
     const remotePlan = plan({ id: 'remote-plan', clientId: 'B', vectorClock: { B: 1 } });
     const survivors = (winner: 'local' | 'remote', c: EntityConflict): EntityConflict[] =>
-      timeDeltasSurvivingRemoteWins([{ conflict: c, winner }], 'task');
+      timeDeltasSurvivingLww([{ conflict: c, winner }], 'task');
 
-    it('keeps the local delta beside a winner that writes no time, rebased past it', () => {
+    it('keeps the local delta beside a winner that writes no time', () => {
       const [kept] = survivors('remote', conflict(tick, [remotePlan]));
       expect(kept.localOps.map((o) => o.id)).toEqual(['d']);
       const clocks = keptLocalTimeDeltas([kept]);
       expect([...clocks.opIds]).toEqual(['d']);
-      expect(clocks.clockToDominate).toEqual({ B: 1 });
     });
 
-    it('leaves a local win to its snapshot', () => {
-      expect(survivors('local', conflict(tick, [remotePlan]))).toEqual([]);
+    it('keeps the original delta beside a local non-time snapshot', () => {
+      expect(survivors('local', conflict(tick, [remotePlan]))[0].localOps).toEqual([
+        tick[1],
+      ]);
+    });
+
+    it('rebases only the readable remote-win subset of kept deltas', () => {
+      const c = conflict(tick, [remotePlan]);
+      expect(
+        timeDeltasSurvivingRemoteWins([{ conflict: c, winner: 'remote' }], 'task')[0]
+          .localOps,
+      ).toEqual([tick[1]]);
+      expect(
+        timeDeltasSurvivingRemoteWins([{ conflict: c, winner: 'local' }], 'task'),
+      ).toEqual([]);
+      // The broader protection still keeps this delta beside its local snapshot.
+      expect(survivors('local', c)[0].localOps).toEqual([tick[1]]);
+    });
+
+    it('keeps an opaque timeless winner delta without admitting eager rebasing', () => {
+      const row = op({
+        id: 'row',
+        clientId: 'B',
+        vectorClock: { B: 1 },
+        actionType: '[TASK] LWW Update' as ActionType,
+        payload: {
+          actionPayload: { id: 'task-1', title: 'B' },
+          entityChanges: [],
+          lwwUpdateMode: 'patch',
+        },
+      });
+      const c = conflict(tick, [row]);
+      expect(survivors('remote', c)[0].localOps).toEqual([tick[1]]);
+      expect(
+        timeDeltasSurvivingRemoteWins([{ conflict: c, winner: 'remote' }], 'task'),
+      ).toEqual([]);
+    });
+
+    it('never rebases a delta already covered by a readable winner', () => {
+      const c = conflict(tick, [plan({ vectorClock: { A: 2, B: 1 } })]);
+      expect(
+        timeDeltasSurvivingRemoteWins([{ conflict: c, winner: 'remote' }], 'task'),
+      ).toEqual([]);
     });
 
     // A covering remote op saw the delta: it was delivered and counts once.
